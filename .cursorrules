@@ -1,12 +1,20 @@
-# LiveMask CI/CD Repository - AI Development Rules v3.7
+# LiveMask CI/CD - AI Development Rules v3.7
 
+## Always Start Here (Mandatory Pre-check)
 @docs/ai-rules/v3.7/00-Core-Principles.md
 @docs/ai-rules/v3.7/04-Multi-Repo-Linkage.md
-@docs/ai-rules/v3.7/12-Production-Automation-SLO.md
 @docs/ai-rules/v3.7/13-Multi-Repo-Development.md
+@docs/docs/LiveMask_开发任务清单与里程碑_v3.6.md
 
-# CI/CD Specific Focus
-- All workflows must be idempotent and support dry-run where possible.
-- Changes to deployment must consider impact on Backend, NodeAgent, and App repositories.
-- Always reference TASK-XXXX in commit messages and PRs.
-- Prefer GitHub Actions + reusable workflows from central docs when possible.
+## CI/CD Specific Rules
+@docs/ai-rules/v3.7/12-Production-Automation-SLO.md
+
+## Multi-Window Development
+This window is for **CI/CD and DevOps**.
+Workflow changes must consider impact on all services (Backend, NodeAgent, App, Admin).
+Prefer reusable workflows and keep them maintainable across the organization.
+
+## DoD Self-Check
+- [ ] Linked to TASK-XXXX
+- [ ] Reusable workflow created/updated where possible
+- [ ] Impact on all dependent repositories evaluated
