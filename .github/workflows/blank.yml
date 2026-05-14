@@ -1,0 +1,16 @@
+name: Staging Runner Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on:
+      group: livemask-staging
+      labels: [self-hosted, linux, livemask, docker, staging]
+    steps:
+      - run: |
+          hostname
+          whoami
+          pwd
+          docker --version
