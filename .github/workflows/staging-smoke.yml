@@ -9,9 +9,17 @@ on:
 
 jobs:
   smoke:
-    runs-on: [self-hosted, livemask, staging, docker]
+    runs-on:
+      group: livemask-staging
+      labels: [self-hosted, linux, livemask, docker, staging]
     steps:
       - uses: actions/checkout@v4
+      - name: Show runner
+        run: |
+          hostname
+          whoami
+          docker --version
+          docker compose version
       - name: Start staging
         run: docker compose -f infra/docker-compose.staging.yml up -d
       - name: Smoke

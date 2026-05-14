@@ -1,0 +1,13 @@
+name: livemask-staging
+
+services:
+  smoke-target:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${LIVEMASK_SMOKE_HTTP_PORT:-18080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
