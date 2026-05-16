@@ -1,0 +1,11 @@
+# name	method	path	expected_status	assertions
+# Assertions use semicolon-separated expressions:
+#   json.status=ok
+#   json.db_connected=true
+#   json.config_version>=1
+#   json.config_hash~^sha256:
+#   json.configs.length>=2
+Health API	GET	/api/v1/health	200	json.status=ok;json.db_connected=true;json.redis_connected=true
+Client Config Read	GET	/api/v1/config/client	200	json.config_key=client.remote_config;json.config_version>=1;json.config_hash~^sha256:
+NodeAgent Config Read	GET	/internal/agent/config	200	json.config_key=nodeagent.runtime_config;json.config_version>=1;json.config_hash~^sha256:
+Admin Config List	GET	/admin/api/v1/configs	200	json.configs.length>=2
