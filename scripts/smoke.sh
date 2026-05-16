@@ -141,12 +141,44 @@ fi
 echo ""
 echo "Smoke PASS: config center endpoints OK (client + agent + admin + redis)"
 
+# ── Seed dev admin & clean previous smoke user ───────────────────────────────
+echo ""
+echo "=== Smoke: Seed dev admin ==="
+PG_EXEC="docker compose -f ${COMPOSE_FILE} exec -T postgres psql -U livemask"
+
+# Clean smoke user from any previous run (FK cascade handles user_roles/sessions)
+${PG_EXEC} -c "DELETE FROM users WHERE email='smoke@test.livemask'" 2>/dev/null || true
+
+# Generate bcrypt hash for admin password (cost 12, matches backend)
+ADMIN_HASH=$(${PG_EXEC} -tA -c "SELECT crypt('AdminPass123!', gen_salt('bf', 12))" 2>/dev/null || echo "")
+if [[ -z "${ADMIN_HASH}" ]]; then
+  echo "FAIL: unable to generate admin bcrypt hash"
+  exit 1
+fi
+echo "bcrypt hash: ${ADMIN_HASH}"
+
+# Insert admin user (idempotent)
+${PG_EXEC} -c "INSERT INTO users (email, password_hash, display_name) VALUES ('admin@livemask.dev', '${ADMIN_HASH}', 'Dev Admin') ON CONFLICT (email) DO UPDATE SET password_hash='${ADMIN_HASH}'" 2>/dev/null
+echo "Inserted/updated admin user: admin@livemask.dev"
+
+# Assign admin role
+${PG_EXEC} -c "INSERT INTO user_roles (user_id, role_key, reason) SELECT id, 'admin', 'dev seed by smoke.sh' FROM users WHERE email='admin@livemask.dev' ON CONFLICT DO NOTHING" 2>/dev/null
+echo "Assigned 'admin' role to admin@livemask.dev"
+echo "Smoke PASS: dev admin seeded OK"
+
+# ── Run api-smoke ────────────────────────────────────────────────────────────
 echo ""
 echo "=== Smoke: Auth & RBAC (api-smoke.sh) ==="
 api_smoke_rc=0
 API_BASE_URL="http://127.0.0.1:${BACKEND_HTTP_PORT}" \
   API_WAIT_SECONDS=0 \
   bash "${SCRIPT_DIR}/api-smoke.sh" 2>&1 || api_smoke_rc=$?
+
+# ── Cleanup seeded users (always) ────────────────────────────────────────────
+echo ""
+echo "=== Smoke: Cleanup seeded users ==="
+${PG_EXEC} -c "DELETE FROM users WHERE email IN ('smoke@test.livemask','admin@livemask.dev')" 2>/dev/null || true
+echo "Removed seeded smoke/admin users"
 
 if [[ "${api_smoke_rc:-0}" -ne 0 ]]; then
   echo ""

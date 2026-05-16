@@ -270,9 +270,9 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
   status="$(curl -sS "${curl_args[@]}" "${url}" 2>"${err_file}" || true)"
 
   # ── Check HTTP status ──────────────────────────────────────────────────
+  is_degraded=false
   if [[ "${status}" != "${expected_status}" ]]; then
     alt_ok=false
-    is_degraded=false
     IFS='|' read -r -a status_alternatives <<<"${expected_status}"
     for alt in "${status_alternatives[@]}"; do
       if [[ "${status}" == "${alt}" ]]; then
@@ -298,9 +298,6 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
       case_failed=1
       echo
       continue
-    else
-      degraded_count=$((degraded_count + 1))
-      echo "Status: ${status} (degraded, expected ${expected_status})"
     fi
   fi
 
@@ -311,11 +308,17 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
     echo "(empty body)"
   fi
 
-  # ── Skip detailed assertions for degraded cases ───────────────────────
+  # ── Handle degraded status ────────────────────────────────────────────
+  # (only when matched a non-primary alternative via pipe)
   if [[ "${is_degraded}" == "true" ]]; then
+    degraded_count=$((degraded_count + 1))
+    echo "Status: ${status} (degraded — primary expected ${status_alternatives[0]})"
     echo "PASS (degraded — endpoint not ready)"
     echo
     continue
+  elif [[ "${status}" != "${expected_status}" ]]; then
+    # Matched primary alternative — show status, proceed normally
+    echo "Status: ${status} (primary match)"
   fi
 
   # ── Run assertions ─────────────────────────────────────────────────────

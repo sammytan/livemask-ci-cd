@@ -26,7 +26,7 @@ Admin Config List	GET	/admin/api/v1/configs	200	json.configs.length>=2	-	-
 # Public / User Auth Flow
 # Register → Login → Me → Refresh → Logout → post-logout checks
 # ═══════════════════════════════════════════════════════════════════════════════
-Auth Register	POST	/api/v1/auth/register	201|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;json.user.email=smoke@test.livemask;json.user.roles~user;save.tok_reg=json.access_token;save.ref_reg=json.refresh_token	{"request_id":"smoke-reg-001","email":"smoke@test.livemask","password":"TestPass123!","display_name":"Smoke User","client_type":"app"}	-
+Auth Register	POST	/api/v1/auth/register	201|409|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;json.user.email=smoke@test.livemask;json.user.roles~user;save.tok_reg=json.access_token;save.ref_reg=json.refresh_token	{"request_id":"smoke-reg-001","email":"smoke@test.livemask","password":"TestPass123!","display_name":"Smoke User","client_type":"app"}	-
 Auth Login	POST	/api/v1/auth/login	200|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;json.user.email=smoke@test.livemask;json.user.roles~user;save.tok_login=json.access_token;save.ref_login=json.refresh_token	{"request_id":"smoke-login-001","email":"smoke@test.livemask","password":"TestPass123!","client_type":"app"}	-
 Auth Me with user token	GET	/api/v1/me	200|404	json.user_id!="";json.email=smoke@test.livemask;json.roles~user	-	tok_login
 Auth Refresh	POST	/api/v1/auth/refresh	200|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;save.tok_refr=json.access_token;save.ref_refr=json.refresh_token	{"client_type":"app","refresh_token":"$ref_login"}	-

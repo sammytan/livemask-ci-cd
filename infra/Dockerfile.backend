@@ -1,5 +1,6 @@
 # stage 1: build
-FROM golang:1.22-alpine AS builder
+ARG GO_IMAGE_TAG=1.25-alpine
+FROM golang:${GO_IMAGE_TAG} AS builder
 
 ARG BACKEND_REPO_URL=https://github.com/MyAiDevs/livemask-backend.git
 ARG BACKEND_REF=main
