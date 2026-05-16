@@ -1,0 +1,79 @@
+name: ${LIVEMASK_STACK_NAME:-livemask-runtime}
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    profiles: ["deps"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-livemask}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-livemask}
+      POSTGRES_DB: ${POSTGRES_DB:-livemask}
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-livemask}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - livemask-postgres:/var/lib/postgresql/data
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    profiles: ["deps"]
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - livemask-redis:/data
+
+  backend:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE is required}
+    profiles: ["backend"]
+    restart: unless-stopped
+    environment:
+      PORT: "8080"
+      DB_DSN: ${DB_DSN:?DB_DSN is required}
+      REDIS_ADDR: ${REDIS_ADDR:?REDIS_ADDR is required}
+      VERSION: ${BACKEND_VERSION:-production}
+    ports:
+      - "${LIVEMASK_BACKEND_HTTP_PORT:-18080}:8080"
+
+  admin:
+    image: ${ADMIN_IMAGE:?ADMIN_IMAGE is required}
+    profiles: ["admin"]
+    restart: unless-stopped
+    environment:
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8080}
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "${LIVEMASK_ADMIN_PORT:-3001}:3000"
+
+  nodeagent:
+    image: ${NODEAGENT_IMAGE:?NODEAGENT_IMAGE is required}
+    profiles: ["nodeagent"]
+    restart: unless-stopped
+    environment:
+      BACKEND_CONFIG_URL: ${BACKEND_CONFIG_URL:-http://backend:8080/internal/agent/config}
+      NODE_ID: ${NODE_ID:-node-001}
+      AGENT_VERSION: ${AGENT_VERSION:-production}
+      CONFIG_CACHE_PATH: /var/lib/nodeagent/config-cache.json
+      LISTEN_ADDR: ":9100"
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-60}
+    ports:
+      - "${LIVEMASK_NODEAGENT_PORT:-19090}:9100"
+    volumes:
+      - livemask-nodeagent:/var/lib/nodeagent
+
+volumes:
+  livemask-postgres:
+  livemask-redis:
+  livemask-nodeagent:

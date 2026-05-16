@@ -1,0 +1,106 @@
+name: livemask-local
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-livemask}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-livemask}
+      POSTGRES_DB: ${POSTGRES_DB:-livemask}
+    ports:
+      - "${POSTGRES_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-livemask}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - livemask-local-postgres:/var/lib/postgresql/data
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  backend:
+    image: ${BACKEND_GO_IMAGE:-golang:1.22-alpine}
+    working_dir: /workspace/livemask-backend
+    restart: unless-stopped
+    command: ["sh", "-lc", "${BACKEND_COMMAND:-/usr/local/go/bin/go run .}"]
+    environment:
+      PORT: "8080"
+      DB_DSN: "${DB_DSN:-postgres://${POSTGRES_USER:-livemask}:${POSTGRES_PASSWORD:-livemask}@postgres:5432/${POSTGRES_DB:-livemask}?sslmode=disable}"
+      REDIS_ADDR: "${REDIS_ADDR:-redis:6379}"
+      VERSION: "${BACKEND_VERSION:-dev-local}"
+      GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
+      GOCACHE: /workspace/.cache/go-build
+      GOMODCACHE: /workspace/.cache/go/pkg/mod
+      PATH: /usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    ports:
+      - "${LIVEMASK_BACKEND_HTTP_PORT:-18080}:8080"
+    volumes:
+      - ../../livemask-backend:/workspace/livemask-backend
+      - livemask-local-go-cache:/workspace/.cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  admin:
+    image: ${ADMIN_NODE_IMAGE:-node:22-alpine}
+    profiles: ["admin"]
+    working_dir: /workspace/livemask-admin
+    restart: unless-stopped
+    command: ["sh", "-lc", "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"]
+    environment:
+      BACKEND_INTERNAL_URL: "http://backend:8080"
+      NEXT_TELEMETRY_DISABLED: "1"
+    ports:
+      - "${LIVEMASK_ADMIN_PORT:-3001}:3000"
+    volumes:
+      - ../../livemask-admin:/workspace/livemask-admin
+      - livemask-local-admin-node-modules:/workspace/livemask-admin/node_modules
+    depends_on:
+      - backend
+
+  nodeagent:
+    image: ${NODEAGENT_GO_IMAGE:-golang:1.26-alpine}
+    profiles: ["nodeagent"]
+    working_dir: /workspace/livemask-nodeagent
+    restart: unless-stopped
+    command: ["sh", "-lc", "/usr/local/go/bin/go run ./cmd/nodeagent"]
+    environment:
+      BACKEND_CONFIG_URL: "${BACKEND_CONFIG_URL:-http://backend:8080/internal/agent/config}"
+      NODE_ID: "${NODE_ID:-local-node-001}"
+      AGENT_VERSION: "${AGENT_VERSION:-dev-local}"
+      CONFIG_CACHE_PATH: /workspace/.state/nodeagent-config-cache.json
+      LISTEN_ADDR: ":9100"
+      POLL_INTERVAL_SEC: "${POLL_INTERVAL_SEC:-30}"
+      GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
+      GOCACHE: /workspace/.cache/go-build
+      GOMODCACHE: /workspace/.cache/go/pkg/mod
+      PATH: /usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    ports:
+      - "${LIVEMASK_NODEAGENT_PORT:-19090}:9100"
+    volumes:
+      - ../../livemask-nodeagent:/workspace/livemask-nodeagent
+      - livemask-local-nodeagent-state:/workspace/.state
+      - livemask-local-go-cache:/workspace/.cache
+    depends_on:
+      - backend
+
+volumes:
+  livemask-local-postgres:
+  livemask-local-go-cache:
+  livemask-local-admin-node-modules:
+  livemask-local-nodeagent-state:
