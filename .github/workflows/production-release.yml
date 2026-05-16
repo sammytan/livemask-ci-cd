@@ -1,0 +1,60 @@
+name: Production Release Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: Version tag to validate, for example v0.1.0
+        required: true
+  repository_dispatch:
+    types:
+      - production-release
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  release-gate:
+    env:
+      RELEASE_REF: ${{ github.event.client_payload.ref || inputs.release_ref }}
+      SOURCE_REPO: ${{ github.event.client_payload.source_repo || 'manual' }}
+    runs-on:
+      group: livemask-staging
+      labels: [self-hosted, linux, livemask, docker, staging]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release ref
+        run: |
+          if [[ -z "${RELEASE_REF}" ]]; then
+            echo "release ref is required"
+            exit 1
+          fi
+          if [[ ! "${RELEASE_REF}" =~ ^v[0-9]+[.][0-9]+[.][0-9]+ ]]; then
+            echo "release ref must look like vX.Y.Z, got: ${RELEASE_REF}"
+            exit 1
+          fi
+          echo "Production release gate accepted ${SOURCE_REPO}@${RELEASE_REF}"
+      - name: Production deploy placeholder
+        run: |
+          echo "Production deployment scripts are not enabled yet."
+          echo "This gate records the versioned production intent and notifies Lark."
+
+  notify-lark:
+    needs: [release-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Notify Lark
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LARK_BOT_WEBHOOK: ${{ secrets.LARK_BOT_WEBHOOK }}
+          LARK_BOT_SECRET: ${{ secrets.LARK_BOT_SECRET }}
+          WORKFLOW_RESULT: >-
+            ${{
+              contains(needs.*.result, 'failure') && 'failure'
+              || contains(needs.*.result, 'cancelled') && 'cancelled'
+              || 'success'
+            }}
+        run: bash .github/scripts/lark-notify.sh "$WORKFLOW_RESULT"

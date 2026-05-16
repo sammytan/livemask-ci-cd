@@ -1,12 +1,18 @@
 name: Staging Smoke
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
+    inputs:
+      backend_ref:
+        description: Backend ref to build for staging smoke
+        required: false
+        default: main
   repository_dispatch:
     types:
-      - release-candidate
-      - docs-contract-changed
-      - task-unlocked
+      - staging-promote
 
 permissions:
   actions: read
@@ -14,6 +20,8 @@ permissions:
 
 jobs:
   smoke:
+    env:
+      BACKEND_REF: ${{ github.event.client_payload.ref || inputs.backend_ref || 'main' }}
     runs-on:
       group: livemask-staging
       labels: [self-hosted, linux, livemask, docker, staging]
