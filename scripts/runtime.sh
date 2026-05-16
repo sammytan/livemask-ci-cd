@@ -33,7 +33,7 @@ Options:
   --env-file FILE          Load independent runtime config file.
   --compose FILE           Compose file to use. Defaults to infra/docker-compose.local.yml.
   --mode local|runtime     local=source-mounted containers, runtime=image deployment.
-  --services LIST          Comma-separated: backend,admin,website,app,nodeagent,all.
+  --services LIST          Comma-separated: backend,admin,website,nodeagent,all.
   --no-deps                Do not start internal PostgreSQL/Redis containers.
   --auto-reload            Backend hot reload in local mode.
   --pull                   Pull images before start.
@@ -124,21 +124,15 @@ for service in "${selected_services[@]}"; do
       add_profile backend
       add_profile admin
       add_profile website
-      if [[ "${runtime_mode}" == "local" ]]; then
-        add_profile app
-      fi
       add_profile nodeagent
       service_args+=(backend admin website)
-      if [[ "${runtime_mode}" == "local" ]]; then
-        service_args+=(app)
-      fi
       service_args+=(nodeagent)
       ;;
-    backend|admin|website|app|nodeagent)
-      if [[ "${service}" == "app" && "${runtime_mode}" != "local" ]]; then
-        echo "Service 'app' is only supported in local mode. Use release artifacts for production app distribution." >&2
-        exit 2
-      fi
+    app)
+      echo "Service 'app' is not started by Docker runtime. Use livemask-docs/scripts/local-dev.sh --app to run Flutter locally." >&2
+      exit 2
+      ;;
+    backend|admin|website|nodeagent)
       add_profile "${service}"
       service_args+=("${service}")
       ;;
@@ -195,11 +189,9 @@ case "${command}" in
     echo "Website:"
     curl -fsS -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:${LIVEMASK_WEBSITE_PORT:-3002}/" 2>/dev/null || echo "website unavailable"
     echo
-    if [[ "${runtime_mode}" == "local" ]]; then
-      echo "App web preview:"
-      curl -fsS -o /dev/null -w "HTTP %{http_code}\n" "http://127.0.0.1:${LIVEMASK_APP_WEB_PORT:-3003}/" 2>/dev/null || echo "app web preview unavailable"
-      echo
-    fi
+    echo "App:"
+    echo "managed locally by livemask-app/scripts/local-app.sh, not Docker runtime"
+    echo
     echo "NodeAgent status:"
     curl -fsS "http://127.0.0.1:${LIVEMASK_NODEAGENT_PORT:-19090}/config/status" 2>/dev/null || echo "nodeagent status unavailable"
     echo

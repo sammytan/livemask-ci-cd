@@ -49,9 +49,17 @@ services:
       REDIS_ADDR: "redis:6379"
       VERSION: "${BACKEND_VERSION:-0.0.0}"
       JWT_SECRET: "${JWT_SECRET:-dev-secret-key-do-not-use-in-production-32chr}"
-      # Dev seed admin credentials (optional — backend creates on startup when set)
+      # Dev-only seed users (optional; never set in production)
+      DEV_SEED_USERS: "${DEV_SEED_USERS:-false}"
+      DEV_DEFAULT_PASSWORD: "${DEV_DEFAULT_PASSWORD:-}"
       DEV_ADMIN_EMAIL: "${DEV_ADMIN_EMAIL:-}"
       DEV_ADMIN_PASSWORD: "${DEV_ADMIN_PASSWORD:-}"
+      DEV_SPONSOR_EMAIL: "${DEV_SPONSOR_EMAIL:-}"
+      DEV_SPONSOR_PASSWORD: "${DEV_SPONSOR_PASSWORD:-}"
+      DEV_AMBASSADOR_EMAIL: "${DEV_AMBASSADOR_EMAIL:-}"
+      DEV_AMBASSADOR_PASSWORD: "${DEV_AMBASSADOR_PASSWORD:-}"
+      DEV_SUBSCRIBER_EMAIL: "${DEV_SUBSCRIBER_EMAIL:-}"
+      DEV_SUBSCRIBER_PASSWORD: "${DEV_SUBSCRIBER_PASSWORD:-}"
       DEV_USER_EMAIL: "${DEV_USER_EMAIL:-}"
       DEV_USER_PASSWORD: "${DEV_USER_PASSWORD:-}"
     depends_on:

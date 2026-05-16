@@ -174,11 +174,11 @@ API_BASE_URL="http://127.0.0.1:${BACKEND_HTTP_PORT}" \
   API_WAIT_SECONDS=0 \
   bash "${SCRIPT_DIR}/api-smoke.sh" 2>&1 || api_smoke_rc=$?
 
-# ── Cleanup seeded users (always) ────────────────────────────────────────────
+# ── Cleanup smoke user (always) ──────────────────────────────────────────────
 echo ""
-echo "=== Smoke: Cleanup seeded users ==="
-${PG_EXEC} -c "DELETE FROM users WHERE email IN ('smoke@test.livemask','admin@livemask.dev')" 2>/dev/null || true
-echo "Removed seeded smoke/admin users"
+echo "=== Smoke: Cleanup smoke user ==="
+${PG_EXEC} -c "DELETE FROM users WHERE email='smoke@test.livemask'" 2>/dev/null || true
+echo "Removed smoke@test.livemask"
 
 if [[ "${api_smoke_rc:-0}" -ne 0 ]]; then
   echo ""
