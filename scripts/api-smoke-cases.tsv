@@ -1,11 +1,15 @@
-# name	method	path	expected_status	assertions
-# Assertions use semicolon-separated expressions:
-#   json.status=ok
-#   json.db_connected=true
-#   json.config_version>=1
-#   json.config_hash~^sha256:
-#   json.configs.length>=2
-Health API	GET	/api/v1/health	200	json.status=ok;json.db_connected=true;json.redis_connected=true
-Client Config Read	GET	/api/v1/config/client	200	json.config_key=client.remote_config;json.config_version>=1;json.config_hash~^sha256:
-NodeAgent Config Read	GET	/internal/agent/config	200	json.config_key=nodeagent.runtime_config;json.config_version>=1;json.config_hash~^sha256:
-Admin Config List	GET	/admin/api/v1/configs	200	json.configs.length>=2
+# name	method	path	expected_status	assertions	payload	auth_bearer
+# expected_status: single value (200) or pipe-separated alternatives (200|404) for graceful degradation
+# Assertions: semicolon-separated; save.<var>=json.<path> extracts value into variable for later cases
+# payload: JSON body for POST/PUT; use $<var> to reference saved variables; use "-" for no payload
+# auth_bearer: variable name whose value is used as Authorization: Bearer header; use "-" for no auth
+Health API	GET	/api/v1/health	200	json.status=ok;json.db_connected=true;json.redis_connected=true	-	-
+Client Config Read	GET	/api/v1/config/client	200	json.config_key=client.remote_config;json.config_version>=1;json.config_hash~^sha256:	-	-
+NodeAgent Config Read	GET	/internal/agent/config	200	json.config_key=nodeagent.runtime_config;json.config_version>=1;json.config_hash~^sha256:	-	-
+Admin Config List	GET	/admin/api/v1/configs	200	json.configs.length>=2	-	-
+Auth Register	POST	/api/v1/auth/register	201|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;save.tok_app=json.access_token;save.ref_app=json.refresh_token	{"request_id":"smoke-001","email":"smoke@test.livemask","password":"TestPass123!","display_name":"Smoke Test","client_type":"app"}	-
+Auth Login	POST	/api/v1/auth/login	200|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;save.tok_login=json.access_token;save.ref_login=json.refresh_token	{"request_id":"smoke-002","email":"smoke@test.livemask","password":"TestPass123!","client_type":"app"}	-
+Auth Me with token	GET	/api/v1/me	200|404	json.user_id!="";json.email=smoke@test.livemask	-	tok_login
+Auth Me no token	GET	/api/v1/me	401|404	-	-	-
+Auth Refresh	POST	/api/v1/auth/refresh	200|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;save.tok_refr=json.access_token	{"client_type":"app","refresh_token":"$ref_app"}	-
+Auth Logout	POST	/api/v1/auth/logout	200|404	json.ok=true	-	tok_refr

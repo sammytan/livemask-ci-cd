@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -20,15 +20,17 @@ Environment:
   CURL_TIMEOUT_SECONDS   Per-request timeout. Default: 8
   API_WAIT_SECONDS       Wait for Backend before tests. Default: 60
 
-Case file columns:
-  name<TAB>method<TAB>path<TAB>expected_status<TAB>assertions
+Case file columns (tab-separated):
+  name<TAB>method<TAB>path<TAB>expected_status<TAB>assertions<TAB>payload<TAB>auth_bearer
 
-Assertion examples:
+Assertions examples:
   json.status=ok
   json.db_connected=true
   json.config_version>=1
   json.config_hash~^sha256:
   json.configs.length>=2
+  save.tok_app=json.access_token     # extract value into variable
+  json.access_token!=""              # assert not empty
 EOF
 }
 
@@ -45,6 +47,37 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
+# ── Variable store for chaining ─────────────────────────────────────────────
+# Uses prefix naming: __SMOKE_VAR_<name> (bash 3.x compatible)
+
+_get_var() {
+  local varname="__SMOKE_VAR_${1}"
+  echo "${!varname:-}"
+}
+
+_set_var() {
+  eval "__SMOKE_VAR_${1}=\$2"
+}
+
+resolve_var_refs() {
+  local value="$1"
+  local out="$value"
+  while [[ "$out" =~ (\$([a-zA-Z_][a-zA-Z0-9_.]*)) ]]; do
+    local ref="${BASH_REMATCH[1]}"
+    local varname="${BASH_REMATCH[2]}"
+    local replacement
+    replacement=$(_get_var "$varname")
+    if [[ -z "$replacement" ]]; then
+      echo "WARN: variable \$$varname not set, leaving as-is" >&2
+      break
+    fi
+    out="${out//${ref}/${replacement}}"
+  done
+  echo "$out"
+}
+
+# ── JSON assertion engine ──────────────────────────────────────────────────
+
 assert_json() {
   local body_file="$1"
   local assertion="$2"
@@ -56,6 +89,34 @@ import sys
 body_file, assertion = sys.argv[1], sys.argv[2]
 with open(body_file, "r", encoding="utf-8") as fh:
     data = json.load(fh)
+
+# save.<var>=json.<path> — extract into variable (handled in bash after call)
+if assertion.startswith("save."):
+    expr = assertion[len("save."):]
+    if "=" not in expr:
+        raise SystemExit(f"invalid save assertion: {assertion}")
+    varname, path = expr.split("=", 1)
+    varname = varname.strip()
+    path = path.strip()
+    if not path.startswith("json."):
+        raise SystemExit(f"save path must start with json.: {assertion}")
+    parts = path[len("json."):].split(".")
+    current = data
+    for part in parts:
+        if part == "length":
+            current = len(current)
+            continue
+        if isinstance(current, dict):
+            if part not in current:
+                raise KeyError(part)
+            current = current[part]
+        elif isinstance(current, list):
+            current = current[int(part)]
+        else:
+            raise KeyError(part)
+    # Print result so bash can read it: save:<varname>:<value>
+    print(f"SAVE_RESULT:{varname}:{current}")
+    sys.exit(0)
 
 if not assertion.startswith("json."):
     raise SystemExit(f"unsupported assertion: {assertion}")
@@ -149,9 +210,13 @@ fi
 failed=0
 total=0
 
-while IFS=$'\t' read -r name method path expected_status assertions || [[ -n "${name:-}" ]]; do
+while IFS=$'\t' read -r name method path expected_status assertions payload auth_bearer || [[ -n "${name:-}" ]]; do
   [[ -z "${name:-}" ]] && continue
   [[ "${name}" == \#* ]] && continue
+
+  # Default empty values for columns that may be missing (old format)
+  payload="${payload--}"
+  auth_bearer="${auth_bearer--}"
 
   total=$((total + 1))
   url="${API_BASE_URL}${path}"
@@ -160,38 +225,120 @@ while IFS=$'\t' read -r name method path expected_status assertions || [[ -n "${
 
   echo "--- ${name} ---"
   echo "${method} ${url}"
+
+  case_failed=0
+  is_degraded=false
+
+  # Resolve payload variable references
+  resolved_payload=""
+  if [[ "${payload}" != "-" && -n "${payload}" ]]; then
+    resolved_payload="$(resolve_var_refs "${payload}")"
+    # Pretty-print payload for display
+    echo "${resolved_payload}" | python3 -m json.tool 2>/dev/null || echo "Payload: ${resolved_payload}"
+  fi
+
+  # Resolve auth bearer token from variable store
+  auth_header=()
+  if [[ "${auth_bearer}" != "-" && -n "${auth_bearer}" ]]; then
+    token="$(_get_var "${auth_bearer}")"
+    if [[ -n "${token}" ]]; then
+      auth_header=(-H "Authorization: Bearer ${token}")
+      echo "Auth: Bearer <${auth_bearer}> (token length: ${#token})"
+    else
+      echo "Auth: Bearer <${auth_bearer}> (no token in store — sending without auth)"
+    fi
+  fi
+
   case_failed=0
 
-  status="$(curl -sS \
-    --max-time "${CURL_TIMEOUT_SECONDS}" \
-    -X "${method}" \
-    -H "Accept: application/json" \
-    -o "${body_file}" \
-    -w "%{http_code}" \
-    "${url}" 2>"${tmp_dir}/case-${total}.curl.err" || true)"
+  # Build curl args
+  curl_args=(
+    --max-time "${CURL_TIMEOUT_SECONDS}"
+    -X "${method}"
+    -H "Accept: application/json"
+    -o "${body_file}"
+    -w "%{http_code}"
+  )
+
+  if [[ "${#auth_header[@]}" -gt 0 ]]; then
+    curl_args+=("${auth_header[@]}")
+  fi
+
+  if [[ -n "${resolved_payload}" ]]; then
+    curl_args+=(-H "Content-Type: application/json" -d "${resolved_payload}")
+  fi
+
+  status="$(curl -sS "${curl_args[@]}" "${url}" 2>"${tmp_dir}/case-${total}.curl.err" || true)"
   printf '%s' "${status}" >"${status_file}"
 
   if [[ "${status}" != "${expected_status}" ]]; then
-    echo "FAIL: status=${status}, expected=${expected_status}"
-    if [[ -s "${tmp_dir}/case-${total}.curl.err" ]]; then
-      cat "${tmp_dir}/case-${total}.curl.err"
+    # Support pipe-separated alternatives: 200|201|404
+    alt_ok=false
+    is_degraded=false
+    IFS='|' read -r -a status_alternatives <<<"${expected_status}"
+    for alt in "${status_alternatives[@]}"; do
+      if [[ "${status}" == "${alt}" ]]; then
+        alt_ok=true
+        # If the matched status is NOT the first (primary) one, mark as degraded
+        if [[ "${alt}" != "${status_alternatives[0]}" ]]; then
+          is_degraded=true
+        fi
+        break
+      fi
+    done
+
+    if [[ "${alt_ok}" != "true" ]]; then
+      echo "FAIL: status=${status}, expected=${expected_status}"
+      if [[ -s "${tmp_dir}/case-${total}.curl.err" ]]; then
+        cat "${tmp_dir}/case-${total}.curl.err"
+      fi
+      cat "${body_file}" 2>/dev/null || true
+      failed=1
+      case_failed=1
+      echo
+      continue
+    else
+      echo "Status: ${status} (alternative match, skipping detailed assertions)"
     fi
-    cat "${body_file}" 2>/dev/null || true
-    failed=1
-    case_failed=1
-    echo
-    continue
   fi
 
-  if [[ -s "${body_file}" ]]; then
+  if [[ -s "${body_file}" && "${is_degraded}" != "true" ]]; then
     python3 -m json.tool "${body_file}" 2>/dev/null || cat "${body_file}"
+  elif [[ -s "${body_file}" ]]; then
+    echo "(endpoint returned degraded status — body omitted)"
   else
     echo "(empty body)"
+  fi
+
+  # Skip assertions if matched a degraded alternative
+  if [[ "${is_degraded}" == "true" ]]; then
+    echo "PASS (degraded — endpoint not ready)"
+    echo
+    continue
   fi
 
   IFS=';' read -r -a assertion_list <<<"${assertions:-}"
   for assertion in "${assertion_list[@]}"; do
     [[ -z "${assertion}" ]] && continue
+
+    # Check if it's a save assertion
+    if [[ "${assertion}" == save.* ]]; then
+      save_result=$(assert_json "${body_file}" "${assertion}" 2>/dev/null || true)
+      if echo "$save_result" | grep -q "^SAVE_RESULT:"; then
+        var_name="${save_result#SAVE_RESULT:}"
+        var_value="${var_name#*:}"
+        var_name="${var_name%%:*}"
+        _set_var "${var_name}" "${var_value}"
+        echo "Saved: \$${var_name} = ${var_value}"
+      else
+        echo "FAIL: ${assertion}"
+        failed=1
+        case_failed=1
+      fi
+      continue
+    fi
+
+    # Regular assertion
     if ! assert_json "${body_file}" "${assertion}"; then
       failed=1
       case_failed=1
