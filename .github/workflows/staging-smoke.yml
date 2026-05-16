@@ -6,6 +6,7 @@ on:
     types:
       - release-candidate
       - docs-contract-changed
+      - task-unlocked
 
 permissions:
   actions: read
