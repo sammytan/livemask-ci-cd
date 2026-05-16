@@ -4,6 +4,7 @@
 @docs/ai-rules/v3.7/00-Core-Principles.md
 @docs/ai-rules/v3.7/04-Multi-Repo-Linkage.md
 @docs/ai-rules/v3.7/13-Multi-Repo-Development.md
+@docs/ai-rules/v3.7/16-Task-Completion-Report.md
 @docs/docs/LiveMask_开发任务清单与里程碑_v3.6.md
 
 ## CI/CD Specific Rules
@@ -13,6 +14,12 @@
 This window is for **CI/CD and DevOps**.
 Workflow changes must consider impact on all services (Backend, NodeAgent, App, Admin).
 Prefer reusable workflows and keep them maintainable across the organization.
+
+## Task Completion Report
+When a task or subtask is complete, use the standard completion report from:
+@docs/ai-rules/v3.7/16-Task-Completion-Report.md
+
+The report must explicitly say which other repo windows are unlocked for parallel development and which remain blocked.
 
 ## DoD Self-Check
 - [ ] Linked to TASK-XXXX
