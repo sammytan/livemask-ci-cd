@@ -4,6 +4,7 @@ set -euo pipefail
 COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
 BACKEND_HTTP_PORT="${LIVEMASK_BACKEND_HTTP_PORT:-18080}"
 HEALTH_URL="http://127.0.0.1:${BACKEND_HTTP_PORT}/api/v1/health"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "=== Smoke: Health API ==="
 echo "Target: ${HEALTH_URL}"
@@ -139,3 +140,23 @@ fi
 
 echo ""
 echo "Smoke PASS: config center endpoints OK (client + agent + admin + redis)"
+
+echo ""
+echo "=== Smoke: Auth & RBAC (api-smoke.sh) ==="
+api_smoke_rc=0
+API_BASE_URL="http://127.0.0.1:${BACKEND_HTTP_PORT}" \
+  API_WAIT_SECONDS=0 \
+  bash "${SCRIPT_DIR}/api-smoke.sh" 2>&1 || api_smoke_rc=$?
+
+if [[ "${api_smoke_rc:-0}" -ne 0 ]]; then
+  echo ""
+  echo "=== Auth Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit 1
+fi
+
+echo ""
+echo "Smoke PASS: full stack (health + config center + auth/rbac)"

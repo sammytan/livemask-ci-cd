@@ -1,15 +1,60 @@
 # name	method	path	expected_status	assertions	payload	auth_bearer
-# expected_status: single value (200) or pipe-separated alternatives (200|404) for graceful degradation
-# Assertions: semicolon-separated; save.<var>=json.<path> extracts value into variable for later cases
-# payload: JSON body for POST/PUT; use $<var> to reference saved variables; use "-" for no payload
-# auth_bearer: variable name whose value is used as Authorization: Bearer header; use "-" for no auth
+#
+# Columns (tab-separated):
+#   name, method, path, expected_status, assertions, payload, auth_bearer
+#
+# expected_status: single (200) or pipe-separated (200|404) for degradation
+# assertions: semicolon-separated. Supports:
+#   json.path=value   exact match
+#   json.path!=value  not equal
+#   json.path~pattern regex match
+#   json.path>=N      numeric comparison
+#   save.var=json.path extract value into $var
+#   header.X-Header=value  check response header
+# payload: JSON body for POST; use $var for substitution; "-" for no payload
+# auth_bearer: variable name for Bearer token; "-" for no auth
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Core endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
 Health API	GET	/api/v1/health	200	json.status=ok;json.db_connected=true;json.redis_connected=true	-	-
 Client Config Read	GET	/api/v1/config/client	200	json.config_key=client.remote_config;json.config_version>=1;json.config_hash~^sha256:	-	-
 NodeAgent Config Read	GET	/internal/agent/config	200	json.config_key=nodeagent.runtime_config;json.config_version>=1;json.config_hash~^sha256:	-	-
 Admin Config List	GET	/admin/api/v1/configs	200	json.configs.length>=2	-	-
-Auth Register	POST	/api/v1/auth/register	201|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;save.tok_app=json.access_token;save.ref_app=json.refresh_token	{"request_id":"smoke-001","email":"smoke@test.livemask","password":"TestPass123!","display_name":"Smoke Test","client_type":"app"}	-
-Auth Login	POST	/api/v1/auth/login	200|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;save.tok_login=json.access_token;save.ref_login=json.refresh_token	{"request_id":"smoke-002","email":"smoke@test.livemask","password":"TestPass123!","client_type":"app"}	-
-Auth Me with token	GET	/api/v1/me	200|404	json.user_id!="";json.email=smoke@test.livemask	-	tok_login
-Auth Me no token	GET	/api/v1/me	401|404	-	-	-
-Auth Refresh	POST	/api/v1/auth/refresh	200|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;save.tok_refr=json.access_token	{"client_type":"app","refresh_token":"$ref_app"}	-
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Public / User Auth Flow
+# Register → Login → Me → Refresh → Logout → post-logout checks
+# ═══════════════════════════════════════════════════════════════════════════════
+Auth Register	POST	/api/v1/auth/register	201|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;json.user.email=smoke@test.livemask;json.user.roles~user;save.tok_reg=json.access_token;save.ref_reg=json.refresh_token	{"request_id":"smoke-reg-001","email":"smoke@test.livemask","password":"TestPass123!","display_name":"Smoke User","client_type":"app"}	-
+Auth Login	POST	/api/v1/auth/login	200|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;json.user.email=smoke@test.livemask;json.user.roles~user;save.tok_login=json.access_token;save.ref_login=json.refresh_token	{"request_id":"smoke-login-001","email":"smoke@test.livemask","password":"TestPass123!","client_type":"app"}	-
+Auth Me with user token	GET	/api/v1/me	200|404	json.user_id!="";json.email=smoke@test.livemask;json.roles~user	-	tok_login
+Auth Refresh	POST	/api/v1/auth/refresh	200|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;save.tok_refr=json.access_token;save.ref_refr=json.refresh_token	{"client_type":"app","refresh_token":"$ref_login"}	-
 Auth Logout	POST	/api/v1/auth/logout	200|404	json.ok=true	-	tok_refr
+
+# Post-logout: old refresh token should be revoked (session revoked)
+Auth Reuse revoked refresh	POST	/api/v1/auth/refresh	401|404	json.error.code~AUTH	{"client_type":"app","refresh_token":"$ref_login"}	-
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Unauthorized access checks
+# ═══════════════════════════════════════════════════════════════════════════════
+Me no token	GET	/api/v1/me	401|404	json.error.code=AUTH_INVALID_TOKEN	-	-
+Admin Me no token	GET	/admin/api/v1/auth/me	401|404	json.error.code=AUTH_INVALID_TOKEN	-	-
+Admin Users no token	GET	/admin/api/v1/users	401|404	json.error.code=AUTH_INVALID_TOKEN	-	-
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RBAC: user token on admin-only endpoints → 403 (audience mismatch)
+# ═══════════════════════════════════════════════════════════════════════════════
+Admin Me with user token	GET	/admin/api/v1/auth/me	403|404	json.error.code=AUTH_FORBIDDEN	-	tok_login
+Admin Users with user token	GET	/admin/api/v1/users	403|404	json.error.code=AUTH_FORBIDDEN	-	tok_login
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Admin Auth Flow (requires dev seed admin on backend — gracefully degrades)
+# Backend must read DEV_ADMIN_EMAIL / DEV_ADMIN_PASSWORD and seed on startup.
+# Until then these return 401 (user not found) and degrade gracefully.
+# ═══════════════════════════════════════════════════════════════════════════════
+Admin Login	POST	/admin/api/v1/auth/login	200|401|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60;json.user.roles~admin;save.tok_admin=json.access_token;save.ref_admin=json.refresh_token	{"request_id":"smoke-admin-login","email":"admin@livemask.dev","password":"AdminPass123!","client_type":"admin"}	-
+Admin Me with admin token	GET	/admin/api/v1/auth/me	200|401|403|404	json.user_id!="";json.admin_namespaces.length>=1	-	tok_admin
+Admin Users with admin token	GET	/admin/api/v1/users	200|401|403|404	json.users.length>=1;json.page=1;json.total>=0	-	tok_admin
+Admin Refresh	POST	/admin/api/v1/auth/refresh	200|401|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60	{"client_type":"admin","refresh_token":"$ref_admin"}	-
+Admin Logout	POST	/admin/api/v1/auth/logout	200|401|403|404	json.ok=true	-	tok_admin

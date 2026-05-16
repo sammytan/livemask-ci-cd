@@ -48,6 +48,12 @@ services:
       DB_DSN: "postgres://${POSTGRES_USER:-livemask}:${POSTGRES_PASSWORD:-livemask}@postgres:5432/${POSTGRES_DB:-livemask}?sslmode=disable"
       REDIS_ADDR: "redis:6379"
       VERSION: "${BACKEND_VERSION:-0.0.0}"
+      JWT_SECRET: "${JWT_SECRET:-dev-secret-key-do-not-use-in-production-32chr}"
+      # Dev seed admin credentials (optional — backend creates on startup when set)
+      DEV_ADMIN_EMAIL: "${DEV_ADMIN_EMAIL:-}"
+      DEV_ADMIN_PASSWORD: "${DEV_ADMIN_PASSWORD:-}"
+      DEV_USER_EMAIL: "${DEV_USER_EMAIL:-}"
+      DEV_USER_PASSWORD: "${DEV_USER_PASSWORD:-}"
     depends_on:
       postgres:
         condition: service_healthy

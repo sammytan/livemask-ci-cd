@@ -114,7 +114,6 @@ if assertion.startswith("save."):
             current = current[int(part)]
         else:
             raise KeyError(part)
-    # Print result so bash can read it: save:<varname>:<value>
     print(f"SAVE_RESULT:{varname}:{current}")
     sys.exit(0)
 
@@ -182,9 +181,11 @@ elif op == "<":
     ok = float(actual) < float(expected)
 
 if not ok:
-    raise SystemExit(f"{assertion} failed: actual={actual!r}")
+    raise SystemExit(f"assertion failed: '{assertion}' actual={actual!r}")
 PY
 }
+
+# ── Main run ───────────────────────────────────────────────────────────────
 
 echo "=== LiveMask API Smoke ==="
 echo "Base URL: ${API_BASE_URL}"
@@ -209,21 +210,22 @@ fi
 
 failed=0
 total=0
+degraded_count=0
+pass_count=0
 
 while IFS=$'\t' read -r name method path expected_status assertions payload auth_bearer || [[ -n "${name:-}" ]]; do
   [[ -z "${name:-}" ]] && continue
   [[ "${name}" == \#* ]] && continue
 
-  # Default empty values for columns that may be missing (old format)
   payload="${payload--}"
   auth_bearer="${auth_bearer--}"
 
   total=$((total + 1))
   url="${API_BASE_URL}${path}"
   body_file="${tmp_dir}/case-${total}.json"
-  status_file="${tmp_dir}/case-${total}.status"
+  err_file="${tmp_dir}/case-${total}.curl.err"
 
-  echo "--- ${name} ---"
+  echo "--- [${total}] ${name} ---"
   echo "${method} ${url}"
 
   case_failed=0
@@ -233,7 +235,6 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
   resolved_payload=""
   if [[ "${payload}" != "-" && -n "${payload}" ]]; then
     resolved_payload="$(resolve_var_refs "${payload}")"
-    # Pretty-print payload for display
     echo "${resolved_payload}" | python3 -m json.tool 2>/dev/null || echo "Payload: ${resolved_payload}"
   fi
 
@@ -248,8 +249,6 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
       echo "Auth: Bearer <${auth_bearer}> (no token in store — sending without auth)"
     fi
   fi
-
-  case_failed=0
 
   # Build curl args
   curl_args=(
@@ -268,18 +267,16 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
     curl_args+=(-H "Content-Type: application/json" -d "${resolved_payload}")
   fi
 
-  status="$(curl -sS "${curl_args[@]}" "${url}" 2>"${tmp_dir}/case-${total}.curl.err" || true)"
-  printf '%s' "${status}" >"${status_file}"
+  status="$(curl -sS "${curl_args[@]}" "${url}" 2>"${err_file}" || true)"
 
+  # ── Check HTTP status ──────────────────────────────────────────────────
   if [[ "${status}" != "${expected_status}" ]]; then
-    # Support pipe-separated alternatives: 200|201|404
     alt_ok=false
     is_degraded=false
     IFS='|' read -r -a status_alternatives <<<"${expected_status}"
     for alt in "${status_alternatives[@]}"; do
       if [[ "${status}" == "${alt}" ]]; then
         alt_ok=true
-        # If the matched status is NOT the first (primary) one, mark as degraded
         if [[ "${alt}" != "${status_alternatives[0]}" ]]; then
           is_degraded=true
         fi
@@ -288,40 +285,44 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
     done
 
     if [[ "${alt_ok}" != "true" ]]; then
-      echo "FAIL: status=${status}, expected=${expected_status}"
-      if [[ -s "${tmp_dir}/case-${total}.curl.err" ]]; then
-        cat "${tmp_dir}/case-${total}.curl.err"
+      echo "[TASK-AUTH-001] FAIL: ${name} (HTTP ${status}, expected ${expected_status})"
+      if [[ -s "${err_file}" ]]; then
+        echo "--- curl stderr ---"
+        cat "${err_file}"
       fi
-      cat "${body_file}" 2>/dev/null || true
+      if [[ -s "${body_file}" ]]; then
+        echo "--- response body ---"
+        python3 -m json.tool "${body_file}" 2>/dev/null || cat "${body_file}"
+      fi
       failed=1
       case_failed=1
       echo
       continue
     else
-      echo "Status: ${status} (alternative match, skipping detailed assertions)"
+      degraded_count=$((degraded_count + 1))
+      echo "Status: ${status} (degraded, expected ${expected_status})"
     fi
   fi
 
-  if [[ -s "${body_file}" && "${is_degraded}" != "true" ]]; then
+  # ── Show response body ─────────────────────────────────────────────────
+  if [[ -s "${body_file}" ]]; then
     python3 -m json.tool "${body_file}" 2>/dev/null || cat "${body_file}"
-  elif [[ -s "${body_file}" ]]; then
-    echo "(endpoint returned degraded status — body omitted)"
   else
     echo "(empty body)"
   fi
 
-  # Skip assertions if matched a degraded alternative
+  # ── Skip detailed assertions for degraded cases ───────────────────────
   if [[ "${is_degraded}" == "true" ]]; then
     echo "PASS (degraded — endpoint not ready)"
     echo
     continue
   fi
 
+  # ── Run assertions ─────────────────────────────────────────────────────
   IFS=';' read -r -a assertion_list <<<"${assertions:-}"
   for assertion in "${assertion_list[@]}"; do
     [[ -z "${assertion}" ]] && continue
 
-    # Check if it's a save assertion
     if [[ "${assertion}" == save.* ]]; then
       save_result=$(assert_json "${body_file}" "${assertion}" 2>/dev/null || true)
       if echo "$save_result" | grep -q "^SAVE_RESULT:"; then
@@ -331,21 +332,23 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
         _set_var "${var_name}" "${var_value}"
         echo "Saved: \$${var_name} = ${var_value}"
       else
-        echo "FAIL: ${assertion}"
+        echo "[TASK-AUTH-001] FAIL: ${name} — ${assertion}"
+        echo "assert_json output: ${save_result}"
         failed=1
         case_failed=1
       fi
       continue
     fi
 
-    # Regular assertion
     if ! assert_json "${body_file}" "${assertion}"; then
+      echo "[TASK-AUTH-001] FAIL: ${name} — ${assertion}"
       failed=1
       case_failed=1
     fi
   done
 
   if [[ "${case_failed}" -eq 0 ]]; then
+    pass_count=$((pass_count + 1))
     echo "PASS"
   fi
   echo
@@ -356,14 +359,21 @@ if [[ "${total}" -eq 0 ]]; then
   exit 1
 fi
 
+echo "=== API Smoke Summary ==="
+echo "Total:    ${total}"
+echo "Pass:     ${pass_count}"
+echo "Degraded: ${degraded_count}"
+echo "Failed:   $((total - pass_count - degraded_count))"
+
 if [[ "${failed}" -eq 1 ]]; then
-  echo "API smoke FAILED (${total} cases)."
-  echo
+  echo ""
+  echo "[TASK-AUTH-001] API smoke FAILED."
+  echo ""
   echo "Hint:"
-  echo "  Start backend first, regardless of local process or Docker:"
+  echo "  Start backend first:"
   echo "    cd ${REPO_DIR}"
   echo "    bash scripts/runtime.sh start --mode local --services backend"
-  echo
+  echo ""
   echo "  Or point to another Backend:"
   echo "    API_BASE_URL=http://host:port bash scripts/api-smoke.sh"
   exit 1
