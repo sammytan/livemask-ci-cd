@@ -39,7 +39,7 @@ services:
       dockerfile: Dockerfile.backend
       args:
         BACKEND_REPO_URL: ${BACKEND_REPO_URL:-https://github.com/MyAiDevs/livemask-backend.git}
-        BACKEND_REF: ${BACKEND_REF:-main}
+        BACKEND_REF: ${BACKEND_REF:-dev}
     restart: unless-stopped
     ports:
       - "${LIVEMASK_BACKEND_HTTP_PORT:-18080}:8080"
