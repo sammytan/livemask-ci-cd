@@ -350,4 +350,21 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session)"
+# ── Content System Smoke (TASK-CICD-CONTENT-SEO-001) ─────────────────────
+echo ""
+echo "=== Smoke: Content System (TASK-CICD-CONTENT-SEO-001) ==="
+if bash "${SCRIPT_DIR}/content-smoke.sh" 2>&1; then
+  echo "Content system smoke PASSED."
+else
+  content_rc=$?
+  echo ""
+  echo "=== Content System Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${content_rc}
+fi
+
+echo ""
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system)"

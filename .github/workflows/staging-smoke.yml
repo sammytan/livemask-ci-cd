@@ -43,6 +43,8 @@ jobs:
         run: bash scripts/billing-smoke.sh
       - name: Connect Session full-link smoke (TASK-CICD-CONNECT-001)
         run: bash scripts/connect-smoke.sh
+      - name: Content System full-link smoke (TASK-CICD-CONTENT-SEO-001)
+        run: bash scripts/content-smoke.sh
       - name: Stop staging
         if: always()
         run: docker compose -f infra/docker-compose.staging.yml down --remove-orphans
