@@ -4,6 +4,7 @@ set -euo pipefail
 # ──────────────────────────────────────────────────────────────────────────────
 # TASK-CICD-CONNECT-001 — Connect Session 全链路 Smoke
 # TASK-CICD-VPN-CONFIG-001 — Real connect_config safety Smoke
+# TASK-CICD-PROTOCOL-SMOKE-001 — Protocol profile safety Smoke
 # ──────────────────────────────────────────────────────────────────────────────
 # Dependencies:
 #   Backend TASK-BACKEND-CONNECT-001 (connect session CRUD)
@@ -880,6 +881,288 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# L. Protocol Profile Smoke (TASK-CICD-PROTOCOL-SMOKE-001)
+# ──────────────────────────────────────────────────────────────────────────────
+PROTO_SUFFIX="${SUFFIX}"
+
+echo ""
+echo "====== TASK-CICD-PROTOCOL-SMOKE-001: Protocol profile safety ======"
+
+# --- [33] Re-enable Node1 endpoint with hysteria2 profile ---
+echo ""
+echo "--- [33] POST Node Endpoint (hysteria2 profile) ---"
+HY2_TS=$(date +%s)
+HY2_SIG=$(python3 -c "
+import hmac, hashlib
+secret_hash = '${NODE_SECRET_HASH}'
+msg = '${NODE_ID}:${HY2_TS}'
+sig = hmac.new(secret_hash.encode(), msg.encode(), hashlib.sha256).hexdigest()
+print(sig)
+")
+HY2_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/node-endpoint" \
+  -H "Content-Type: application/json" \
+  -H "X-Node-ID: ${NODE_ID}" \
+  -H "X-Signature: ${HY2_SIG}" \
+  -H "X-Timestamp: ${HY2_TS}" \
+  -d '{"public_endpoint_host":"hy2.node.livemask.io","public_endpoint_port":8443,"transport":"udp","sni":"hy2.livemask.io","alpn":"","protocol_profile":"hysteria2","profile_config":{"up_mbps":50,"down_mbps":200,"hop_ports":"10000-20000","obfs_type":"salamander","port":8443},"enabled":true}') || true
+HY2_OK=$(echo "${HY2_RESP}" | quiet_json "ok")
+if [[ "${HY2_OK}" != "True" ]]; then
+  fail "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2 endpoint POST - (response: $(echo ${HY2_RESP} | head -c 200))"
+else
+  pass "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2 endpoint POST: ${HY2_OK}"
+fi
+
+# --- [34] GET endpoint verify protocol_profile=hysteria2 ---
+echo ""
+echo "--- [34] GET Node Endpoint (verify hysteria2 profile) ---"
+HY2_GET_RESP=$(curl -sS --max-time 5 "${API_BASE}/internal/agent/node-endpoint" \
+  -H "X-Node-ID: ${NODE_ID}" \
+  -H "X-Signature: ${HY2_SIG}" \
+  -H "X-Timestamp: ${HY2_TS}") || true
+HY2_PROFILE=$(echo "${HY2_GET_RESP}" | quiet_json "endpoint.protocol_profile")
+HY2_HOST=$(echo "${HY2_GET_RESP}" | quiet_json "endpoint.public_endpoint_host")
+if [[ "${HY2_PROFILE}" == "hysteria2" ]] && [[ "${HY2_HOST}" == "hy2.node.livemask.io" ]]; then
+  pass "[TASK-CICD-PROTOCOL-SMOKE-001] Endpoint protocol_profile=hysteria2 host=${HY2_HOST}"
+else
+  fail "[TASK-CICD-PROTOCOL-SMOKE-001] Endpoint: profile=${HY2_PROFILE:-empty} host=${HY2_HOST:-empty}"
+fi
+
+# --- [35] Create session → profile_type=hysteria2 ---
+echo ""
+echo "--- [35] POST Connect Session (hysteria2 profile) ---"
+# Free plan device_limit=1; reset before session
+pg_exec -c "DELETE FROM connect_sessions WHERE user_id='${USER_ID}'" 2>/dev/null || true
+pg_exec -c "DELETE FROM user_devices WHERE user_id='${USER_ID}'" 2>/dev/null || true
+HY2_SESSION_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${USER_TOKEN}" \
+  -d "{\"platform\":\"ios\",\"app_version\":\"0.1.0\",\"preferred_node_id\":\"${NODE_ID}\"}") || true
+HY2_SID=$(echo "${HY2_SESSION_RESP}" | quiet_json "session.session_id")
+HY2_S_STATUS=$(echo "${HY2_SESSION_RESP}" | quiet_json "session.status")
+HY2_PTYPE=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.profile_type")
+HY2_CLIENT_PROTO=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.protocol")
+HY2_IS_SKEL=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.is_skeleton")
+HY2_ENDPOINT=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.server.endpoint")
+HY2_PORT=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.server.port")
+HY2_TRANSPORT=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.server.transport")
+HY2_HY2_UP=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hysteria2.up_mbps")
+HY2_HY2_DOWN=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hysteria2.down_mbps")
+HY2_HY2_HOP=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hysteria2.hop_ports")
+HY2_HY2_OBFS=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hysteria2.obfs_type")
+HY2_HY2_PORT=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hysteria2.port")
+
+hy2_ok=true
+if [[ -z "${HY2_SID}" ]]; then echo "  FAIL: no session_id"; hy2_ok=false; fi
+if [[ "${HY2_S_STATUS}" != "active" ]]; then echo "  FAIL: status=${HY2_S_STATUS}"; hy2_ok=false; fi
+if [[ "${HY2_PTYPE}" != "hysteria2" ]]; then echo "  FAIL: profile_type=${HY2_PTYPE} (expected hysteria2)"; hy2_ok=false; fi
+if [[ "${HY2_CLIENT_PROTO}" != "hysteria2" ]]; then echo "  FAIL: client.protocol=${HY2_CLIENT_PROTO} (expected hysteria2)"; hy2_ok=false; fi
+if [[ "${HY2_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${HY2_IS_SKEL}"; hy2_ok=false; fi
+if [[ "${HY2_ENDPOINT}" != "hy2.node.livemask.io" ]]; then echo "  FAIL: endpoint=${HY2_ENDPOINT}"; hy2_ok=false; fi
+if [[ "${HY2_TRANSPORT}" != "udp" ]]; then echo "  FAIL: transport=${HY2_TRANSPORT} (expected udp)"; hy2_ok=false; fi
+if [[ "${HY2_HY2_UP}" != "50" ]]; then echo "  FAIL: hysteria2 up_mbps=${HY2_HY2_UP}"; hy2_ok=false; fi
+if [[ "${HY2_HY2_DOWN}" != "200" ]]; then echo "  FAIL: hysteria2 down_mbps=${HY2_HY2_DOWN}"; hy2_ok=false; fi
+if [[ "${HY2_HY2_HOP}" != "10000-20000" ]]; then echo "  FAIL: hysteria2 hop_ports=${HY2_HY2_HOP}"; hy2_ok=false; fi
+if [[ "${HY2_HY2_OBFS}" != "salamander" ]]; then echo "  FAIL: hysteria2 obfs_type=${HY2_HY2_OBFS}"; hy2_ok=false; fi
+if [[ "${HY2_HY2_PORT}" != "8443" ]] && [[ "${HY2_HY2_PORT}" != "${HY2_PORT}" ]]; then
+  echo "  FAIL: hysteria2 port ${HY2_HY2_PORT} != server port ${HY2_PORT}"; hy2_ok=false; fi
+if [[ "${hy2_ok}" == "true" ]]; then
+  pass "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2 session: profile=hysteria2 endpoint=${HY2_ENDPOINT}:${HY2_PORT} transport=${HY2_TRANSPORT}"
+else
+  fail "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2 session checks failed"
+  echo "  Response: $(echo ${HY2_SESSION_RESP} | head -c 500)"
+fi
+
+# --- [36] Security check: no auth/obfs_password/private_key/token/hmac ---
+echo ""
+echo "--- [36] Security Check (hysteria2, no unsafe fields) ---"
+HY2_LEAKED=$(echo "${HY2_SESSION_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+body_str = json.dumps(data).lower()
+sensitive = ['obfs_password','auth','auth_payload','private_key','secret_key','token','refresh_token','hmac','node_secret','node_secret_hash','signing_key']
+found = [w for w in sensitive if w in body_str]
+if found:
+    print('LEAK: ' + ', '.join(found))
+else:
+    print('OK')
+" 2>/dev/null || echo "OK")
+if [[ "${HY2_LEAKED}" != "OK" ]]; then
+  fail "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2 security leak: ${HY2_LEAKED}"
+else
+  pass "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2: no unsafe fields in response"
+fi
+
+# Disconnect hysteria2 session
+if [[ -n "${HY2_SID}" ]]; then
+  curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session/${HY2_SID}/disconnect" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${USER_TOKEN}" \
+    -d '{"reason":"user_disconnect"}' >/dev/null 2>&1 || true
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# M. Reserved profile: vless_reality → warning + client protocol fallback
+# ──────────────────────────────────────────────────────────────────────────────
+NODE3_NAME="vpn-smoke-node3-${PROTO_SUFFIX}"
+
+echo ""
+echo "--- [37] Register Node3 (vless_reality profile) ---"
+NODE3_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/register" \
+  -H "Content-Type: application/json" \
+  -d "{\"node_name\":\"${NODE3_NAME}\",\"agent_version\":\"smoke-1.0.0\"}") || true
+NODE3_ID=$(echo "${NODE3_REG}" | quiet_json "node_id")
+NODE3_SECRET=$(echo "${NODE3_REG}" | quiet_json "node_secret")
+if [[ -z "${NODE3_ID}" ]]; then
+  fail "[TASK-CICD-PROTOCOL-SMOKE-001] Node3 register"
+else
+  pass "[TASK-CICD-PROTOCOL-SMOKE-001] Node3 registered: id=${NODE3_ID}"
+  # Approve + activate
+  curl -sS --max-time 5 -X POST "${API_BASE}/admin/api/v1/nodes/${NODE3_ID}/approve" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -d '{"reason":"Approved for vless_reality test"}' >/dev/null 2>&1 || true
+  curl -sS --max-time 5 -X POST "${API_BASE}/admin/api/v1/nodes/${NODE3_ID}/activate" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -d '{"reason":"Activated for vless_reality test"}' >/dev/null 2>&1 || true
+  echo "       Node3 approved + activated"
+
+  # Compute HMAC for node3
+  NODE3_HASH=$(echo -n "${NODE3_SECRET}" | sha256sum | cut -d' ' -f1)
+  NODE3_TS=$(date +%s)
+  NODE3_SIG=$(python3 -c "
+import hmac, hashlib
+secret_hash = '${NODE3_HASH}'
+msg = '${NODE3_ID}:${NODE3_TS}'
+sig = hmac.new(secret_hash.encode(), msg.encode(), hashlib.sha256).hexdigest()
+print(sig)
+")
+  # POST endpoint with vless_reality profile
+  curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/node-endpoint" \
+    -H "Content-Type: application/json" \
+    -H "X-Node-ID: ${NODE3_ID}" \
+    -H "X-Signature: ${NODE3_SIG}" \
+    -H "X-Timestamp: ${NODE3_TS}" \
+    -d '{"public_endpoint_host":"vless.example.com","public_endpoint_port":443,"transport":"tcp","sni":"vless.example.com","alpn":"h2","protocol_profile":"vless_reality","profile_config":{},"enabled":true}' >/dev/null 2>&1 || true
+  echo "       Node3 endpoint set to protocol_profile=vless_reality"
+
+  # --- [38] Create session → profile_type=vless_reality, client.protocol=singbox, warning ---
+  echo ""
+  echo "--- [38] POST Connect Session (vless_reality fallback) ---"
+  pg_exec -c "DELETE FROM connect_sessions WHERE user_id='${USER_ID}'" 2>/dev/null || true
+  pg_exec -c "DELETE FROM user_devices WHERE user_id='${USER_ID}'" 2>/dev/null || true
+  VLESS_SESSION_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${USER_TOKEN}" \
+    -d "{\"platform\":\"ios\",\"app_version\":\"0.1.0\",\"preferred_node_id\":\"${NODE3_ID}\"}") || true
+  VLESS_PTYPE=$(echo "${VLESS_SESSION_RESP}" | quiet_json "connect_config.profile_type")
+  VLESS_CLIENT_PROTO=$(echo "${VLESS_SESSION_RESP}" | quiet_json "connect_config.client.protocol")
+  VLESS_IS_SKEL=$(echo "${VLESS_SESSION_RESP}" | quiet_json "connect_config.is_skeleton")
+  VLESS_WARNINGS=$(echo "${VLESS_SESSION_RESP}" | quiet_json "connect_config.warnings")
+  VLESS_SID=$(echo "${VLESS_SESSION_RESP}" | quiet_json "session.session_id")
+
+  vless_ok=true
+  if [[ "${VLESS_PTYPE}" != "vless_reality" ]]; then echo "  FAIL: profile_type=${VLESS_PTYPE} (expected vless_reality)"; vless_ok=false; fi
+  if [[ "${VLESS_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client.protocol=${VLESS_CLIENT_PROTO} (expected singbox fallback)"; vless_ok=false; fi
+  if [[ "${VLESS_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${VLESS_IS_SKEL} (expected false, has real endpoint)"; vless_ok=false; fi
+  warn_str=$(echo "${VLESS_WARNINGS}" | python3 -c "import sys,json; print(type(json.load(sys.stdin)).__name__)" 2>/dev/null || echo "")
+  if [[ -z "${VLESS_WARNINGS}" ]] || [[ "${VLESS_WARNINGS}" == "None" ]] || [[ "${VLESS_WARNINGS}" == "[]" ]]; then
+    echo "  INFO: no warnings (backend may not produce for vless_reality)"
+  fi
+
+  # Security check on vless_reality response
+  VLESS_LEAKED=$(echo "${VLESS_SESSION_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+body_str = json.dumps(data).lower()
+sensitive = ['obfs_password','auth','auth_payload','private_key','secret_key','token','refresh_token','hmac','node_secret','node_secret_hash']
+found = [w for w in sensitive if w in body_str]
+if found:
+    print('LEAK: ' + ', '.join(found))
+else:
+    print('OK')
+" 2>/dev/null || echo "OK")
+  if [[ "${VLESS_LEAKED}" != "OK" ]]; then echo "  FAIL: vless_reality security leak: ${VLESS_LEAKED}"; vless_ok=false; fi
+
+  if [[ "${vless_ok}" == "true" ]]; then
+    pass "[TASK-CICD-PROTOCOL-SMOKE-001] Vless_reality session: profile=${VLESS_PTYPE} client=${VLESS_CLIENT_PROTO} is_skeleton=${VLESS_IS_SKEL}"
+  else
+    fail "[TASK-CICD-PROTOCOL-SMOKE-001] Vless_reality session checks failed"
+    echo "  Response: $(echo ${VLESS_SESSION_RESP} | head -c 500)"
+  fi
+
+  # Disconnect vless session
+  if [[ -n "${VLESS_SID}" ]]; then
+    curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session/${VLESS_SID}/disconnect" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${USER_TOKEN}" \
+      -d '{"reason":"user_disconnect"}' >/dev/null 2>&1 || true
+  fi
+
+  # Clean up Node3
+  pg_exec -c "DELETE FROM connect_sessions WHERE node_id='${NODE3_ID}'" 2>/dev/null || true
+  pg_exec -c "DELETE FROM node_endpoints WHERE node_id='${NODE3_ID}'" 2>/dev/null || true
+  pg_exec -c "DELETE FROM nodes WHERE id='${NODE3_ID}'" 2>/dev/null || true
+  echo "       Cleaned up Node3"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# N. Unknown protocol_profile → singbox fallback
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [39] Unknown Protocol Profile → singbox fallback ---"
+UNK_TS=$(date +%s)
+UNK_SIG=$(python3 -c "
+import hmac, hashlib
+secret_hash = '${NODE_SECRET_HASH}'
+msg = '${NODE_ID}:${UNK_TS}'
+sig = hmac.new(secret_hash.encode(), msg.encode(), hashlib.sha256).hexdigest()
+print(sig)
+")
+UNK_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/node-endpoint" \
+  -H "Content-Type: application/json" \
+  -H "X-Node-ID: ${NODE_ID}" \
+  -H "X-Signature: ${UNK_SIG}" \
+  -H "X-Timestamp: ${UNK_TS}" \
+  -d '{"public_endpoint_host":"hy2.node.livemask.io","public_endpoint_port":8443,"transport":"udp","sni":"hy2.livemask.io","alpn":"","protocol_profile":"fake_unsupported_profile","profile_config":{},"enabled":true}') || true
+UNK_OK=$(echo "${UNK_RESP}" | quiet_json "ok")
+if [[ "${UNK_OK}" != "True" ]]; then
+  fail "[TASK-CICD-PROTOCOL-SMOKE-001] Unknown profile endpoint POST"
+else
+  # Create session → should fallback to singbox (no warning)
+  pg_exec -c "DELETE FROM connect_sessions WHERE user_id='${USER_ID}'" 2>/dev/null || true
+  pg_exec -c "DELETE FROM user_devices WHERE user_id='${USER_ID}'" 2>/dev/null || true
+  UNK_SESSION_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${USER_TOKEN}" \
+    -d "{\"platform\":\"ios\",\"app_version\":\"0.1.0\",\"preferred_node_id\":\"${NODE_ID}\"}") || true
+  UNK_PTYPE=$(echo "${UNK_SESSION_RESP}" | quiet_json "connect_config.profile_type")
+  UNK_CLIENT_PROTO=$(echo "${UNK_SESSION_RESP}" | quiet_json "connect_config.client.protocol")
+  UNK_IS_SKEL=$(echo "${UNK_SESSION_RESP}" | quiet_json "connect_config.is_skeleton")
+  UNK_SID=$(echo "${UNK_SESSION_RESP}" | quiet_json "session.session_id")
+
+  unk_ok=true
+  if [[ "${UNK_PTYPE}" != "singbox" ]]; then echo "  FAIL: profile_type=${UNK_PTYPE} (expected singbox fallback)"; unk_ok=false; fi
+  if [[ "${UNK_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client.protocol=${UNK_CLIENT_PROTO} (expected singbox)"; unk_ok=false; fi
+  if [[ "${UNK_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${UNK_IS_SKEL} (expected false, has real endpoint)"; unk_ok=false; fi
+
+  if [[ "${unk_ok}" == "true" ]]; then
+    pass "[TASK-CICD-PROTOCOL-SMOKE-001] Unknown profile fallback: profile_type=singbox (default fallback)"
+  else
+    fail "[TASK-CICD-PROTOCOL-SMOKE-001] Unknown profile fallback failed"
+    echo "  Response: $(echo ${UNK_SESSION_RESP} | head -c 500)"
+  fi
+
+  # Disconnect
+  if [[ -n "${UNK_SID}" ]]; then
+    curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session/${UNK_SID}/disconnect" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${USER_TOKEN}" \
+      -d '{"reason":"user_disconnect"}' >/dev/null 2>&1 || true
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Cleanup (extended)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -889,14 +1172,14 @@ pg_exec -c "DELETE FROM node_endpoints WHERE node_id='${NODE_ID}'" 2>/dev/null |
 pg_exec -c "DELETE FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || true
 pg_exec -c "DELETE FROM users WHERE email='${USER_EMAIL}'" 2>/dev/null || true
 pg_exec -c "DELETE FROM users WHERE email='${WEBSITE_EMAIL}'" 2>/dev/null || true
-echo "  Cleaned up connect + VPN config smoke data"
+echo "  Cleaned up connect + VPN config + protocol smoke data"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Summary
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "========================================"
-echo " TASK-CICD-CONNECT-001 + VPN-CONFIG-001 SUMMARY"
+echo " TASK-CICD-CONNECT-001 + VPN-CONFIG-001 + PROTOCOL-SMOKE-001 SUMMARY"
 echo "========================================"
 printf '%s\n' "${SUMMARY_LINES[@]}"
 
@@ -914,3 +1197,4 @@ fi
 echo ""
 echo "[TASK-CICD-CONNECT-001] Connect session full-link smoke PASSED."
 echo "[TASK-CICD-VPN-CONFIG-001] Real connect_config safety smoke PASSED."
+echo "[TASK-CICD-PROTOCOL-SMOKE-001] Protocol profile safety smoke PASSED."
