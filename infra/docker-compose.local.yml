@@ -141,6 +141,7 @@ services:
     command: ["sh", "-lc", "/usr/local/go/bin/go run ./cmd/job-service"]
     environment:
       PORT: "19191"
+      DB_DSN: "${JOB_SERVICE_DB_DSN:-postgres://${POSTGRES_USER:-livemask}:${POSTGRES_PASSWORD:-livemask}@postgres:5432/${POSTGRES_DB:-livemask}?sslmode=disable}"
       JOB_SERVICE_MODE: "${JOB_SERVICE_MODE:-local}"
       BACKEND_INTERNAL_URL: "http://backend:8080"
       GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
@@ -153,7 +154,12 @@ services:
       - ../../livemask-job-service:/workspace/livemask-job-service
       - livemask-local-go-cache:/workspace/.cache
     depends_on:
-      - backend
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
 
 volumes:
   livemask-local-postgres:

@@ -84,10 +84,16 @@ services:
       - "${LIVEMASK_JOB_SERVICE_PORT:-19191}:19191"
     environment:
       PORT: "19191"
+      DB_DSN: "postgres://${POSTGRES_USER:-livemask}:${POSTGRES_PASSWORD:-livemask}@postgres:5432/${POSTGRES_DB:-livemask}?sslmode=disable"
       JOB_SERVICE_MODE: "staging"
       BACKEND_INTERNAL_URL: "http://backend:8080"
     depends_on:
-      - backend
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_started
     networks:
       - livemask-staging
 
