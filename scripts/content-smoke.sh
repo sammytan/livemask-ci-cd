@@ -170,20 +170,15 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [2] User Login ---"
-USER_EMAIL="content-smoke-user@test.livemask"
-USER_PASS="ContentTest123!"
-pg_exec -c "DELETE FROM users WHERE email='${USER_EMAIL}'" 2>/dev/null || true
+# Use dev seed user (must exist — seeded by backend or smoke.sh)
+USER_EMAIL="user@livemask.dev"
+USER_PASS="UserPass123!"
+# Do NOT delete seed user — login directly, do NOT call pg_exec for this user
 
-USER_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/register" \
+USER_LOGIN=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/login" \
   -H "Content-Type: application/json" \
-  -d "{\"request_id\":\"content-smoke-reg\",\"email\":\"${USER_EMAIL}\",\"password\":\"${USER_PASS}\",\"display_name\":\"Content Smoke User\",\"client_type\":\"website\"}") || true
-USER_TOKEN=$(echo "${USER_REG}" | quiet_json "access_token")
-if [[ -z "${USER_TOKEN}" ]]; then
-  USER_LOGIN=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/login" \
-    -H "Content-Type: application/json" \
-    -d "{\"request_id\":\"content-smoke-login\",\"email\":\"${USER_EMAIL}\",\"password\":\"${USER_PASS}\",\"client_type\":\"website\"}") || true
-  USER_TOKEN=$(echo "${USER_LOGIN}" | quiet_json "access_token")
-fi
+  -d "{\"request_id\":\"content-smoke-login\",\"email\":\"${USER_EMAIL}\",\"password\":\"${USER_PASS}\",\"client_type\":\"website\"}") || true
+USER_TOKEN=$(echo "${USER_LOGIN}" | quiet_json "access_token")
 if [[ -z "${USER_TOKEN}" ]]; then
   fail "User login"
 else
@@ -773,7 +768,7 @@ pg_exec -c "DELETE FROM content_items WHERE slug='${INVALID_SLUG}'" 2>/dev/null 
 echo ""
 echo "--- Cleanup ---"
 pg_exec -c "DELETE FROM content_items WHERE slug='${SMOKE_SLUG}' OR slug='${INVALID_SLUG}'" 2>/dev/null || true
-pg_exec -c "DELETE FROM users WHERE email='${USER_EMAIL}'" 2>/dev/null || true
+# Not deleting seed user — user@livemask.dev is a dev seed account
 echo "  Cleaned up content smoke data"
 
 # ──────────────────────────────────────────────────────────────────────────────
