@@ -58,3 +58,42 @@ Admin Me with admin token	GET	/admin/api/v1/auth/me	200|401|403|404	json.user_id
 Admin Users with admin token	GET	/admin/api/v1/users	200|401|403|404	json.users.length>=1;json.page=1;json.total>=0	-	tok_admin
 Admin Refresh	POST	/admin/api/v1/auth/refresh	200|401|404	json.access_token!="";json.refresh_token!="";json.expires_in>=60	{"client_type":"admin","refresh_token":"$ref_admin"}	-
 Admin Logout	POST	/admin/api/v1/auth/logout	200|401|403|404	json.ok=true	-	tok_admin
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GeoIP endpoints (TASK-CICD-GEOIP-001)
+# App manifest — authenticated user
+# ═══════════════════════════════════════════════════════════════════════════════
+GeoIP App Manifest with user token	GET	/api/v1/geoip/manifest	200|404	json.update_available!=	-	tok_login
+GeoIP App Manifest no token	GET	/api/v1/geoip/manifest	401|404	json.error.code~AUTH	-	-
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Admin GeoIP RBAC (requires admin seed)
+# ═══════════════════════════════════════════════════════════════════════════════
+GeoIP Admin Databases List	GET	/admin/api/v1/geoip/databases	200|401|404	json.items.length>=0	-	tok_admin
+GeoIP Admin Databases no token	GET	/admin/api/v1/geoip/databases	401|404	json.error.code~AUTH	-	-
+GeoIP Admin Databases user token	GET	/admin/api/v1/geoip/databases	403|401|404	json.error.code~AUTH	-	tok_login
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GeoIP Credentials endpoints (TASK-CICD-GEOIP-CREDENTIALS-001)
+# Admin only — read
+# ═══════════════════════════════════════════════════════════════════════════════
+GeoIP Cred Sources List admin	GET	/admin/api/v1/geoip/sources	200|401|404	json.sources.length>=0	-	tok_admin
+GeoIP Cred Sources no token	GET	/admin/api/v1/geoip/sources	401|404	json.error.code~AUTH	-	-
+GeoIP Cred Sources user token	GET	/admin/api/v1/geoip/sources	403|401|404	json.error.code~AUTH	-	tok_login
+
+# GeoIP Credentials endpoints — write
+GeoIP Cred Update admin	PUT	/admin/api/v1/geoip/sources/dbip_lite	200|401|403|404	json.ok=true	{"endpoint_url":"https://example.com/geoip/test","license_key":"sk-test-001","api_key":"ak-test-001"}	tok_admin
+GeoIP Cred Update no token	PUT	/admin/api/v1/geoip/sources/dbip_lite	401|404	json.error.code~AUTH	-	-
+GeoIP Cred Update user token	PUT	/admin/api/v1/geoip/sources/dbip_lite	403|401|404	json.error.code~AUTH	-	tok_login
+
+# GeoIP Credentials verify
+GeoIP Cred Verify admin	POST	/admin/api/v1/geoip/sources/dbip_lite/verify	200|401|403|404|405	-	-	tok_admin
+
+# GeoIP Credentials rotate-secret
+GeoIP Cred Rotate admin	POST	/admin/api/v1/geoip/sources/dbip_lite/rotate-secret	200|401|403|404	-	-	tok_admin
+GeoIP Cred Rotate no token	POST	/admin/api/v1/geoip/sources/dbip_lite/rotate-secret	401|404	json.error.code~AUTH	-	-
+GeoIP Cred Rotate user token	POST	/admin/api/v1/geoip/sources/dbip_lite/rotate-secret	403|401|404	json.error.code~AUTH	-	tok_login
+
+# GeoIP Credentials disable/enable
+GeoIP Cred Disable admin	POST	/admin/api/v1/geoip/sources/dbip_lite/disable	200|401|403|404	-	-	tok_admin
+GeoIP Cred Enable admin	POST	/admin/api/v1/geoip/sources/dbip_lite/enable	200|401|403|404	-	-	tok_admin

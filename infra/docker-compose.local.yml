@@ -55,6 +55,8 @@ services:
       DEV_SUBSCRIBER_PASSWORD: "${DEV_SUBSCRIBER_PASSWORD:-SubscriberPass123!}"
       DEV_USER_EMAIL: "${DEV_USER_EMAIL:-user@livemask.dev}"
       DEV_USER_PASSWORD: "${DEV_USER_PASSWORD:-UserPass123!}"
+      # GeoIP credential encryption (dev-only; production uses a real key)
+      GEOIP_CREDENTIAL_ENCRYPTION_KEY: "${GEOIP_CREDENTIAL_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
       GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
       GOCACHE: /workspace/.cache/go-build
       GOMODCACHE: /workspace/.cache/go/pkg/mod
@@ -110,8 +112,10 @@ services:
     restart: unless-stopped
     command: ["sh", "-lc", "/usr/local/go/bin/go run ./cmd/nodeagent"]
     environment:
+      BACKEND_BASE_URL: "${BACKEND_BASE_URL:-http://backend:8080}"
       BACKEND_CONFIG_URL: "${BACKEND_CONFIG_URL:-http://backend:8080/internal/agent/config}"
-      NODE_ID: "${NODE_ID:-local-node-001}"
+      NODE_NAME: "${NODE_NAME:-local-nodeagent}"
+      IDENTITY_PATH: /workspace/.state/identity.json
       AGENT_VERSION: "${AGENT_VERSION:-dev-local}"
       CONFIG_CACHE_PATH: /workspace/.state/nodeagent-config-cache.json
       LISTEN_ADDR: ":9100"

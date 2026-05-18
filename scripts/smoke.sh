@@ -367,4 +367,36 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system)"
+# ── GeoIP Smoke (TASK-CICD-GEOIP-001) ──────────────────────────────────
+echo ""
+echo "=== Smoke: GeoIP System (TASK-CICD-GEOIP-001) ==="
+if bash "${SCRIPT_DIR}/geoip-smoke.sh" 2>&1; then
+  echo "GeoIP system smoke PASSED."
+else
+  geoip_rc=$?
+  echo ""
+  echo "=== GeoIP System Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${geoip_rc}
+fi
+
+echo ""
+echo "=== Smoke: GeoIP Credentials (TASK-CICD-GEOIP-CREDENTIALS-001) ==="
+if bash "${SCRIPT_DIR}/geoip-credentials-smoke.sh" 2>&1; then
+  echo "GeoIP credentials smoke PASSED."
+else
+  cred_rc=$?
+  echo ""
+  echo "=== GeoIP Credentials Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${cred_rc}
+fi
+
+echo ""
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + geoip-credentials)"

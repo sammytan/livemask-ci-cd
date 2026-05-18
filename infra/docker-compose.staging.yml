@@ -62,6 +62,8 @@ services:
       DEV_SUBSCRIBER_PASSWORD: "${DEV_SUBSCRIBER_PASSWORD:-SubscriberPass123!}"
       DEV_USER_EMAIL: "${DEV_USER_EMAIL:-user@livemask.dev}"
       DEV_USER_PASSWORD: "${DEV_USER_PASSWORD:-UserPass123!}"
+      # GeoIP credential encryption (dev-only; production uses a real key)
+      GEOIP_CREDENTIAL_ENCRYPTION_KEY: "${GEOIP_CREDENTIAL_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
     depends_on:
       postgres:
         condition: service_healthy

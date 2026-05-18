@@ -43,6 +43,10 @@ jobs:
         run: bash scripts/billing-smoke.sh
       - name: Connect Session full-link smoke (TASK-CICD-CONNECT-001)
         run: bash scripts/connect-smoke.sh
+      - name: GeoIP full-link smoke (TASK-CICD-GEOIP-001)
+        run: bash scripts/geoip-smoke.sh
+      - name: GeoIP Credentials smoke (TASK-CICD-GEOIP-CREDENTIALS-001)
+        run: bash scripts/geoip-credentials-smoke.sh
       - name: Stop staging
         if: always()
         run: docker compose -f infra/docker-compose.staging.yml down --remove-orphans
