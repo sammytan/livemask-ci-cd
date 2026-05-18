@@ -6,7 +6,7 @@ ARG JOB_SERVICE_REF=dev
 RUN apk add --no-cache git ca-certificates
 WORKDIR /src
 RUN git clone --depth 1 --branch "${JOB_SERVICE_REF}" "${JOB_SERVICE_REPO_URL}" .
-RUN go build -o /out/job-service ./cmd/job-service
+RUN go build -tags sqlstore -o /out/job-service ./cmd/job-service
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates

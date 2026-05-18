@@ -138,7 +138,7 @@ services:
     profiles: ["job-service"]
     working_dir: /workspace/livemask-job-service
     restart: unless-stopped
-    command: ["sh", "-lc", "/usr/local/go/bin/go run ./cmd/job-service"]
+    command: ["sh", "-lc", "/usr/local/go/bin/go run -tags sqlstore ./cmd/job-service"]
     environment:
       JOB_SERVICE_CONFIG: "/workspace/livemask-job-service/configs/job-service.local.json"
       PORT: "19191"
