@@ -83,9 +83,13 @@ services:
     ports:
       - "${LIVEMASK_JOB_SERVICE_PORT:-19191}:19191"
     environment:
+      JOB_SERVICE_CONFIG: "/etc/livemask/job-service.json"
       PORT: "19191"
       DB_DSN: "postgres://${POSTGRES_USER:-livemask}:${POSTGRES_PASSWORD:-livemask}@postgres:5432/${POSTGRES_DB:-livemask}?sslmode=disable"
       JOB_SERVICE_MODE: "staging"
+      REDIS_ADDR: "redis:6379"
+      JOB_SERVICE_REDIS_ENABLED: "true"
+      JOB_SERVICE_INTERNAL_AUTH_ENABLED: "${JOB_SERVICE_INTERNAL_AUTH_ENABLED:-false}"
       BACKEND_INTERNAL_URL: "http://backend:8080"
     depends_on:
       postgres:

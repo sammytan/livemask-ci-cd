@@ -140,9 +140,13 @@ services:
     restart: unless-stopped
     command: ["sh", "-lc", "/usr/local/go/bin/go run ./cmd/job-service"]
     environment:
+      JOB_SERVICE_CONFIG: "/workspace/livemask-job-service/configs/job-service.local.json"
       PORT: "19191"
       DB_DSN: "${JOB_SERVICE_DB_DSN:-postgres://${POSTGRES_USER:-livemask}:${POSTGRES_PASSWORD:-livemask}@postgres:5432/${POSTGRES_DB:-livemask}?sslmode=disable}"
       JOB_SERVICE_MODE: "${JOB_SERVICE_MODE:-local}"
+      REDIS_ADDR: "redis:6379"
+      JOB_SERVICE_REDIS_ENABLED: "true"
+      JOB_SERVICE_INTERNAL_AUTH_ENABLED: "${JOB_SERVICE_INTERNAL_AUTH_ENABLED:-false}"
       BACKEND_INTERNAL_URL: "http://backend:8080"
       GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
       GOCACHE: /workspace/.cache/go-build

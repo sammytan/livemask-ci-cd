@@ -11,6 +11,8 @@ RUN go build -o /out/job-service ./cmd/job-service
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /out/job-service /usr/local/bin/job-service
+COPY --from=builder /src/configs/job-service.example.json /etc/livemask/job-service.json
 ENV PORT=19191
+ENV JOB_SERVICE_CONFIG=/etc/livemask/job-service.json
 EXPOSE 19191
 ENTRYPOINT ["/usr/local/bin/job-service"]
