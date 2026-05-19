@@ -67,6 +67,19 @@ Keep workflow defaults and compose build refs on `dev`. If a workflow accepts a
 ref input, it must reject anything other than `dev` unless it is a production
 release gate validating a `v*` tag.
 
+## Docs Sync Boundary
+
+This repository must not edit `../livemask-docs` directly.
+
+After completing a TASK, produce a completion report only. The report must include
+the TASK ID, task branch commit, dev merge commit, remote dev ref, validation
+commands/results, and remaining blockers.
+
+Do not update `livemask-docs` from this repo. Do not run task-sync to close or
+update documentation state from this repo. The `livemask-docs` window owns
+updates to the MVP plan, task index, task files, cursor handoffs, and contract
+indexes.
+
 ## Local Dev Runtime Permanent Rule
 1. `scripts/local-dev.sh` manages the long-lived local development environment.
 2. After any task, keep the local dev runtime running by default.
@@ -91,8 +104,6 @@ When a task or subtask is complete, use the standard completion report from:
 @../livemask-docs/ai-rules/v3.7/16-Task-Completion-Report.md
 
 The report must explicitly say which other repo windows are unlocked for parallel development and which remain blocked.
-
-After a meaningful completion, run task sync from `livemask-docs` with `gh workflow run task-sync.yml --repo MyAiDevs/livemask-docs --ref dev`.
 
 ## DoD Self-Check
 - [ ] Linked to TASK-XXXX
