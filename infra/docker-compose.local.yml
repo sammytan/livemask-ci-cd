@@ -86,6 +86,7 @@ services:
     volumes:
       - ../../livemask-admin:/workspace/livemask-admin
       - livemask-local-admin-node-modules:/workspace/livemask-admin/node_modules
+      - livemask-local-admin-next:/workspace/livemask-admin/.next
     depends_on:
       - backend
 
@@ -169,5 +170,6 @@ volumes:
   livemask-local-postgres:
   livemask-local-go-cache:
   livemask-local-admin-node-modules:
+  livemask-local-admin-next:
   livemask-local-website-node-modules:
   livemask-local-nodeagent-state:

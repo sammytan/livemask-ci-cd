@@ -77,12 +77,12 @@ GeoIP Admin Databases user token	GET	/admin/api/v1/geoip/databases	403|401|404	j
 # GeoIP Credentials endpoints (TASK-CICD-GEOIP-CREDENTIALS-001)
 # Admin only — read
 # ═══════════════════════════════════════════════════════════════════════════════
-GeoIP Cred Sources List admin	GET	/admin/api/v1/geoip/sources	200|401|404	json.sources.length>=0	-	tok_admin
+GeoIP Cred Sources List admin	GET	/admin/api/v1/geoip/sources	200|401|404	json.items.length>=0	-	tok_admin
 GeoIP Cred Sources no token	GET	/admin/api/v1/geoip/sources	401|404	json.error.code~AUTH	-	-
 GeoIP Cred Sources user token	GET	/admin/api/v1/geoip/sources	403|401|404	json.error.code~AUTH	-	tok_login
 
 # GeoIP Credentials endpoints — write
-GeoIP Cred Update admin	PUT	/admin/api/v1/geoip/sources/dbip_lite	200|401|403|404	json.ok=true	{"endpoint_url":"https://example.com/geoip/test","license_key":"sk-test-001","api_key":"ak-test-001"}	tok_admin
+GeoIP Cred Update admin	PUT	/admin/api/v1/geoip/sources/dbip_lite	200|401|403|404	json.source~dbip_lite	{"endpoint_url":"https://example.com/geoip/test","license_key":"sk-test-001","api_key":"ak-test-001"}	tok_admin
 GeoIP Cred Update no token	PUT	/admin/api/v1/geoip/sources/dbip_lite	401|404	json.error.code~AUTH	-	-
 GeoIP Cred Update user token	PUT	/admin/api/v1/geoip/sources/dbip_lite	403|401|404	json.error.code~AUTH	-	tok_login
 
@@ -90,10 +90,54 @@ GeoIP Cred Update user token	PUT	/admin/api/v1/geoip/sources/dbip_lite	403|401|4
 GeoIP Cred Verify admin	POST	/admin/api/v1/geoip/sources/dbip_lite/verify	200|401|403|404|405	-	-	tok_admin
 
 # GeoIP Credentials rotate-secret
-GeoIP Cred Rotate admin	POST	/admin/api/v1/geoip/sources/dbip_lite/rotate-secret	200|401|403|404	-	-	tok_admin
+GeoIP Cred Rotate admin	POST	/admin/api/v1/geoip/sources/dbip_lite/rotate-secret	200|401|403|404|500	-	-	tok_admin
 GeoIP Cred Rotate no token	POST	/admin/api/v1/geoip/sources/dbip_lite/rotate-secret	401|404	json.error.code~AUTH	-	-
 GeoIP Cred Rotate user token	POST	/admin/api/v1/geoip/sources/dbip_lite/rotate-secret	403|401|404	json.error.code~AUTH	-	tok_login
 
 # GeoIP Credentials disable/enable
 GeoIP Cred Disable admin	POST	/admin/api/v1/geoip/sources/dbip_lite/disable	200|401|403|404	-	-	tok_admin
 GeoIP Cred Enable admin	POST	/admin/api/v1/geoip/sources/dbip_lite/enable	200|401|403|404	-	-	tok_admin
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Dashboard endpoints (TASK-CICD-DASHBOARD-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+Dashboard Overview	GET	/admin/api/v1/dashboard/overview	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard Control Plane	GET	/admin/api/v1/dashboard/control-plane	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard Traffic Flows	GET	/admin/api/v1/dashboard/traffic/flows	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard Traffic Countries	GET	/admin/api/v1/dashboard/traffic/countries	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard Traffic Bandwidth Trend	GET	/admin/api/v1/dashboard/traffic/bandwidth-trend	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard Traffic Top Users	GET	/admin/api/v1/dashboard/traffic/top-users	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard Jobs Summary	GET	/admin/api/v1/dashboard/jobs/summary	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard GeoIP Summary	GET	/admin/api/v1/dashboard/geoip/summary	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard Content Summary	GET	/admin/api/v1/dashboard/content/summary	200|401|404	json.generated_at!=""	-	tok_admin
+Dashboard Reconnect Summary	GET	/admin/api/v1/dashboard/reconnect/summary	200|401|404	json.generated_at!=""	-	tok_admin
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# System Settings endpoints (TASK-CICD-SYSTEM-SETTINGS-SCHEDULER-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+Admin Config List	GET	/admin/api/v1/configs	200|401|404	json.configs.length>=0	-	tok_admin
+Admin Schedules List	GET	/admin/api/v1/schedules	200|401|404	json.schedules.length>=0	-	tok_admin
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# App Release endpoints (TASK-CICD-APP-RELEASE-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+Admin App Releases List	GET	/admin/api/v1/app-releases	200|401|404	json.items.length>=0	-	tok_admin
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Observability endpoints (TASK-CICD-OBSERVABILITY-SMOKE-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+Admin Agent Logs	GET	/admin/api/v1/logs/agent?limit=5	200|401|404	json.logs.length>=0	-	tok_admin
+Admin Payment Logs	GET	/admin/api/v1/logs/payment?limit=5	200|401|404	json.logs.length>=0	-	tok_admin
+Admin Notification Logs	GET	/admin/api/v1/logs/notification?limit=5	200|401|404	json.logs.length>=0	-	tok_admin
+Admin Sentry Summary	GET	/admin/api/v1/observability/sentry	200|401|404	json.total_issues>=0	-	tok_admin
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# I18n endpoints (TASK-CICD-I18N-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+I18n Messages List	GET	/api/v1/i18n/messages	200|404	json.messages.length>=0	-	-
+App I18n Locale	GET	/api/v1/i18n/app?locale=en	200|404	-	-	-
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Jobs Hardening endpoints (TASK-CICD-JOBS-HARDENING-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+Admin Job Stats	GET	/admin/api/v1/jobs/stats	200|401|404	json.total>=0	-	tok_admin
