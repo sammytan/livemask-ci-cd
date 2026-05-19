@@ -325,6 +325,7 @@ while IFS=$'\t' read -r name method path expected_status assertions payload auth
   IFS=';' read -r -a assertion_list <<<"${assertions:-}"
   for assertion in "${assertion_list[@]}"; do
     [[ -z "${assertion}" ]] && continue
+    [[ "${assertion}" == "-" ]] && continue
 
     if [[ "${assertion}" == save.* ]]; then
       save_result=$(assert_json "${body_file}" "${assertion}" 2>/dev/null || true)

@@ -49,6 +49,28 @@ jobs:
         run: bash scripts/geoip-credentials-smoke.sh
       - name: Job Service smoke (TASK-CICD-JOBS-001)
         run: bash scripts/jobs-smoke.sh
+      - name: Admin Dashboard smoke (TASK-CICD-DASHBOARD-REALTIME-001)
+        run: bash scripts/dashboard-smoke.sh
+      - name: Protocol & Endpoint Template Rollout smoke (TASK-CICD-PROTOCOL-ENDPOINT-ROLLOUT-001)
+        run: bash scripts/protocol-endpoint-smoke.sh
+      - name: Protocol & Endpoint Capability smoke (TASK-CICD-PROTOCOL-CAPABILITY-001)
+        run: bash scripts/protocol-capability-smoke.sh
+      - name: NodeAgent Release smoke (TASK-CICD-NODEAGENT-RELEASE-001)
+        run: bash scripts/nodeagent-release-smoke.sh
+      - name: Website Blog smoke (TASK-CICD-WEBSITE-001)
+        run: bash scripts/website-smoke.sh
+      - name: System Settings & Scheduler smoke (TASK-CICD-SYSTEM-SETTINGS-SCHEDULER-001)
+        run: bash scripts/system-settings-smoke.sh
+      - name: App Release smoke (TASK-CICD-APP-RELEASE-001)
+        run: bash scripts/app-release-smoke.sh
+      - name: Sentry Config smoke (TASK-CICD-SENTRY-CONFIG-SMOKE-001)
+        run: bash scripts/sentry-config-smoke.sh
+      - name: Observability smoke (TASK-CICD-OBSERVABILITY-SMOKE-001)
+        run: bash scripts/observability-smoke.sh
+      - name: I18n smoke (TASK-CICD-I18N-001)
+        run: bash scripts/i18n-smoke.sh
+      - name: Jobs Hardening smoke (TASK-CICD-JOBS-HARDENING-001)
+        run: bash scripts/jobs-hardening-smoke.sh
       - name: Stop staging
         if: always()
         run: docker compose -f infra/docker-compose.staging.yml down --remove-orphans

@@ -39,6 +39,25 @@ Production work must come from a GitHub Release / `v*` tag, not from an ad hoc b
 Workflow changes must consider impact on all services (Backend, NodeAgent, App, Admin).
 Prefer reusable workflows and keep them maintainable across the organization.
 
+## Local Dev Runtime Permanent Rule
+1. `scripts/local-dev.sh` manages the long-lived local development environment.
+2. After any task, keep the local dev runtime running by default.
+3. Do not automatically run:
+   - `docker compose down`
+   - `docker compose stop`
+   - `scripts/local-dev.sh stop`
+   - `scripts/local-dev.sh down`
+   - `kill` for local development processes
+4. Stop/down/cleanup/teardown is allowed only when the user explicitly asks for it.
+5. CI/CD staging smoke may use `up -> smoke -> down` only when it uses an isolated
+   compose project name, container names, network, volumes, and ports, and does not
+   affect the local dev runtime.
+6. If isolation cannot be confirmed, ask the user before stopping anything.
+7. Completion reports must state:
+   - whether the local dev runtime is still running
+   - whether a temporary smoke environment was started
+   - whether the temporary smoke environment was cleaned up
+
 ## Task Completion Report
 When a task or subtask is complete, use the standard completion report from:
 @../livemask-docs/ai-rules/v3.7/16-Task-Completion-Report.md

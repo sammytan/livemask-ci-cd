@@ -399,6 +399,59 @@ else
 fi
 
 echo ""
+# ── Admin Dashboard Smoke (TASK-CICD-DASHBOARD-REALTIME-001) ────────────────
+echo ""
+echo "=== Smoke: Admin Dashboard (TASK-CICD-DASHBOARD-REALTIME-001) ==="
+if bash "${SCRIPT_DIR}/dashboard-smoke.sh" 2>&1; then
+  echo "Admin dashboard smoke PASSED."
+else
+  dashboard_rc=$?
+  echo ""
+  echo "=== Admin Dashboard Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${dashboard_rc}
+fi
+
+echo ""
+# ── Protocol & Endpoint Template Rollout Smoke (TASK-CICD-PROTOCOL-ENDPOINT-ROLLOUT-001) ──
+echo ""
+echo "=== Smoke: Protocol & Endpoint Template Rollout (TASK-CICD-PROTOCOL-ENDPOINT-ROLLOUT-001) ==="
+if bash "${SCRIPT_DIR}/protocol-endpoint-smoke.sh" 2>&1; then
+  echo "Protocol endpoint smoke PASSED."
+else
+  proto_rc=$?
+  echo ""
+  echo "=== Protocol Endpoint Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  echo "--- docker compose logs job-service (last 50) ---"
+  docker compose -f "${COMPOSE_FILE}" logs job-service --tail=50 2>/dev/null || true
+  exit ${proto_rc}
+fi
+
+echo ""
+# ── Protocol & Endpoint Capability Smoke (TASK-CICD-PROTOCOL-CAPABILITY-001) ──
+echo ""
+echo "=== Smoke: Protocol & Endpoint Capability (TASK-CICD-PROTOCOL-CAPABILITY-001) ==="
+if bash "${SCRIPT_DIR}/protocol-capability-smoke.sh" 2>&1; then
+  echo "Protocol capability smoke PASSED."
+else
+  cap_rc=$?
+  echo ""
+  echo "=== Protocol Capability Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${cap_rc}
+fi
+
+echo ""
 echo "=== Smoke: GeoIP Credentials (TASK-CICD-GEOIP-CREDENTIALS-001) ==="
 if bash "${SCRIPT_DIR}/geoip-credentials-smoke.sh" 2>&1; then
   echo "GeoIP credentials smoke PASSED."
@@ -414,4 +467,146 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + geoip-credentials)"
+# ── NodeAgent Release Smoke (TASK-CICD-NODEAGENT-RELEASE-001) ──────────────
+echo ""
+echo "=== Smoke: NodeAgent Release/Check/Rollout (TASK-CICD-NODEAGENT-RELEASE-001) ==="
+if bash "${SCRIPT_DIR}/nodeagent-release-smoke.sh" 2>&1; then
+  echo "NodeAgent release smoke PASSED."
+else
+  release_rc=$?
+  echo ""
+  echo "=== NodeAgent Release Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${release_rc}
+fi
+
+echo ""
+# ── Website Blog Smoke (TASK-CICD-WEBSITE-001) ───────────────────────────
+echo ""
+echo "=== Smoke: Website Blog (TASK-CICD-WEBSITE-001) ==="
+if bash "${SCRIPT_DIR}/website-smoke.sh" 2>&1; then
+  echo "Website blog smoke PASSED."
+else
+  website_rc=$?
+  echo ""
+  echo "=== Website Blog Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  echo "--- docker compose logs website (last 50) ---"
+  docker compose -f "${COMPOSE_FILE}" logs website --tail=50 2>/dev/null || true
+  exit ${website_rc}
+fi
+
+echo ""
+# ── System Settings & Scheduler Smoke (TASK-CICD-SYSTEM-SETTINGS-SCHEDULER-001) ──
+echo ""
+echo "=== Smoke: System Settings & Scheduler (TASK-CICD-SYSTEM-SETTINGS-SCHEDULER-001) ==="
+if bash "${SCRIPT_DIR}/system-settings-smoke.sh" 2>&1; then
+  echo "System settings & scheduler smoke PASSED."
+else
+  sys_rc=$?
+  echo ""
+  echo "=== System Settings & Scheduler Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${sys_rc}
+fi
+
+echo ""
+# ── App Release Smoke (TASK-CICD-APP-RELEASE-001) ──────────────────────
+echo ""
+echo "=== Smoke: App Release (TASK-CICD-APP-RELEASE-001) ==="
+if bash "${SCRIPT_DIR}/app-release-smoke.sh" 2>&1; then
+  echo "App release smoke PASSED."
+else
+  apprel_rc=$?
+  echo ""
+  echo "=== App Release Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  echo "--- docker compose logs website (last 50) ---"
+  docker compose -f "${COMPOSE_FILE}" logs website --tail=50 2>/dev/null || true
+  exit ${apprel_rc}
+fi
+
+echo ""
+# ── Sentry Config Smoke (TASK-CICD-SENTRY-CONFIG-SMOKE-001) ────────────
+echo ""
+echo "=== Smoke: Sentry Config (TASK-CICD-SENTRY-CONFIG-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/sentry-config-smoke.sh" 2>&1; then
+  echo "Sentry config smoke PASSED."
+else
+  sentry_cfg_rc=$?
+  echo ""
+  echo "=== Sentry Config Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${sentry_cfg_rc}
+fi
+
+echo ""
+# ── Observability Smoke (TASK-CICD-OBSERVABILITY-SMOKE-001) ────────────
+echo ""
+echo "=== Smoke: Observability (TASK-CICD-OBSERVABILITY-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/observability-smoke.sh" 2>&1; then
+  echo "Observability smoke PASSED."
+else
+  obs_rc=$?
+  echo ""
+  echo "=== Observability Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${obs_rc}
+fi
+
+echo ""
+# ── I18n Smoke (TASK-CICD-I18N-001) ──────────────────────────────────
+echo ""
+echo "=== Smoke: I18n (TASK-CICD-I18N-001) ==="
+if bash "${SCRIPT_DIR}/i18n-smoke.sh" 2>&1; then
+  echo "I18n smoke PASSED."
+else
+  i18n_rc=$?
+  echo ""
+  echo "=== I18n Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${i18n_rc}
+fi
+
+echo ""
+# ── Jobs Hardening Smoke (TASK-CICD-JOBS-HARDENING-001) ─────────────────
+echo ""
+echo "=== Smoke: Jobs Hardening (TASK-CICD-JOBS-HARDENING-001) ==="
+if bash "${SCRIPT_DIR}/jobs-hardening-smoke.sh" 2>&1; then
+  echo "Jobs hardening smoke PASSED."
+else
+  jbh_rc=$?
+  echo ""
+  echo "=== Jobs Hardening Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  echo "--- docker compose logs job-service (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs job-service --tail=100 2>/dev/null || true
+  exit ${jbh_rc}
+fi
+
+echo ""
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n + jobs-hardening)"
