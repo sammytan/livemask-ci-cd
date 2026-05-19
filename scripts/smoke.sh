@@ -414,4 +414,40 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + geoip-credentials)"
+# ── Growth Revenue & Reward Notification Smoke (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001) ──
+echo ""
+echo "=== Smoke: Growth Revenue & Reward Notification (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001) ==="
+if bash "${SCRIPT_DIR}/growth-revenue-smoke.sh" 2>&1; then
+  echo "Growth revenue & reward notification smoke PASSED."
+else
+  growth_rc=$?
+  echo ""
+  echo "=== Growth Revenue & Reward Notification Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${growth_rc}
+fi
+
+echo ""
+# ── Release Control Smoke (TASK-CICD-RELEASE-CONTROL-SMOKE-001) ──
+echo ""
+echo "=== Smoke: Release Control (TASK-CICD-RELEASE-CONTROL-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/release-control-smoke.sh" 2>&1; then
+  echo "Release control smoke PASSED."
+else
+  relctl_rc=$?
+  echo ""
+  echo "=== Release Control Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  echo "--- docker compose logs website (last 50) ---"
+  docker compose -f "${COMPOSE_FILE}" logs website --tail=50 2>/dev/null || true
+  exit ${relctl_rc}
+fi
+
+echo ""
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + geoip-credentials + growth-revenue + reward-notification + release-control)"
