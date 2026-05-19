@@ -80,6 +80,17 @@ update documentation state from this repo. The `livemask-docs` window owns
 updates to the MVP plan, task index, task files, cursor handoffs, and contract
 indexes.
 
+## Natural Language Task Intake
+
+When the user describes a requirement or bug in plain text, do not edit code
+immediately. First classify the request, infer the primary/affected repos,
+generate a TASK ID, and output a mini task brief.
+
+If this repo is not the inferred primary/affected repo, stop with a repository
+scope block. If it matches, create `task/<TASK-ID>` from latest `origin/dev`,
+implement, validate, merge through `dev-merge-guard.sh`, and output docs handoff
+evidence for `livemask-docs`. Do not create or update docs files from this repo.
+
 ## Local Dev Runtime Permanent Rule
 1. `scripts/local-dev.sh` manages the long-lived local development environment.
 2. After any task, keep the local dev runtime running by default.
