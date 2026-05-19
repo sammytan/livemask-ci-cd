@@ -98,7 +98,7 @@ done
 [[ "${task_branch}" != *","* && "${task_branch}" != *" "* ]] || die "batch branch lists are forbidden; merge one task branch at a time"
 [[ "${task_branch}" != "dev" && "${task_branch}" != "main" ]] || die "refusing to merge protected branch '${task_branch}' as a task branch"
 
-repo="$(cd "${repo}" && pwd)"
+repo="$(cd -- "${repo}" && pwd -P)"
 [[ -d "${repo}/.git" ]] || die "not a git repository: ${repo}"
 
 repo_name="$(basename "${repo}")"
@@ -176,7 +176,7 @@ run_validation() {
   info "validation on ${label}"
   for cmd in "$@"; do
     info "run: ${cmd}"
-    (cd "${repo}" && bash -lc "${cmd}")
+    (cd -- "${repo}" && bash -lc "${cmd}")
   done
 }
 
@@ -231,7 +231,17 @@ info "origin/dev: $(git_in_repo rev-parse --short origin/dev)"
 info "${task_ref}: $(git_in_repo rev-parse --short "${task_ref}")"
 
 if [[ "${dry_run}" == "true" ]]; then
-  info "dry-run PASS: preflight checks completed; no merge performed"
+  cat <<EOF
+DRY-RUN REPORT
+  Repo path (resolved): ${repo}
+  Task branch:         ${task_branch}
+  Task ref:            ${task_ref}
+  Task ID:             ${task_id}
+  Rescue branch:       ${rescue_branch}
+  Integration branch:  ${integration_branch}
+  Push to origin/dev:  ${push_dev}
+Preflight checks PASS; --dry-run set, no merge performed.
+EOF
   exit 0
 fi
 
