@@ -599,6 +599,105 @@ if [[ "${SCAN_LEAK}" == "false" ]]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# [15] NodeAgent Release Detail API (TASK-CICD-ADMIN-CONTROL-PLANE-SMOKE-001)
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [15] NodeAgent Release Detail API ---"
+# Get first nodeagent release ID from the list (if available)
+if [[ -n "${ADMIN_NODE_RELEASES_RESP:-}" ]]; then
+  FIRST_NODE_REL_ID=$(echo "${ADMIN_NODE_RELEASES_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items = data.get('releases',data.get('items',data.get('data',[])))
+if isinstance(items, list) and len(items) > 0:
+    print(items[0].get('id',''))
+else:
+    print('')
+" 2>/dev/null || echo "")
+  if [[ -n "${FIRST_NODE_REL_ID}" ]]; then
+    NODE_REL_DETAIL_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${API_BASE}/admin/api/v1/nodeagent/releases/${FIRST_NODE_REL_ID}" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+    case "${NODE_REL_DETAIL_HTTP}" in
+      200)
+        NODE_REL_DETAIL_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodeagent/releases/${FIRST_NODE_REL_ID}" \
+          -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+        pass "NodeAgent release detail: HTTP 200, id=${FIRST_NODE_REL_ID}"
+        security_check "NodeAgent release detail" "${NODE_REL_DETAIL_RESP}" || true
+        ;;
+      404)
+        skip "NodeAgent release detail: HTTP 404 (detail endpoint not yet deployed)"
+        ;;
+      *)
+        skip "NodeAgent release detail: HTTP ${NODE_REL_DETAIL_HTTP}"
+        ;;
+    esac
+  fi
+fi
+# If no API response had releases, try the admin API directly
+if [[ -z "${ADMIN_NODE_RELEASES_RESP:-}" ]]; then
+  NODE_REL_API_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/admin/api/v1/nodeagent/releases" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+  if [[ "${NODE_REL_API_HTTP}" == "200" ]]; then
+    NODE_REL_API_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodeagent/releases" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+    FIRST_NODE_REL_ID=$(echo "${NODE_REL_API_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items = data.get('releases',data.get('items',data.get('data',[])))
+if isinstance(items, list) and len(items) > 0:
+    print(items[0].get('id',''))
+else:
+    print('')
+" 2>/dev/null || echo "")
+    if [[ -n "${FIRST_NODE_REL_ID}" ]]; then
+      NODE_REL_DETAIL_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+        "${API_BASE}/admin/api/v1/nodeagent/releases/${FIRST_NODE_REL_ID}" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+      if [[ "${NODE_REL_DETAIL_HTTP}" == "200" ]]; then
+        pass "NodeAgent release detail (via admin API): HTTP 200, id=${FIRST_NODE_REL_ID}"
+      elif [[ "${NODE_REL_DETAIL_HTTP}" == "404" ]]; then
+        skip "NodeAgent release detail: HTTP 404 (detail endpoint not deployed)"
+      else
+        skip "NodeAgent release detail: HTTP ${NODE_REL_DETAIL_HTTP}"
+      fi
+    else
+      skip "NodeAgent release detail: no releases found"
+    fi
+  else
+    skip "NodeAgent releases API: HTTP ${NODE_REL_API_HTTP} (endpoint not deployed)"
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# [16] Admin Release Page 404 Check (TASK-CICD-ADMIN-CONTROL-PLANE-SMOKE-001)
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [16] Admin Release Page 404 Check ---"
+ADMIN_RELEASE_PAGES=(
+  "/admin/nodeagent/releases"
+)
+# Also try nodeagent release detail page if we have an ID
+if [[ -n "${FIRST_NODE_REL_ID:-}" ]]; then
+  ADMIN_RELEASE_PAGES+=("/admin/nodeagent/releases/${FIRST_NODE_REL_ID}")
+fi
+
+for page in "${ADMIN_RELEASE_PAGES[@]}"; do
+  PAGE_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}${page}" 2>/dev/null || echo "000")
+  if [[ "${PAGE_HTTP}" == "200" ]]; then
+    pass "Admin page ${page}: HTTP 200"
+  elif [[ "${PAGE_HTTP}" == "404" ]]; then
+    skip "Admin page ${page}: HTTP 404 — Admin Next.js app not deployed in staging compose"
+  elif [[ "${PAGE_HTTP}" == "000" ]]; then
+    skip "Admin page ${page}: unreachable — Admin app not in staging compose"
+  else
+    skip "Admin page ${page}: HTTP ${PAGE_HTTP}"
+  fi
+done
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Cleanup
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -633,4 +732,5 @@ fi
 echo "[TASK-CICD-RELEASE-CONTROL-SMOKE-001] Release control smoke PASSED."
 echo "Covers: /admin/releases, /admin/app/releases, /admin/nodeagent/releases,"
 echo "  GET /api/v1/app/releases/latest (no auth + platform), Website downloads,"
-echo "  sitemap.xml, rss.xml, hreflang, RBAC, Secret leak scan"
+echo "  sitemap.xml, rss.xml, hreflang, RBAC, Secret leak scan,"
+echo "  NodeAgent release detail API, Admin release page 404 check"

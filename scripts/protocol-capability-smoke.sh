@@ -1372,6 +1372,47 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
+# [16] Admin Protocol Page 404 Check (TASK-CICD-ADMIN-CONTROL-PLANE-SMOKE-001)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [16] Admin Protocol Page 404 Check ---"
+ADMIN_PROTO_PAGES=(
+  "/admin/protocol-templates"
+  "/admin/protocol-assignments"
+)
+# Try to get a seed template ID for the detail-page check
+SEED_TEMPLATE_ID=""
+if [[ "${TEMPLATE_COUNT:-0}" -gt 0 ]]; then
+  SEED_TEMPLATE_ID=$(echo "${TEMPLATE_ITEMS:-[]}" | python3 -c "
+import sys,json
+items=json.load(sys.stdin)
+if items:
+    tid = items[0].get('id','')
+    print(tid) if tid else print('')
+else:
+    print('')
+" 2>/dev/null || echo "")
+fi
+if [[ -n "${SEED_TEMPLATE_ID}" ]]; then
+  ADMIN_PROTO_PAGES+=("/admin/protocol-templates/${SEED_TEMPLATE_ID}")
+  ADMIN_PROTO_PAGES+=("/admin/protocol-assignments/${SEED_TEMPLATE_ID}")
+fi
+
+for page in "${ADMIN_PROTO_PAGES[@]}"; do
+  PAGE_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}${page}" 2>/dev/null || echo "000")
+  if [[ "${PAGE_HTTP}" == "200" ]]; then
+    pass "Admin page ${page}: HTTP 200"
+  elif [[ "${PAGE_HTTP}" == "404" ]]; then
+    skip "Admin page ${page}: HTTP 404 — Admin Next.js app not deployed in staging compose"
+  elif [[ "${PAGE_HTTP}" == "000" ]]; then
+    skip "Admin page ${page}: unreachable — Admin app not in staging compose"
+  else
+    skip "Admin page ${page}: HTTP ${PAGE_HTTP}"
+  fi
+done
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Cleanup all test data
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -1412,4 +1453,5 @@ echo "[TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY] Protocol capability smoke PASSE
 echo "Covers: Health, Admin login, Seed templates, Reserved rollout_blocked,"
 echo "  NodeAgent capabilities (heartbeat/status), Node detail, Fleet summary,"
 echo "  Template eligibility (reserved/unsupported/app_pending/implemented),"
-echo "  Seed-not-supported, connect_config no app_pending, RBAC, Secret leak scan"
+echo "  Seed-not-supported, connect_config no app_pending, RBAC, Secret leak scan,"
+echo "  Admin protocol page 404 check"

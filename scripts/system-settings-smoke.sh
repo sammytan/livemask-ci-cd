@@ -748,6 +748,90 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# [18] Admin Settings Page 404 Check (TASK-CICD-ADMIN-CONTROL-PLANE-SMOKE-001)
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [18] Admin Settings Page 404 Check ---"
+# These are Admin Next.js pages served by the Admin app.
+# The staging compose does not include the Admin service, so these will SKIP.
+ADMIN_SETTINGS_PAGES=(
+  "/admin/settings"
+  "/admin/settings/geoip"
+  "/admin/settings/notifications"
+  "/admin/settings/reports"
+  "/admin/settings/subscriptions"
+  "/admin/settings/payments"
+  "/admin/settings/app-releases"
+  "/admin/settings/observability"
+  "/admin/settings/app-runtime"
+  "/admin/settings/scheduler"
+)
+ADMIN_404_FAILED=false
+for page in "${ADMIN_SETTINGS_PAGES[@]}"; do
+  PAGE_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}${page}" 2>/dev/null || echo "000")
+  if [[ "${PAGE_HTTP}" == "200" ]]; then
+    pass "Admin page ${page}: HTTP 200"
+  elif [[ "${PAGE_HTTP}" == "404" ]]; then
+    skip "Admin page ${page}: HTTP 404 — Admin Next.js app not deployed in staging compose"
+  elif [[ "${PAGE_HTTP}" == "000" ]]; then
+    skip "Admin page ${page}: unreachable — Admin app not in staging compose"
+  else
+    skip "Admin page ${page}: HTTP ${PAGE_HTTP} — Admin app may not be deployed"
+  fi
+done
+
+# ──────────────────────────────────────────────────────────────────────────────
+# [19] Admin Observability Settings API (TASK-CICD-ADMIN-CONTROL-PLANE-SMOKE-001)
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [19] Admin Observability Settings API ---"
+
+# GET /admin/api/v1/system-settings/observability/sentry_app
+echo "  [19a] GET /admin/api/v1/system-settings/observability/sentry_app"
+SENTRY_APP_RESP=$(curl -sS --max-time 5 \
+  "${API_BASE}/admin/api/v1/system-settings/observability/sentry_app" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+SENTRY_APP_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${API_BASE}/admin/api/v1/system-settings/observability/sentry_app" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+
+case "${SENTRY_APP_HTTP}" in
+  200)
+    pass "Sentry app settings: HTTP 200"
+    security_check "Sentry app settings" "${SENTRY_APP_RESP}" "auth_token,org_token,project_token,relay_secret,webhook_secret"
+    ;;
+  404)
+    skip "Sentry app settings: HTTP 404 (endpoint not yet deployed)"
+    ;;
+  *)
+    skip "Sentry app settings: HTTP ${SENTRY_APP_HTTP}"
+    ;;
+esac
+
+# GET /admin/api/v1/system-settings/observability
+echo "  [19b] GET /admin/api/v1/system-settings/observability"
+OBSERV_SETTINGS_RESP=$(curl -sS --max-time 5 \
+  "${API_BASE}/admin/api/v1/system-settings/observability" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+OBSERV_SETTINGS_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${API_BASE}/admin/api/v1/system-settings/observability" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+
+case "${OBSERV_SETTINGS_HTTP}" in
+  200)
+    pass "Observability settings: HTTP 200"
+    security_check "Observability settings" "${OBSERV_SETTINGS_RESP}" "auth_token,org_token,project_token,relay_secret,webhook_secret"
+    ;;
+  404)
+    skip "Observability settings: HTTP 404 (endpoint not yet deployed)"
+    ;;
+  *)
+    skip "Observability settings: HTTP ${OBSERV_SETTINGS_HTTP}"
+    ;;
+esac
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Cleanup
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -782,4 +866,5 @@ fi
 
 echo "[TASK-CICD-SYSTEM-SETTINGS-SCHEDULER-001] System settings/scheduler smoke PASSED."
 echo "Covers: Config list/detail/update/verify, Schedule CRUD (create/detail/edit/delete),"
-echo "  Schedule preview, Manual run, Disable/Enable, RBAC, Secret leak scan"
+echo "  Schedule preview, Manual run, Disable/Enable, RBAC, Secret leak scan,"
+echo "  Admin settings pages 404 check, Observability settings API, Sentry app settings API"

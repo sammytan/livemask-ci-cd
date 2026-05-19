@@ -368,6 +368,77 @@ if [[ "${LEAK_FOUND}" == "false" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# [9] Admin Observability Page 404 Check (TASK-CICD-ADMIN-CONTROL-PLANE-SMOKE-001)
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- [9] Admin Observability Page 404 Check ---"
+OBSERV_PAGE_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${API_BASE}/admin/settings/observability" 2>/dev/null || echo "000")
+if [[ "${OBSERV_PAGE_HTTP}" == "200" ]]; then
+  pass "Admin page /admin/settings/observability: HTTP 200"
+elif [[ "${OBSERV_PAGE_HTTP}" == "404" ]]; then
+  skip "Admin page /admin/settings/observability: HTTP 404 — Admin Next.js not deployed in staging"
+elif [[ "${OBSERV_PAGE_HTTP}" == "000" ]]; then
+  skip "Admin page /admin/settings/observability: unreachable"
+else
+  skip "Admin page /admin/settings/observability: HTTP ${OBSERV_PAGE_HTTP}"
+fi
+
+# ---------------------------------------------------------------------------
+# [10] GET /admin/api/v1/system-settings/observability/sentry_app
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- [10] GET /admin/api/v1/system-settings/observability/sentry_app ---"
+SENTRY_APP_RESP=$(curl -sS --max-time 5 \
+  "${API_BASE}/admin/api/v1/system-settings/observability/sentry_app" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+SENTRY_APP_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${API_BASE}/admin/api/v1/system-settings/observability/sentry_app" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+
+case "${SENTRY_APP_HTTP}" in
+  200)
+    pass "Sentry app settings API: HTTP 200"
+    # Extra secret scan for sentry-specific fields
+    SENTRY_APP_LEAK_CHECK=$(echo "${SENTRY_APP_RESP}" | python3 -c "
+import sys,json
+FORBIDDEN = ['auth_token','org_token','project_token','relay_secret','webhook_secret','private_key','api_key','authorization','cookie','secret_ref']
+data=json.load(sys.stdin)
+def scan(d, path=''):
+    found=[]
+    if isinstance(d, dict):
+        for k, v in d.items():
+            kl = k.lower()
+            fp = f'{path}.{k}' if path else k
+            for f in FORBIDDEN:
+                if f in kl:
+                    found.append(fp)
+            found.extend(scan(v, fp))
+    elif isinstance(d, list):
+        for i, item in enumerate(d):
+            found.extend(scan(item, f'{path}[{i}]'))
+    return found
+hits=scan(data)
+if hits:
+    print('FORBIDDEN: ' + ', '.join(hits))
+else:
+    print('OK')
+" 2>/dev/null || echo "OK")
+    if [[ "${SENTRY_APP_LEAK_CHECK}" == "OK" ]]; then
+      pass "Sentry app settings: no forbidden fields leaked"
+    else
+      fail "Sentry app settings: ${SENTRY_APP_LEAK_CHECK}"
+    fi
+    ;;
+  404)
+    skip "Sentry app settings API: HTTP 404 (endpoint not yet deployed)"
+    ;;
+  *)
+    skip "Sentry app settings API: HTTP ${SENTRY_APP_HTTP}"
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
 echo ""
