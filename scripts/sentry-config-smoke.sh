@@ -19,10 +19,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/lib/base_service.sh"
 
 COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
-BACKEND_HTTP_PORT="${LIVEMASK_BACKEND_HTTP_PORT:-18080}"
-API_BASE="http://127.0.0.1:${BACKEND_HTTP_PORT}"
+API_BASE="$(lm_backend_base_url)"
 
 FAILED=0
 SUMMARY_LINES=()
@@ -135,6 +135,7 @@ echo "================================================"
 echo " TASK-CICD-SENTRY-CONFIG-SMOKE-001"
 echo " Sentry Config Smoke"
 echo "================================================"
+lm_runtime_status_report
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -142,7 +143,7 @@ echo ""
 # ---------------------------------------------------------------------------
 echo "--- [1] Backend Health ---"
 for attempt in $(seq 1 30); do
-  health_resp=$(curl -sS --max-time 3 "${API_BASE}/api/v1/health" 2>/dev/null || true)
+  health_resp=$(lm_backend_health_json || true)
   if echo "${health_resp}" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='ok' else 1)" 2>/dev/null; then
     echo "  Backend ready (attempt ${attempt})"
     break
@@ -372,8 +373,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- [9] Admin Observability Page 404 Check ---"
-OBSERV_PAGE_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-  "${API_BASE}/admin/settings/observability" 2>/dev/null || echo "000")
+OBSERV_PAGE_HTTP=$(lm_admin_page_http "/admin/settings/observability")
 if [[ "${OBSERV_PAGE_HTTP}" == "200" ]]; then
   pass "Admin page /admin/settings/observability: HTTP 200"
 elif [[ "${OBSERV_PAGE_HTTP}" == "404" ]]; then

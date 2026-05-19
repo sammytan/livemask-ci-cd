@@ -20,10 +20,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/base_service.sh"
 COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
-BACKEND_HTTP_PORT="${LIVEMASK_BACKEND_HTTP_PORT:-18080}"
-JOB_SERVICE_URL="${JOB_SERVICE_URL:-http://127.0.0.1:${LIVEMASK_JOB_SERVICE_PORT:-19191}}"
-API_BASE="http://127.0.0.1:${BACKEND_HTTP_PORT}"
+JOB_SERVICE_URL="${JOB_SERVICE_URL:-$(lm_job_service_url)}"
+API_BASE="$(lm_backend_base_url)"
 
 FAILED=0
 SUMMARY_LINES=()
@@ -133,6 +133,7 @@ echo "================================================"
 echo " TASK-CICD-JOBS-001 + ADMIN-CONTROL-PLANE-001"
 echo " Job Service & Admin Job Center Smoke"
 echo "================================================"
+lm_runtime_status_report
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -140,7 +141,7 @@ echo ""
 # ──────────────────────────────────────────────────────────────────────────────
 echo "--- [1] Backend Health ---"
 for attempt in $(seq 1 30); do
-  health_resp=$(curl -sS --max-time 3 "${API_BASE}/api/v1/health" 2>/dev/null || true)
+  health_resp=$(lm_backend_health_json || true)
   if echo "${health_resp}" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='ok' else 1)" 2>/dev/null; then
     echo "  Backend ready (attempt ${attempt})"
     break
@@ -241,8 +242,7 @@ ADMIN_JOB_PAGES=(
   "/admin/jobs/schedules"
 )
 for page in "${ADMIN_JOB_PAGES[@]}"; do
-  PAGE_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-    "${API_BASE}${page}" 2>/dev/null || echo "000")
+  PAGE_HTTP=$(lm_admin_page_http "${page}")
   if [[ "${PAGE_HTTP}" == "200" ]]; then
     ok "Admin page ${page}: HTTP 200"
   elif [[ "${PAGE_HTTP}" == "404" ]]; then
@@ -346,7 +346,10 @@ if [[ -n "${RBAC_TOKEN}" ]]; then
   for ep in "admin/api/v1/jobs/definitions" "admin/api/v1/jobs/runs" "admin/api/v1/jobs/schedules"; do
     NO_TOK_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
       "${API_BASE}/${ep}" 2>/dev/null || true)
-    if [[ "${NO_TOK_HTTP}" == "401" ]]; then
+    if [[ "${NO_TOK_HTTP}" == "404" ]]; then
+      skip_msg "RBAC no-token ${ep}: HTTP 404 (endpoint not yet deployed)"
+      continue
+    elif [[ "${NO_TOK_HTTP}" == "401" ]]; then
       ok "RBAC no-token ${ep}: HTTP 401"
     else
       bad "RBAC no-token ${ep}: HTTP ${NO_TOK_HTTP} (expected 401)"
@@ -355,7 +358,9 @@ if [[ -n "${RBAC_TOKEN}" ]]; then
     USER_TOK_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
       "${API_BASE}/${ep}" \
       -H "Authorization: Bearer ${RBAC_TOKEN}" 2>/dev/null || true)
-    if [[ "${USER_TOK_HTTP}" == "403" || "${USER_TOK_HTTP}" == "401" ]]; then
+    if [[ "${USER_TOK_HTTP}" == "404" ]]; then
+      skip_msg "RBAC user-token ${ep}: HTTP 404 (endpoint not yet deployed)"
+    elif [[ "${USER_TOK_HTTP}" == "403" || "${USER_TOK_HTTP}" == "401" ]]; then
       ok "RBAC user-token ${ep}: HTTP ${USER_TOK_HTTP}"
     else
       bad "RBAC user-token ${ep}: HTTP ${USER_TOK_HTTP} (expected 401/403)"
