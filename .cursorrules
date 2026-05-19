@@ -67,6 +67,30 @@ Keep workflow defaults and compose build refs on `dev`. If a workflow accepts a
 ref input, it must reject anything other than `dev` unless it is a production
 release gate validating a `v*` tag.
 
+## Smoke Script Discovery Rule
+
+Do not assume a script mentioned in chat or a task prompt already exists.
+Before writing any smoke script or workflow reference, list existing scripts and
+search current workflow/script usage:
+
+```bash
+ls scripts | sort
+rg -n "<domain>|<task>|<endpoint>" scripts .github/workflows
+test -f scripts/<suggested-script>.sh && echo EXISTS || echo MISSING
+```
+
+If the suggested script does not exist, state that in the mini task brief and
+choose one of:
+
+1. enhance the existing domain scripts, or
+2. create a new aggregate script and wire that real path into `scripts/smoke.sh`
+   and workflow files.
+
+Never report that a missing script was updated. Never wire `scripts/smoke.sh` or
+GitHub Actions to a path that does not exist. Completion reports must state
+which scripts were created, which scripts were enhanced, and which existing
+scripts were intentionally left unchanged.
+
 ## Docs Sync Boundary
 
 This repository must not edit `../livemask-docs` directly.
