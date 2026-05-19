@@ -47,6 +47,10 @@ jobs:
         run: bash scripts/geoip-smoke.sh
       - name: GeoIP Credentials smoke (TASK-CICD-GEOIP-CREDENTIALS-001)
         run: bash scripts/geoip-credentials-smoke.sh
+      - name: Growth Revenue & Reward Notification smoke (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001)
+        run: bash scripts/growth-revenue-smoke.sh
+      - name: Release Control smoke (TASK-CICD-RELEASE-CONTROL-SMOKE-001)
+        run: bash scripts/release-control-smoke.sh
       - name: Job Service smoke (TASK-CICD-JOBS-001)
         run: bash scripts/jobs-smoke.sh
       - name: Admin Dashboard smoke (TASK-CICD-DASHBOARD-REALTIME-001)
