@@ -125,6 +125,30 @@ jobs:
           name: runtime-status
           path: /tmp/livemask-runtime/status.json
           retention-days: 1
+      - name: Issue Close Guard — dry-run evaluation (TASK-CICD-ISSUE-CLOSE-GUARD-001)
+        id: issue-close-guard
+        if: always()
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+          LIVEMASK_WORKSPACE_ROOT: /opt/actions-runner
+        run: |
+          # Dry-run evaluation of a known-completed task to verify guard logic.
+          # Use .github/workflows/issue-close-guard.yml (workflow_dispatch) with
+          # --write to actually close/reopen issues.
+          echo "=== Dry-run: completed task should allow close ==="
+          bash scripts/issue-close-guard.sh \
+            --task-id TASK-CICD-ISSUE-SYNC-STRICT-001 \
+            --repo livemask-ci-cd \
+            --dry-run \
+            --format text || true
+          echo ""
+          echo "=== Dry-run: blocked task should NOT allow close ==="
+          bash scripts/issue-close-guard.sh \
+            --task-id TASK-CICD-ISSUE-CLOSE-GUARD-001 \
+            --repo livemask-ci-cd \
+            --dry-run \
+            --format text || true
       - name: Stop staging
         if: always()
         run: docker compose -f infra/docker-compose.staging.yml down --remove-orphans
