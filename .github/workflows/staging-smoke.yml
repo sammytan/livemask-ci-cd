@@ -17,6 +17,7 @@ on:
 permissions:
   actions: read
   contents: read
+  issues: read
 
 jobs:
   smoke:
@@ -30,6 +31,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Enforce dev-only smoke refs
         run: bash scripts/validate-dev-ref.sh
+      - name: Strict cross-repo Issue sync check (TASK-CICD-ISSUE-SYNC-STRICT-001)
+        run: bash scripts/issue-sync-strict.sh --task-id TASK-CICD-ISSUE-SYNC-STRICT-001
       - name: Show runner
         run: |
           hostname
