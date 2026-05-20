@@ -19,7 +19,7 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 Health API	GET	/api/v1/health	200	json.status=ok;json.db_connected=true;json.redis_connected=true	-	-
 Client Config Read	GET	/api/v1/config/client	200	json.config_key=client.remote_config;json.config_version>=1;json.config_hash~^sha256:	-	-
-NodeAgent Config Read	GET	/internal/agent/config	200	json.config_key=nodeagent.runtime_config;json.config_version>=1;json.config_hash~^sha256:	-	-
+NodeAgent Config Read	GET	/internal/agent/config	401|404	json.error.code=NODE_INVALID_REQUEST;json.error.message~missing node-id, signature, or timestamp headers	-	-
 Admin Config List	GET	/admin/api/v1/configs	200	json.configs.length>=2	-	-
 
 # ═══════════════════════════════════════════════════════════════════════════════
