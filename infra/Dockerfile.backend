@@ -2,24 +2,24 @@
 ARG GO_IMAGE_TAG=1.25-alpine
 FROM golang:${GO_IMAGE_TAG} AS builder
 
-ARG BACKEND_REPO_URL=https://github.com/MyAiDevs/livemask-backend.git
-ARG BACKEND_REF=dev
+# Source is provisioned by scripts/prepare-staging-build-context.sh
+# into infra/_build_deps/backend/, which is in the build context.
+COPY _build_deps/backend/ /src/
 
-RUN apk add --no-cache git ca-certificates
+RUN if [ ! -f /src/go.mod ]; then \
+      echo "FATAL: No go.mod found in /src/." >&2; \
+      echo "Run scripts/prepare-staging-build-context.sh before docker compose build." >&2; \
+      exit 1; \
+    fi
 
-WORKDIR /app
-RUN git init . \
-    && git remote add origin "${BACKEND_REPO_URL}" \
-    && (git fetch --depth 1 origin "${BACKEND_REF}" || git fetch origin "${BACKEND_REF}") \
-    && git checkout --detach FETCH_HEAD
-
+WORKDIR /src
 RUN go mod download
-RUN CGO_ENABLED=0 go build -o server ./main.go
+RUN CGO_ENABLED=0 go build -o /out/server ./main.go
 
 # stage 2: runtime
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
-COPY --from=builder /app/server .
+COPY --from=builder /out/server .
 EXPOSE 8080
 CMD ["./server"]
