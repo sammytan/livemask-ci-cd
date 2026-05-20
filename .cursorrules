@@ -1,5 +1,35 @@
 # LiveMask CI/CD - AI Development Rules v3.7
 
+## TASK-CICD-WORKSPACE-PATH-MIGRATION-001 — Workspace Path Rule
+
+### Mandatory Workspace Pre-Check
+Before any development, output the following and verify:
+
+```bash
+pwd
+git remote -v
+git branch --show-current
+git status --short
+```
+
+### Banned Old Path
+If `pwd` begins with `/Users/sammytan/Documents/New project 2`, the AI **must stop immediately**.
+Do not edit files, do not commit, do not merge. Report:
+
+```text
+BLOCKED: Old workspace path detected.
+pwd: <current-pwd>
+This window must be reopened from /Users/sammytan/Developer/LiveMask/<repo>.
+No files changed.
+```
+
+### Default Workspace Root
+- Workspace root is `/Users/sammytan/Developer/LiveMask`.
+- Scripts should prefer `"${LIVEMASK_WORKSPACE_ROOT:-$HOME/Developer/LiveMask}"`.
+- Do not hardcode `/Users/sammytan/Documents/New project 2` anywhere in this repo.
+- Do not hardcode `/Users/sammytan/Developer/LiveMask` directly when `LIVEMASK_WORKSPACE_ROOT` is available.
+- Runtime repos must not update `livemask-docs` task ledgers directly.
+
 ## Always Start Here (Mandatory Pre-check)
 @../livemask-docs/ai-rules/v3.7/00-Core-Principles.md
 @../livemask-docs/ai-rules/v3.7/04-Multi-Repo-Linkage.md

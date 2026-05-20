@@ -90,6 +90,74 @@ lm_admin_page_http() {
   echo "${code}"
 }
 
+# ---------------------------------------------------------------------------
+# Workspace path validation
+# ---------------------------------------------------------------------------
+
+# Default workspace root — callers can override via LIVEMASK_WORKSPACE_ROOT.
+LIVEMASK_WORKSPACE_ROOT="${LIVEMASK_WORKSPACE_ROOT:-$HOME/Developer/LiveMask}"
+
+# List of canonical repos expected under the workspace root.
+LIVEMASK_REPOS=(livemask-docs livemask-backend livemask-admin livemask-website
+                livemask-app livemask-nodeagent livemask-job-service
+                livemask-ci-cd)
+
+lm_workspace_check() {
+  local current_dir="$PWD"
+  local ws_root="${LIVEMASK_WORKSPACE_ROOT}"
+
+  echo "=== Workspace Path Check ==="
+  echo "  Current dir: ${current_dir}"
+  echo "  Workspace root: ${ws_root}"
+
+  # 1. Ban old Documents path
+  if [[ "${current_dir}" == "/Users/sammytan/Documents/New project 2"* ]]; then
+    echo "  FAIL: Old workspace path detected.  Stop and reopen under ${ws_root}." >&2
+    return 1
+  fi
+
+  # 2. Workspace root must be a directory
+  if [[ ! -d "${ws_root}" ]]; then
+    echo "  FAIL: Workspace root does not exist: ${ws_root}" >&2
+    return 1
+  fi
+  echo "  * Workspace root exists."
+
+  # 3. Current repo should live under the workspace root
+  if [[ "${current_dir}" != "${ws_root}"* ]]; then
+    echo "  WARN: Current directory is outside the canonical workspace root."
+    echo "        Expected prefix: ${ws_root}"
+  else
+    echo "  * Current directory is inside the workspace root."
+  fi
+
+  # 4. Check essential repos exist (non-fatal warning for missing ones)
+  local missing=0
+  for repo in "${LIVEMASK_REPOS[@]}"; do
+    if [[ -d "${ws_root}/${repo}/.git" ]]; then
+      echo "  * ${repo}: present"
+    else
+      echo "  WARN: ${repo} not found under ${ws_root}" >&2
+      missing=$((missing + 1))
+    fi
+  done
+
+  # 5. Docker runtime check
+  if command -v docker &>/dev/null; then
+    echo "  * docker CLI is available."
+    if docker info &>/dev/null; then
+      echo "  * docker daemon is running."
+    else
+      echo "  WARN: docker daemon is not running (or permission denied)." >&2
+    fi
+  else
+    echo "  WARN: docker CLI not found." >&2
+  fi
+
+  echo "=== Workspace Path Check complete (${missing} repo(s) missing) ==="
+  return 0
+}
+
 lm_runtime_status_report() {
   echo "Runtime endpoints:"
   echo "  Backend:     $(lm_backend_base_url) (container=${LIVEMASK_BACKEND_CONTAINER})"
