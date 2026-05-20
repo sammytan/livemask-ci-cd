@@ -70,6 +70,14 @@ jobs:
         run: bash scripts/prepare-staging-build-context.sh --ci
       - name: Start staging
         run: docker compose -f infra/docker-compose.staging.yml up -d --build
+      - name: Collect runtime status
+        run: |
+          mkdir -p /tmp/livemask-runtime
+          bash scripts/dev-runtime-status.sh \
+            --compose infra/docker-compose.staging.yml \
+            --env staging \
+            --output /tmp/livemask-runtime/status.json
+          echo "Runtime status collected"
       - name: Smoke
         run: bash scripts/smoke.sh
       - name: Node full-link smoke (TASK-CICD-NODE-001)
@@ -110,6 +118,13 @@ jobs:
         run: bash scripts/i18n-smoke.sh
       - name: Jobs Hardening smoke (TASK-CICD-JOBS-HARDENING-001)
         run: bash scripts/jobs-hardening-smoke.sh
+      - name: Upload runtime status artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-status
+          path: /tmp/livemask-runtime/status.json
+          retention-days: 1
       - name: Stop staging
         if: always()
         run: docker compose -f infra/docker-compose.staging.yml down --remove-orphans
@@ -120,15 +135,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Notify Lark
+      - name: Download runtime status artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-status
+          path: /tmp/livemask-runtime/
+        continue-on-error: true
+      - name: Determine workflow result
+        id: result
+        run: |
+          # Derive result from job outcome
+          if [[ "${{ needs.smoke.result }}" == "cancelled" ]]; then
+            echo "result=cancelled" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ needs.smoke.result }}" == "success" ]]; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Notify Lark with runtime evidence
         env:
           GITHUB_TOKEN: ${{ github.token }}
           LARK_BOT_WEBHOOK: ${{ secrets.LARK_BOT_WEBHOOK }}
           LARK_BOT_SECRET: ${{ secrets.LARK_BOT_SECRET }}
-          WORKFLOW_RESULT: >-
-            ${{
-              contains(needs.*.result, 'failure') && 'failure'
-              || contains(needs.*.result, 'cancelled') && 'cancelled'
-              || 'success'
-            }}
-        run: bash .github/scripts/lark-notify.sh "$WORKFLOW_RESULT"
+          RUNTIME_ENV: staging
+          WORKFLOW_RESULT: ${{ steps.result.outputs.result }}
+        run: |
+          if [[ -f /tmp/livemask-runtime/status.json ]]; then
+            bash .github/scripts/lark-runtime-notify.sh "${WORKFLOW_RESULT}" /tmp/livemask-runtime/status.json
+          else
+            bash .github/scripts/lark-runtime-notify.sh "${WORKFLOW_RESULT}"
+          fi
