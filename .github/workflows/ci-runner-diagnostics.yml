@@ -1,0 +1,39 @@
+name: CI Runner Diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action: diagnose, restart, or both'
+        required: true
+        default: 'both'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  runner-ops:
+    runs-on:
+      group: livemask-staging
+      labels: [self-hosted, Linux, livemask, docker, staging]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Diagnose CI runner
+        if: ${{ inputs.action == 'diagnose' || inputs.action == 'both' }}
+        run: bash scripts/diagnose-ci-runner.sh
+
+      - name: Restart CI runner
+        if: ${{ inputs.action == 'restart' || inputs.action == 'both' }}
+        run: bash scripts/restart-ci-runner.sh
+        continue-on-error: true
+
+      - name: Verify runner status after restart
+        if: ${{ inputs.action == 'restart' || inputs.action == 'both' }}
+        run: |
+          sleep 5
+          echo "=== GitHub API runner status ==="
+          RUNNER_INFO=$(curl -sS -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/orgs/MyAiDevs/actions/runners?per_page=100")
+          echo "$RUNNER_INFO" | python3 -c "import sys,json; data=json.load(sys.stdin); [print(f'  Runner: {r[\"name\"]}\n  Status: {r[\"status\"]}\n  Busy:   {r[\"busy\"]}') for r in data.get('runners', []) if r.get('name') == 'livemask-ci-runner-01']"

@@ -1,0 +1,43 @@
+name: Issue Close Guard
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'TASK ID to evaluate (e.g. TASK-CICD-ISSUE-CLOSE-GUARD-001)'
+        required: true
+        type: string
+      repo:
+        description: 'Target repo for the Issue (default: current repo/ORG)'
+        required: false
+        default: ''
+        type: string
+      write:
+        description: 'Set to "true" to apply close/reopen (default: dry-run)'
+        required: false
+        default: 'false'
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Issue Close Guard
+        env:
+          GITHUB_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+        run: |
+          ARGS="--task-id ${{ inputs.task_id }} --format text --gh-token $GITHUB_TOKEN"
+          if [[ -n "${{ inputs.repo }}" ]]; then
+            ARGS="$ARGS --repo ${{ inputs.repo }}"
+          fi
+          if [[ "${{ inputs.write }}" == "true" ]]; then
+            ARGS="$ARGS --write"
+          fi
+          echo "Running: bash scripts/issue-close-guard.sh $ARGS"
+          bash scripts/issue-close-guard.sh $ARGS

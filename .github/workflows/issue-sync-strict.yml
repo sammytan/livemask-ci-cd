@@ -1,0 +1,110 @@
+name: Issue Sync Strict Check
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: 'TASK ID to check (e.g. TASK-CICD-ISSUE-SYNC-STRICT-001). Leave empty to scan all active tasks from ledger.'
+        required: false
+        default: ''
+      repo:
+        description: 'Runtime repo to check (comma-separated). Default: current repo.'
+        required: false
+        default: ''
+      format:
+        description: 'Output format (text or json)'
+        required: false
+        default: 'text'
+
+permissions:
+  issues: read
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check single TASK ID
+        if: ${{ github.event.inputs.task_id != '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+        run: |
+          EXTRA=""
+          if [[ -n "${{ github.event.inputs.repo }}" ]]; then
+            for r in $(echo "${{ github.event.inputs.repo }}" | tr ',' ' '); do
+              EXTRA+=" --repo ${r}"
+            done
+          fi
+          bash scripts/issue-sync-strict.sh \
+            --task-id "${{ github.event.inputs.task_id }}" \
+            --format "${{ github.event.inputs.format }}" \
+            ${EXTRA}
+
+      - name: Scan all active tasks from ledger
+        if: ${{ github.event.inputs.task_id == '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+        run: |
+          # Fetch task-state-ledger.json from livemask-docs repo
+          LEDGER_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY_OWNER}/livemask-docs/dev/docs/development/task-state-ledger.json"
+          echo "Fetching ledger from: ${LEDGER_URL}"
+
+          LEDGER_JSON=$(curl -sS --fail "${LEDGER_URL}") || {
+            echo "WARN: Could not fetch task-state-ledger.json from livemask-docs/dev"
+            echo "Falling back to GitHub Issues search for open TASK issues..."
+            # Search for open issues with "TASK-" in title across docs repo
+            QUERY="repo:${GITHUB_REPOSITORY_OWNER}/livemask-docs is:issue is:open TASK- in:title"
+            ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${QUERY}'))")
+            ISSUES=$(curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              "https://api.github.com/search/issues?q=${ENCODED}")
+            echo "$ISSUES" | python3 -c "import textwrap; exec(textwrap.dedent('''
+          import sys, json
+          data = json.load(sys.stdin)
+          items = data.get('items', [])
+          task_ids = set()
+          for item in items:
+              title = item.get('title', '')
+              import re
+              matches = re.findall(r'TASK-[A-Z0-9]+(?:-[A-Z0-9]+)*(?:-[A-Za-z0-9_-]+)*', title)
+              for m in matches:
+                  task_ids.add(m)
+          for tid in sorted(task_ids):
+              print(tid)
+          '''))" | while read tid; do
+              echo ""
+              echo "=== Checking: ${tid} ==="
+              bash scripts/issue-sync-strict.sh \
+                --task-id "${tid}" \
+                --docs-required false \
+                --missing-runtime warn \
+                --format text || true
+            done
+            exit 0
+          }
+
+          echo "Ledger found. Extracting task IDs and primary repos..."
+          echo "$LEDGER_JSON" | python3 -c "import textwrap; exec(textwrap.dedent('''
+          import sys, json
+          data = json.load(sys.stdin)
+          modules = data.get('modules', [])
+          rows = set()
+          for mod in modules:
+              for task in mod.get('tasks', []):
+                  tid = task.get('task_id', '')
+                  repo = task.get('repo', '')
+                  if tid and repo and repo != 'livemask-docs':
+                      rows.add((tid, repo))
+          for tid, repo in sorted(rows):
+              print(f'{tid}\t{repo}')
+          '''))" | while IFS=$'\t' read -r tid repo; do
+            echo ""
+            echo "=== Checking: ${tid} (${repo}) ==="
+            bash scripts/issue-sync-strict.sh \
+              --task-id "${tid}" \
+              --repo "${repo}" \
+              --docs-required false \
+              --missing-runtime warn \
+              --format text || true
+          done

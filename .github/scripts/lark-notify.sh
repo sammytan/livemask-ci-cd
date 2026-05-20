@@ -48,6 +48,134 @@ def truncate(text, limit=2600):
         return text
     return text[: limit - 80].rstrip() + "\n... truncated, open GitHub run for full logs."
 
+def github_api(path, timeout=12):
+    if not github_token:
+        return None
+    request = urllib.request.Request(
+        f"https://api.github.com{path}",
+        headers={
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "livemask-lark-notifier",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+def load_event_payload():
+    event_path = os.getenv("GITHUB_EVENT_PATH", "")
+    if not event_path or not os.path.exists(event_path):
+        return {}
+    try:
+        with open(event_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def extract_task_ids(*texts):
+    found = []
+    pattern = re.compile(r"\bTASK-[A-Z0-9]+(?:-[A-Z0-9]+)*\b")
+    for text in texts:
+        for task_id in pattern.findall(text or ""):
+            if task_id not in found:
+                found.append(task_id)
+    return found
+
+def summarize_commit():
+    event = load_event_payload()
+    commit = None
+    compare_url = ""
+    changed_files = []
+
+    if "/" in repo and sha:
+        commit = github_api(f"/repos/{repo}/commits/{sha}") or None
+
+    head_commit = event.get("head_commit") or {}
+    commit_message = (
+        (commit or {}).get("commit", {}).get("message")
+        or head_commit.get("message")
+        or ""
+    )
+    commit_title = commit_message.splitlines()[0] if commit_message else "(no commit title)"
+    branch_hint = event.get("ref", "") or ref_name
+    tasks = extract_task_ids(commit_message, branch_hint, workflow)
+
+    if commit and isinstance(commit.get("files"), list):
+        changed_files = [f.get("filename", "") for f in commit["files"] if f.get("filename")]
+    else:
+        changed_files = [
+            f.get("filename", "")
+            for f in (head_commit.get("added", []) + head_commit.get("modified", []) + head_commit.get("removed", []))
+            if isinstance(f, str)
+        ]
+
+    compare_url = event.get("compare", "")
+
+    top_dirs = []
+    for filename in changed_files:
+        top = filename.split("/", 1)[0]
+        if top and top not in top_dirs:
+            top_dirs.append(top)
+
+    files_preview = changed_files[:8]
+    if len(changed_files) > 8:
+        files_preview.append(f"... +{len(changed_files) - 8} more")
+
+    return {
+        "title": commit_title,
+        "tasks": tasks,
+        "changed_files": changed_files,
+        "top_dirs": top_dirs,
+        "files_preview": files_preview,
+        "compare_url": compare_url,
+    }
+
+def summarize_jobs():
+    if not run_id or "/" not in repo:
+        return ""
+    data = github_api(f"/repos/{repo}/actions/runs/{run_id}/jobs?per_page=50")
+    if not data:
+        return ""
+    rows = []
+    for job in data.get("jobs", []):
+        name = job.get("name", "unknown")
+        conclusion = job.get("conclusion") or job.get("status") or "unknown"
+        if name == "notify-lark":
+            continue
+        marker = {
+            "success": "PASS",
+            "failure": "FAIL",
+            "cancelled": "CANCELLED",
+            "skipped": "SKIPPED",
+        }.get(conclusion, conclusion.upper())
+        rows.append(f"• {name}: {marker}")
+    return "\n".join(rows[:12])
+
+change = summarize_commit()
+jobs_summary = summarize_jobs()
+
+if not report_summary:
+    modules = ", ".join(change["top_dirs"][:8]) if change["top_dirs"] else "no file summary available"
+    report_summary = (
+        f"Change: {change['title']}\n"
+        f"Affected paths: {modules}\n"
+        f"Changed files: {len(change['changed_files'])}"
+    )
+
+if not report_tasks and change["tasks"]:
+    report_tasks = "\n".join(f"• {task_id}" for task_id in change["tasks"])
+
+if not report_next_steps:
+    if report_kind == "ci-cd":
+        report_next_steps = (
+            "Dev runtime: not checked by this repo CI.\n"
+            "Runtime status must come from livemask-ci-cd staging smoke or persistent dev-runtime deploy."
+        )
+
 def fetch_error_excerpt():
     if result == "success" or not github_token or not run_id or "/" not in repo:
         return ""
@@ -140,6 +268,25 @@ if report_tasks:
         {
             "tag": "div",
             "text": {"tag": "lark_md", "content": f"**Tasks / Progress**\n{truncate(report_tasks, 1800)}"},
+        }
+    )
+
+if change["files_preview"]:
+    elements.append({"tag": "hr"})
+    files_text = "\n".join(f"• {name}" for name in change["files_preview"])
+    elements.append(
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**Changed Files**\n{truncate(files_text, 1600)}"},
+        }
+    )
+
+if jobs_summary:
+    elements.append({"tag": "hr"})
+    elements.append(
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**Validation Jobs**\n{truncate(jobs_summary, 1600)}"},
         }
     )
 

@@ -1,5 +1,35 @@
 # LiveMask CI/CD - AI Development Rules v3.7
 
+## TASK-CICD-WORKSPACE-PATH-MIGRATION-001 — Workspace Path Rule
+
+### Mandatory Workspace Pre-Check
+Before any development, output the following and verify:
+
+```bash
+pwd
+git remote -v
+git branch --show-current
+git status --short
+```
+
+### Banned Old Path
+If `pwd` begins with `/Users/sammytan/Documents/New project 2`, the AI **must stop immediately**.
+Do not edit files, do not commit, do not merge. Report:
+
+```text
+BLOCKED: Old workspace path detected.
+pwd: <current-pwd>
+This window must be reopened from /Users/sammytan/Developer/LiveMask/<repo>.
+No files changed.
+```
+
+### Default Workspace Root
+- Workspace root is `/Users/sammytan/Developer/LiveMask`.
+- Scripts should prefer `"${LIVEMASK_WORKSPACE_ROOT:-$HOME/Developer/LiveMask}"`.
+- Do not hardcode `/Users/sammytan/Documents/New project 2` anywhere in this repo.
+- Do not hardcode `/Users/sammytan/Developer/LiveMask` directly when `LIVEMASK_WORKSPACE_ROOT` is available.
+- Runtime repos must not update `livemask-docs` task ledgers directly.
+
 ## Always Start Here (Mandatory Pre-check)
 @../livemask-docs/ai-rules/v3.7/00-Core-Principles.md
 @../livemask-docs/ai-rules/v3.7/04-Multi-Repo-Linkage.md
@@ -39,6 +69,82 @@ Production work must come from a GitHub Release / `v*` tag, not from an ad hoc b
 Workflow changes must consider impact on all services (Backend, NodeAgent, App, Admin).
 Prefer reusable workflows and keep them maintainable across the organization.
 
+## Mandatory Task Finish / Dev Merge Gate
+A task is not complete while its changes exist only on `task/*`, `codex/*`, or another feature branch.
+
+All task-branch-to-dev merges must use `scripts/dev-merge-guard.sh`. Manual
+`git merge task/*` is forbidden for completion work because it bypasses rescue
+branch creation, integration validation, and fail-closed checks.
+
+After implementation and required validation pass:
+1. Commit the task changes with the `TASK-XXXX` ID.
+2. Run:
+   ```bash
+   bash scripts/dev-merge-guard.sh --repo . --task-branch task/<TASK-ID> --task-id <TASK-ID> --push
+   ```
+3. Resolve conflicts only if the guard stops and explicitly reports the conflict.
+4. Include task branch commit, dev merge commit, pushed remote ref, and validation evidence in the completion report.
+
+Do not report `completed` if the task branch has not been merged into `dev`, if `dev` has not been pushed to `origin/dev`, if validation only passed before the dev merge, or if merge conflicts remain unresolved.
+
+## CI/CD Dev-Only Smoke Rule
+CI/CD acceptance smoke must run from `dev` only. Do not use `task/*`, `codex/*`,
+or feature branch refs as smoke validation evidence. Feature branches may run
+syntax/unit prechecks, but completion requires merge to `dev`, push to
+`origin/dev`, and smoke/build validation against `dev`.
+
+Keep workflow defaults and compose build refs on `dev`. If a workflow accepts a
+ref input, it must reject anything other than `dev` unless it is a production
+release gate validating a `v*` tag.
+
+## Smoke Script Discovery Rule
+
+Do not assume a script mentioned in chat or a task prompt already exists.
+Before writing any smoke script or workflow reference, list existing scripts and
+search current workflow/script usage:
+
+```bash
+ls scripts | sort
+rg -n "<domain>|<task>|<endpoint>" scripts .github/workflows
+test -f scripts/<suggested-script>.sh && echo EXISTS || echo MISSING
+```
+
+If the suggested script does not exist, state that in the mini task brief and
+choose one of:
+
+1. enhance the existing domain scripts, or
+2. create a new aggregate script and wire that real path into `scripts/smoke.sh`
+   and workflow files.
+
+Never report that a missing script was updated. Never wire `scripts/smoke.sh` or
+GitHub Actions to a path that does not exist. Completion reports must state
+which scripts were created, which scripts were enhanced, and which existing
+scripts were intentionally left unchanged.
+
+## Docs Sync Boundary
+
+This repository must not edit `../livemask-docs` directly.
+
+After completing a TASK, produce a completion report only. The report must include
+the TASK ID, task branch commit, dev merge commit, remote dev ref, validation
+commands/results, and remaining blockers.
+
+Do not update `livemask-docs` from this repo. Do not run task-sync to close or
+update documentation state from this repo. The `livemask-docs` window owns
+updates to the MVP plan, task index, task files, cursor handoffs, and contract
+indexes.
+
+## Natural Language Task Intake
+
+When the user describes a requirement or bug in plain text, do not edit code
+immediately. First classify the request, infer the primary/affected repos,
+generate a TASK ID, and output a mini task brief.
+
+If this repo is not the inferred primary/affected repo, stop with a repository
+scope block. If it matches, create `task/<TASK-ID>` from latest `origin/dev`,
+implement, validate, merge through `dev-merge-guard.sh`, and output docs handoff
+evidence for `livemask-docs`. Do not create or update docs files from this repo.
+
 ## Local Dev Runtime Permanent Rule
 1. `scripts/local-dev.sh` manages the long-lived local development environment.
 2. After any task, keep the local dev runtime running by default.
@@ -59,12 +165,32 @@ Prefer reusable workflows and keep them maintainable across the organization.
    - whether the temporary smoke environment was cleaned up
 
 ## Task Completion Report
+## Task Lease And Audit Boundary
+
+Before editing for any TASK, check the docs-owned lease registry contract:
+@../livemask-docs/docs/development/task-leases.json
+
+For multi-repo or shared-file work, the docs dispatcher should register an
+active lease with `task_id`, `repo`, `branch`, `expected_files`, `lease_owner`,
+`started_at`, `expires_at`, `depends_on`, `blocked_by`, and `status`.
+
+Runtime repo windows must not modify `../livemask-docs/task-leases.json`.
+If a lease is missing, expired, or collides with the expected files, stop and
+report the lease issue instead of editing code.
+
+The docs audit source is:
+@../livemask-docs/docs/development/AUTO_AUDIT_CENTER.md
+
+Remote audit and Issue close/reopen are docs/CI-CD owned. This repo must not run
+remote audit as final authority, must not close/reopen Issues directly, and must
+not mark a task completed without dev merge, pushed `origin/dev`, and validation
+evidence.
+
+## Task Completion Report
 When a task or subtask is complete, use the standard completion report from:
 @../livemask-docs/ai-rules/v3.7/16-Task-Completion-Report.md
 
 The report must explicitly say which other repo windows are unlocked for parallel development and which remain blocked.
-
-After a meaningful completion, run task sync from `livemask-docs` with `gh workflow run task-sync.yml --repo MyAiDevs/livemask-docs --ref dev`.
 
 ## DoD Self-Check
 - [ ] Linked to TASK-XXXX

@@ -1,0 +1,33 @@
+name: Workflow Syntax Guard
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+    paths:
+      - ".github/workflows/**"
+      - ".github/scripts/**"
+      - "scripts/**"
+      - "infra/docker-compose*.yml"
+  push:
+    branches:
+      - dev
+    paths:
+      - ".github/workflows/**"
+      - ".github/scripts/**"
+      - "scripts/**"
+      - "infra/docker-compose*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate workflow YAML and shell syntax
+        run: bash scripts/validate-workflow-syntax.sh

@@ -1,0 +1,170 @@
+name: Dev Runtime Deploy
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: livemask-dev-runtime
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    env:
+      BACKEND_REF: dev
+      JOB_SERVICE_REF: dev
+      ADMIN_REF: dev
+      WEBSITE_REF: dev
+      LIVEMASK_STACK_NAME: livemask-dev
+      LIVEMASK_BACKEND_HTTP_PORT: "18080"
+      LIVEMASK_ADMIN_PORT: "3001"
+      LIVEMASK_WEBSITE_PORT: "3002"
+      LIVEMASK_JOB_SERVICE_PORT: "19191"
+      POSTGRES_PORT: "15432"
+      REDIS_PORT: "16379"
+    runs-on:
+      group: livemask-staging
+      labels: [self-hosted, Linux, livemask, docker, staging]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout backend source into build context
+        uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-backend
+          ref: ${{ env.BACKEND_REF }}
+          path: infra/_build_deps/backend
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+
+      - name: Checkout job-service source into build context
+        uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-job-service
+          ref: ${{ env.JOB_SERVICE_REF }}
+          path: infra/_build_deps/job-service
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+
+      - name: Checkout admin source into build context
+        uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-admin
+          ref: ${{ env.ADMIN_REF }}
+          path: infra/_build_deps/admin
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+
+      - name: Checkout website source into build context
+        uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-website
+          ref: ${{ env.WEBSITE_REF }}
+          path: infra/_build_deps/website
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+
+      - name: Prepare dev runtime build context
+        run: bash scripts/prepare-staging-build-context.sh --ci
+
+      - name: Show current runtime port owners
+        run: |
+          echo "Host port mapping used by persistent dev runtime:"
+          echo "  host 18080 -> backend container 8080"
+          echo "  host 3001 -> admin container 3000"
+          echo "  host 3002 -> website container 3000"
+          echo "  host 19191 -> job-service container 19191"
+          echo "  host 15432 -> postgres container 5432"
+          echo "  host 16379 -> redis container 6379"
+          docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' || true
+
+      - name: Start persistent dev runtime
+        run: docker compose -f infra/docker-compose.staging.yml up -d --build
+
+      - name: Collect runtime status
+        if: always()
+        run: |
+          mkdir -p /tmp/livemask-runtime
+          bash scripts/dev-runtime-status.sh \
+            --compose infra/docker-compose.staging.yml \
+            --env dev \
+            --output /tmp/livemask-runtime/status.json
+
+      - name: Verify dev backend health
+        run: |
+          echo "Checking host URL http://127.0.0.1:${LIVEMASK_BACKEND_HTTP_PORT}/api/v1/health"
+          echo "This maps to backend container port 8080."
+          curl -fsS "http://127.0.0.1:${LIVEMASK_BACKEND_HTTP_PORT}/api/v1/health"
+
+      - name: Verify dev frontend routes
+        run: |
+          check_url() {
+            local name="$1"
+            local url="$2"
+            local code=""
+            for attempt in $(seq 1 30); do
+              code=$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "${url}" 2>/dev/null || echo "000")
+              case "${code}" in
+                200|301|302|307|308)
+                  echo "${name} reachable: HTTP ${code} (${url})"
+                  return 0
+                  ;;
+              esac
+              echo "Waiting for ${name}... attempt ${attempt}/30, HTTP ${code}"
+              sleep 2
+            done
+            echo "${name} unavailable after waiting: HTTP ${code} (${url})" >&2
+            return 1
+          }
+
+          check_url "admin" "http://127.0.0.1:${LIVEMASK_ADMIN_PORT}/login"
+          check_url "website" "http://127.0.0.1:${LIVEMASK_WEBSITE_PORT}/"
+
+      - name: Upload runtime status artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-runtime-status
+          path: /tmp/livemask-runtime/status.json
+          retention-days: 3
+
+  notify-lark:
+    needs: [deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download runtime status artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dev-runtime-status
+          path: /tmp/livemask-runtime/
+        continue-on-error: true
+
+      - name: Determine workflow result
+        id: result
+        run: |
+          if [[ "${{ needs.deploy.result }}" == "cancelled" ]]; then
+            echo "result=cancelled" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ needs.deploy.result }}" == "success" ]]; then
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify Lark with dev runtime evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LARK_BOT_WEBHOOK: ${{ secrets.LARK_BOT_WEBHOOK }}
+          LARK_BOT_SECRET: ${{ secrets.LARK_BOT_SECRET }}
+          RUNTIME_ENV: dev
+          WORKFLOW_RESULT: ${{ steps.result.outputs.result }}
+        run: |
+          if [[ -f /tmp/livemask-runtime/status.json ]]; then
+            bash .github/scripts/lark-runtime-notify.sh "${WORKFLOW_RESULT}" /tmp/livemask-runtime/status.json
+          else
+            bash .github/scripts/lark-runtime-notify.sh "${WORKFLOW_RESULT}"
+          fi

@@ -3,7 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-WORKSPACE_DIR="$(cd "${REPO_DIR}/.." && pwd)"
+
+# Prefer LIVEMASK_WORKSPACE_ROOT; fall back to parent of repo dir.
+LIVEMASK_WORKSPACE_ROOT="${LIVEMASK_WORKSPACE_ROOT:-$(cd "${REPO_DIR}/.." && pwd)}"
+WORKSPACE_DIR="${LIVEMASK_WORKSPACE_ROOT}"
 RUNTIME_SH="${SCRIPT_DIR}/runtime.sh"
 
 export LIVEMASK_BACKEND_HTTP_PORT="18080"
