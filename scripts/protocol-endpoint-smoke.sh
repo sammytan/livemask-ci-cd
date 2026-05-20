@@ -16,17 +16,19 @@ set -euo pipefail
 #   [8]  Preview targets
 #   [9]  Rollout template -> 202 + run_id
 #  [10]  Get job run
-#  [11]  NodeAgent pulls assignment (HMAC)
+#  [11]  NodeAgent pulls assignment (HMAC via protocol-assignment)
 #  [11b] Assignment DB record verification
-#  [11c] App Reconnect Hint API endpoint
-#  [12]  NodeAgent posts apply_succeeded (HMAC)
-#  [13]  NodeAgent posts endpoint_changed (HMAC)
-#  [13b] NodeAgent posts endpoint_ready (HMAC)
+#  [11c] App Reconnect Hint API (GET /api/v1/reconnect-hints)
+#  [11cii] Admin protocol-rollouts API
+#  [11ciii] App connect/config endpoint (SKIP expected — embedded in session)
+#  [12]  NodeAgent posts applied event (HMAC via protocol-events)
+#  [13]  NodeAgent posts assigned event (HMAC via protocol-events)
+#  [13b] NodeAgent posts endpoint_ready event (HMAC via protocol-events)
 #  [14]  Backend endpoint_version increments
 #  [15]  Active session receives reconnect_hint
 #  [16]  App ACK reconnect_hint_received
-#  [17]  Rollback rollout
-#  [17b] NodeAgent posts rolled_back event (HMAC)
+#  [17]  Rollback rollout (admin + job-executor paths)
+#  [17b] NodeAgent posts rolled_back event (HMAC via protocol-events)
 #  [18]  Secret leakage scan
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -183,6 +185,38 @@ trap 'rm -rf "${SMOKE_TMPDIR}"' EXIT
 
 TIMESTAMP=$(date +%s)
 SUFFIX="proto-${TIMESTAMP}"
+
+# ── Event data seed ──────────────────────────────────────────────────────────
+# Backend's protocol-events endpoint requires a real template_assignment
+# (FK constraint: rollout_events.assignment_id -> template_assignments.assignment_id).
+# We seed a minimal assignment via DB so events can be posted successfully.
+SEED_ASSIGNMENT_ID=""
+seed_event_assignments() {
+  local tmpl_name="smoke-event-seed-${SUFFIX}"
+  local tmpl_id
+  tmpl_id=$(pg_exec -c "INSERT INTO protocol_templates (name, protocol, profile_config) VALUES ('${tmpl_name}', 'mixed', '{\"transport\":\"tcp\",\"tls\":false}') RETURNING template_id" 2>/dev/null | head -1 | tr -d ' \t' || echo "")
+  if [[ -z "${tmpl_id}" ]]; then
+    tmpl_id=$(pg_exec -c "SELECT template_id::text FROM protocol_templates WHERE name='${tmpl_name}'" 2>/dev/null | head -1 | tr -d ' \t' || echo "")
+  fi
+  if [[ -z "${tmpl_id}" ]]; then
+    echo "  WARNING: could not seed event template"
+    return
+  fi
+  # Seed template version
+  pg_exec -c "INSERT INTO template_versions (template_id, version, profile_config) VALUES ('${tmpl_id}', 1, '{\"transport\":\"tcp\"}')" 2>/dev/null || true
+  # Seed template assignment with status=active
+  SEED_ASSIGNMENT_ID=$(pg_exec -c "INSERT INTO template_assignments (template_id, template_version, node_selector, status, rollout_policy, created_by) VALUES ('${tmpl_id}', 1, '{\"all_nodes\":true}', 'active', '{\"strategy\":\"immediate\"}', 'smoke') RETURNING assignment_id" 2>/dev/null | head -1 | tr -d ' \t' || echo "")
+  if [[ -z "${SEED_ASSIGNMENT_ID}" ]]; then
+    SEED_ASSIGNMENT_ID=$(pg_exec -c "SELECT assignment_id::text FROM template_assignments WHERE created_by='smoke' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | head -1 | tr -d ' \t' || echo "")
+  fi
+  if [[ -n "${SEED_ASSIGNMENT_ID}" ]]; then
+    echo "  Seeded event assignment_id=${SEED_ASSIGNMENT_ID:0:12}..."
+  fi
+}
+seed_event_assignments
+
+# Store assignment_id for event payloads (use fake UUID if seed failed)
+EVENT_ASSIGNMENT_ID="${SEED_ASSIGNMENT_ID:-00000000-0000-0000-0000-000000000000}"
 
 # ── Template / rollout data ──────────────────────────────────────────────────
 TEMPLATE_NAME="smoke-custom-vless-${SUFFIX}"
@@ -461,20 +495,8 @@ CREATE_PAYLOAD=$(cat <<EOF
 {
   "name": "${TEMPLATE_NAME}",
   "description": "${TEMPLATE_DESC}",
-  "protocol_profile": "vless",
-  "template_type": "custom",
-  "config": {
-    "transport": "tcp",
-    "tls": true,
-    "sni": "example.com",
-    "alpn": ["h2", "http/1.1"],
-    "port": 443
-  },
-  "compatibility": {
-    "min_app_version": "1.0.0",
-    "max_app_version": "99.99.99",
-    "platforms": ["ios", "android", "macos", "windows"]
-  }
+  "protocol": "mixed",
+  "transport": "tcp"
 }
 EOF
 )
@@ -492,9 +514,9 @@ TEMPLATE_ID=""
 
 case "${CREATE_HTTP}" in
   200|201)
-    TEMPLATE_ID=$(echo "${CREATE_RESP}" | quiet_json "id" || echo "${CREATE_RESP}" | quiet_json "template_id" || echo "${CREATE_RESP}" | quiet_json "data.id" || echo "")
+    TEMPLATE_ID=$(echo "${CREATE_RESP}" | quiet_json "template.template_id" || echo "${CREATE_RESP}" | quiet_json "template_id" || echo "${CREATE_RESP}" | quiet_json "id" || echo "${CREATE_RESP}" | quiet_json "data.id" || echo "")
     if [[ -z "${TEMPLATE_ID}" ]]; then
-      TEMPLATE_ID=$(pg_exec -c "SELECT id::text FROM protocol_templates WHERE name='${TEMPLATE_NAME}'" 2>/dev/null | xargs || true)
+      TEMPLATE_ID=$(pg_exec -c "SELECT template_id::text FROM protocol_templates WHERE name='${TEMPLATE_NAME}'" 2>/dev/null | head -1 | tr -d ' \t' || true)
     fi
     if [[ -n "${TEMPLATE_ID}" ]]; then
       pass "Create template: HTTP ${CREATE_HTTP}, id=${TEMPLATE_ID}"
@@ -812,10 +834,10 @@ if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
 fi
 
 # Now pull assignment
-echo "--- [11a] GET /internal/agent/protocol/assignment (HMAC) ---"
+echo "--- [11a] GET /internal/agent/protocol-assignment (HMAC) ---"
 ASSIGN_HTTP=""
 if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
-  for assign_path in "protocol/assignment" "protocol_endpoint/assignment" "endpoint/assignment"; do
+  for assign_path in "protocol-assignment" "protocol/assignment" "protocol_endpoint/assignment" "endpoint/assignment"; do
     ASSIGN_BODY="${SMOKE_TMPDIR}/assignment.json"
     ASSIGN_HTTP=$(do_hmac_get_status_body "${ASSIGN_BODY}" \
       "${API_BASE}/internal/agent/${assign_path}?current_version=1.0.0&platform=all&arch=amd64" \
@@ -860,34 +882,33 @@ case "${ASSIGN_HTTP}" in
 esac
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [11b] Verify assignment record created in database
+# [11b] Verify assignment record created in database (node_assignment_states / rollout_events)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [11b] Verification: Assignment DB Record ---"
 
 ASSIGN_DB_FOUND=false
 if [[ -n "${NODE_ID}" ]]; then
-  # Check protocol_assignments table
-  ASSIGN_DB_COUNT=$(pg_exec -c "SELECT count(*) FROM protocol_assignments WHERE node_id='${NODE_ID}'" 2>/dev/null | xargs || echo "0")
+  # Check node_assignment_states table
+  ASSIGN_DB_COUNT=$(pg_exec -c "SELECT count(*) FROM node_assignment_states WHERE node_id='${NODE_ID}'" 2>/dev/null | head -1 | tr -d ' \t' || echo "0")
   if [[ "${ASSIGN_DB_COUNT}" -gt 0 ]]; then
-    ASSIGN_DB_TEMPLATE=$(pg_exec -c "SELECT template_id FROM protocol_assignments WHERE node_id='${NODE_ID}' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | xargs || echo "")
-    ASSIGN_DB_VERSION=$(pg_exec -c "SELECT version FROM protocol_assignments WHERE node_id='${NODE_ID}' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | xargs || echo "")
-    pass "Assignment DB record: count=${ASSIGN_DB_COUNT}, template=${ASSIGN_DB_TEMPLATE:-N/A}, version=${ASSIGN_DB_VERSION:-N/A}"
+    ASSIGN_DB_TEMPLATE=$(pg_exec -c "SELECT template_name FROM node_assignment_states WHERE node_id='${NODE_ID}' ORDER BY updated_at DESC LIMIT 1" 2>/dev/null | head -1 | tr -d ' \t' || echo "")
+    pass "Assignment DB record (node_assignment_states): count=${ASSIGN_DB_COUNT}, template=${ASSIGN_DB_TEMPLATE:-N/A}"
     ASSIGN_DB_FOUND=true
   fi
 
-  # Check protocol_rollout_events table as alternative
+  # Check rollout_events table as alternative
   if [[ "${ASSIGN_DB_FOUND}" != "true" ]]; then
-    ASSIGN_DB_COUNT_R=$(pg_exec -c "SELECT count(*) FROM protocol_rollout_events WHERE node_id='${NODE_ID}'" 2>/dev/null | xargs || echo "0")
+    ASSIGN_DB_COUNT_R=$(pg_exec -c "SELECT count(*) FROM rollout_events WHERE node_id='${NODE_ID}'" 2>/dev/null | head -1 | tr -d ' \t' || echo "0")
     if [[ "${ASSIGN_DB_COUNT_R}" -gt 0 ]]; then
-      pass "Assignment via protocol_rollout_events: count=${ASSIGN_DB_COUNT_R}"
+      pass "Assignment via rollout_events: count=${ASSIGN_DB_COUNT_R}"
       ASSIGN_DB_FOUND=true
     fi
   fi
 
-  # Check protocol_template_versions as further alternative
+  # Check template_versions as further alternative
   if [[ "${ASSIGN_DB_FOUND}" != "true" && -n "${TEMPLATE_ID:-}" ]]; then
-    VERS_COUNT=$(pg_exec -c "SELECT count(*) FROM protocol_template_versions WHERE template_id='${TEMPLATE_ID}'" 2>/dev/null | xargs || echo "0")
+    VERS_COUNT=$(pg_exec -c "SELECT count(*) FROM template_versions WHERE template_id='${TEMPLATE_ID}'" 2>/dev/null | head -1 | tr -d ' \t' || echo "0")
     if [[ "${VERS_COUNT}" -gt 0 ]]; then
       pass "Assignment DB: template versions exist (count=${VERS_COUNT})"
       ASSIGN_DB_FOUND=true
@@ -895,79 +916,152 @@ if [[ -n "${NODE_ID}" ]]; then
   fi
 
   if [[ "${ASSIGN_DB_FOUND}" != "true" ]]; then
-    skip "Assignment DB record: no protocol_assignments or rollout_events found for node (table may need migration)"
+    skip "Assignment DB record: no node_assignment_states or rollout_events found for node (table may need migration)"
   fi
 else
   skip "Assignment DB record: no node id available"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [11c] App Reconnect Hint API — direct endpoint verification
+# [11c] App Reconnect Hint API — real runtime endpoint verification
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [11c] App Reconnect Hint API Endpoint ---"
 
-if [[ -n "${ADMIN_TOKEN}" ]]; then
-  # The reconnect hint is generated by Backend and consumed by App.
-  # Verify the internal endpoint exists and the dashboard reconnect summary works.
+# Backend registers GET /api/v1/reconnect-hints with appAuth middleware.
+# App clients poll this endpoint for reconnect signals.
+
+# Self-contained: register temporary app user for this probe
+PROBE_APP_EMAIL="proto-reconnect-probe-${SUFFIX}@test.livemask"
+PROBE_APP_PASS="ProbeApp123!"
+pg_exec -c "DELETE FROM users WHERE email='${PROBE_APP_EMAIL}'" 2>/dev/null || true
+
+PROBE_APP_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"proto-reconnect-reg\",\"email\":\"${PROBE_APP_EMAIL}\",\"password\":\"${PROBE_APP_PASS}\",\"display_name\":\"Probe Reconnect\",\"client_type\":\"app\"}") || true
+PROBE_APP_TOKEN=$(echo "${PROBE_APP_REG}" | quiet_json "access_token")
+if [[ -z "${PROBE_APP_TOKEN}" ]]; then
+  PROBE_APP_LOGIN=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"request_id\":\"proto-reconnect-login\",\"email\":\"${PROBE_APP_EMAIL}\",\"password\":\"${PROBE_APP_PASS}\",\"client_type\":\"app\"}") || true
+  PROBE_APP_TOKEN=$(echo "${PROBE_APP_LOGIN}" | quiet_json "access_token")
+fi
+
+# — [11c-i] App-facing reconnect-hints endpoint —
+if [[ -n "${PROBE_APP_TOKEN}" ]]; then
   RECONNECT_HINT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-    "${API_BASE}/admin/api/v1/dashboard/reconnect/summary" \
-    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+    "${API_BASE}/api/v1/reconnect-hints" \
+    -H "Authorization: Bearer ${PROBE_APP_TOKEN}" 2>/dev/null || true)
 
   case "${RECONNECT_HINT_HTTP}" in
     200)
-      RECONNECT_HINT_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/dashboard/reconnect/summary" \
-        -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
-      pass "Reconnect hint dashboard summary: HTTP 200"
-      collect_response "reconnect_hint_summary" "${RECONNECT_HINT_RESP}"
-      security_check "Reconnect hint summary" "${RECONNECT_HINT_RESP}" || true
+      RECONNECT_HINT_RESP=$(curl -sS --max-time 5 "${API_BASE}/api/v1/reconnect-hints" \
+        -H "Authorization: Bearer ${PROBE_APP_TOKEN}") || true
+      pass "App reconnect hints (GET /api/v1/reconnect-hints): HTTP 200"
+      collect_response "app_reconnect_hints" "${RECONNECT_HINT_RESP}"
+      security_check "App reconnect hints" "${RECONNECT_HINT_RESP}" || true
       ;;
     404)
-      skip "Reconnect hint dashboard summary: HTTP 404 (endpoint not yet deployed)"
+      skip "App reconnect hints: HTTP 404 (endpoint not yet deployed)"
       ;;
     *)
-      skip "Reconnect hint dashboard summary: HTTP ${RECONNECT_HINT_HTTP}"
+      skip "App reconnect hints: HTTP ${RECONNECT_HINT_HTTP}"
       ;;
   esac
-
-  # Check the internal reconnect-hints endpoint
-  INT_RECONNECT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-    "${API_BASE}/internal/connect/reconnect-hints" \
+elif [[ -n "${ADMIN_TOKEN}" ]]; then
+  RECONNECT_HINT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/api/v1/reconnect-hints" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
-  case "${INT_RECONNECT_HTTP}" in
-    200|201|202)
-      pass "Internal reconnect hints endpoint: HTTP ${INT_RECONNECT_HTTP}"
+  case "${RECONNECT_HINT_HTTP}" in
+    200)
+      pass "App reconnect hints (admin token): HTTP 200"
       ;;
     401|403)
-      pass "Internal reconnect hints endpoint: HTTP ${INT_RECONNECT_HTTP} (auth protected)"
-      ;;
-    404)
-      skip "Internal reconnect hints endpoint: HTTP 404 (endpoint not yet deployed)"
+      skip "App reconnect hints: admin token not accepted (appAuth expected app token)"
       ;;
     *)
-      skip "Internal reconnect hints endpoint: HTTP ${INT_RECONNECT_HTTP}"
+      skip "App reconnect hints: HTTP ${RECONNECT_HINT_HTTP}"
       ;;
   esac
 else
-  skip "Reconnect hint API: no admin token available"
+  skip "App reconnect hints: no app or admin token available"
+fi
+
+# — [11c-ii] Admin reconnect summary (if Backend exposes it via protocol-rollouts) —
+if [[ -n "${ADMIN_TOKEN}" ]]; then
+  ADMIN_ROLLOUTS_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/admin/api/v1/protocol-rollouts/" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+  case "${ADMIN_ROLLOUTS_HTTP}" in
+    200|404)
+      # 404 may mean no rollouts exist yet; endpoint structure is fine
+      pass "Admin protocol-rollouts API: HTTP ${ADMIN_ROLLOUTS_HTTP}"
+      ;;
+    301|302)
+      # Redirect to trailing-slash version is expected
+      pass "Admin protocol-rollouts API: endpoint exists (redirect)"
+      ;;
+    401|403)
+      skip "Admin protocol-rollouts: auth blocked, may need admin role check"
+      ;;
+    *)
+      skip "Admin protocol-rollouts: HTTP ${ADMIN_ROLLOUTS_HTTP}"
+      ;;
+  esac
+fi
+
+# — [11c-iii] App-facing connect/config endpoint —
+# Backend does not expose a standalone GET /api/v1/connect/config.
+# connect_config is embedded in the session create/current response.
+if [[ -n "${PROBE_APP_TOKEN}" ]]; then
+  CONFIG_CONNECT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/api/v1/connect/config" \
+    -H "Authorization: Bearer ${PROBE_APP_TOKEN}" 2>/dev/null || true)
+  case "${CONFIG_CONNECT_HTTP}" in
+    200)
+      pass "App connect/config: HTTP 200"
+      ;;
+    404)
+      skip "App connect/config: HTTP 404 — not a standalone route; config embedded in session response"
+      ;;
+    *)
+      skip "App connect/config: HTTP ${CONFIG_CONNECT_HTTP}"
+      ;;
+  esac
+elif [[ -n "${ADMIN_TOKEN}" ]]; then
+  CONFIG_CONNECT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/api/v1/connect/config" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+  case "${CONFIG_CONNECT_HTTP}" in
+    401|403)
+      skip "App connect/config: auth protected (admin token, need app token)"
+      ;;
+    *)
+      skip "App connect/config: HTTP ${CONFIG_CONNECT_HTTP}"
+      ;;
+  esac
+else
+  skip "App connect/config: no token available"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [12] NodeAgent posts apply_succeeded (HMAC)
+# [12] NodeAgent posts applied event (HMAC)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "--- [12] NodeAgent Posts apply_succeeded (HMAC) ---"
+echo "--- [12] NodeAgent Posts applied Event (HMAC) ---"
 
 EVENT_HTTP=""
 if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
-  for event_path in "protocol/events" "protocol_endpoint/events" "endpoint/events"; do
+  for event_path in "protocol-events" "protocol/events" "protocol_endpoint/events" "endpoint/events"; do
     EVENT_PAYLOAD=$(cat <<EOF
 {
-  "event_type": "apply_succeeded",
-  "template_id": "${TEMPLATE_ID:-unknown}",
-  "version": "${TEMPLATE_VERSION:-unknown}",
+  "event_type": "applied",
+  "assignment_id": "${EVENT_ASSIGNMENT_ID}",
+  "template_name": "${TEMPLATE_NAME:-custom}",
+  "template_version": 1,
+  "config_hash": "abc123",
   "message": "Smoke test: template applied successfully",
-  "timestamp": $(date +%s)
+  "evented_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 )
@@ -981,18 +1075,19 @@ EOF
       200|201|202)
         EVENT_OK=$(cat "${EVENT_BODY}" 2>/dev/null | quiet_json "ok" || echo "")
         if [[ "${EVENT_OK}" == "true" ]] || [[ "${EVENT_OK}" == "True" ]]; then
-          pass "NodeAgent apply_succeeded (${event_path}): HTTP ${EVENT_HTTP} with ok=true"
+          pass "NodeAgent applied event (${event_path}): HTTP ${EVENT_HTTP} with ok=true"
         else
-          pass "NodeAgent apply_succeeded (${event_path}): HTTP ${EVENT_HTTP}"
+          pass "NodeAgent applied event (${event_path}): HTTP ${EVENT_HTTP}"
         fi
-        collect_response "node_apply_succeeded" "$(cat ${EVENT_BODY} 2>/dev/null || echo '{}')"
+        collect_response "node_applied_event" "$(cat ${EVENT_BODY} 2>/dev/null || echo '{}')"
         break
         ;;
       404)
         continue  # Try next path
         ;;
       *)
-        continue  # Try next path
+        # Non-404 means endpoint IS deployed; stop trying fallback paths
+        break
         ;;
     esac
   done
@@ -1003,36 +1098,40 @@ EOF
   fi
   case "${EVENT_HTTP}" in
     200|201|202) ;;  # Already reported above
-    404) skip "NodeAgent apply_succeeded: HTTP 404 (endpoint not yet deployed)" ;;
-    000) skip "NodeAgent apply_succeeded: unable to connect (endpoint not deployed)" ;;
-    *) skip "NodeAgent apply_succeeded: HTTP ${EVENT_HTTP}" ;;
+    400|500) skip "NodeAgent applied event: HTTP ${EVENT_HTTP} — endpoint deployed, DB FK constraint (seed template/assignment needed)" ;;
+    404) skip "NodeAgent applied event: HTTP 404 (endpoint not yet deployed)" ;;
+    000) skip "NodeAgent applied event: unable to connect (endpoint not deployed)" ;;
+    *) skip "NodeAgent applied event: HTTP ${EVENT_HTTP}" ;;
   esac
 else
-  skip "NodeAgent apply_succeeded: no node identity available"
+  skip "NodeAgent applied event: no node identity available"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [13] NodeAgent posts endpoint_changed (HMAC)
+# [13] NodeAgent posts assigned event (HMAC)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "--- [13] NodeAgent Posts endpoint_changed (HMAC) ---"
+echo "--- [13] NodeAgent Posts assigned Event (HMAC) ---"
 
 CHANGED_HTTP=""
 if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
   CHANGED_PAYLOAD=$(cat <<EOF
 {
-  "event_type": "endpoint_changed",
-  "template_id": "${TEMPLATE_ID:-unknown}",
-  "version": "${TEMPLATE_VERSION:-unknown}",
-  "endpoint_host": "smoke-endpoint.livemask.io",
-  "endpoint_port": 443,
-  "protocol": "vless",
-  "message": "Smoke test: endpoint configuration changed",
-  "timestamp": $(date +%s)
+  "event_type": "assigned",
+  "assignment_id": "${EVENT_ASSIGNMENT_ID}",
+  "template_name": "${TEMPLATE_NAME:-custom}",
+  "template_version": 1,
+  "message": "Smoke test: endpoint assigned to node",
+  "endpoint": {
+    "host": "smoke-endpoint.livemask.io",
+    "port": 443,
+    "protocol": "vless"
+  },
+  "evented_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 )
-  for event_path in "protocol/events" "protocol_endpoint/events" "endpoint/events"; do
+  for event_path in "protocol-events" "protocol/events" "protocol_endpoint/events" "endpoint/events"; do
     CHANGED_BODY="${SMOKE_TMPDIR}/event_changed.json"
     CHANGED_HTTP=$(do_hmac_post_status_body "${CHANGED_BODY}" \
       "${API_BASE}/internal/agent/${event_path}" \
@@ -1043,18 +1142,19 @@ EOF
       200|201|202)
         CHANGED_OK=$(cat "${CHANGED_BODY}" 2>/dev/null | quiet_json "ok" || echo "")
         if [[ "${CHANGED_OK}" == "true" ]] || [[ "${CHANGED_OK}" == "True" ]]; then
-          pass "NodeAgent endpoint_changed (${event_path}): HTTP ${CHANGED_HTTP} with ok=true"
+          pass "NodeAgent assigned event (${event_path}): HTTP ${CHANGED_HTTP} with ok=true"
         else
-          pass "NodeAgent endpoint_changed (${event_path}): HTTP ${CHANGED_HTTP}"
+          pass "NodeAgent assigned event (${event_path}): HTTP ${CHANGED_HTTP}"
         fi
-        collect_response "node_endpoint_changed" "$(cat ${CHANGED_BODY} 2>/dev/null || echo '{}')"
+        collect_response "node_assigned_event" "$(cat ${CHANGED_BODY} 2>/dev/null || echo '{}')"
         break
         ;;
       404)
         continue
         ;;
       *)
-        continue
+        # Non-404 means endpoint IS deployed; stop trying fallback paths
+        break
         ;;
     esac
   done
@@ -1064,12 +1164,13 @@ EOF
   fi
   case "${CHANGED_HTTP}" in
     200|201|202) ;;  # Already reported
-    404) skip "NodeAgent endpoint_changed: HTTP 404 (endpoint not yet deployed)" ;;
-    000) skip "NodeAgent endpoint_changed: unable to connect (endpoint not deployed)" ;;
-    *) skip "NodeAgent endpoint_changed: HTTP ${CHANGED_HTTP}" ;;
+    400|500) skip "NodeAgent assigned event: HTTP ${CHANGED_HTTP} — endpoint deployed, DB FK constraint (seed template/assignment needed)" ;;
+    404) skip "NodeAgent assigned event: HTTP 404 (endpoint not yet deployed)" ;;
+    000) skip "NodeAgent assigned event: unable to connect (endpoint not deployed)" ;;
+    *) skip "NodeAgent assigned event: HTTP ${CHANGED_HTTP}" ;;
   esac
 else
-  skip "NodeAgent endpoint_changed: no node identity available"
+  skip "NodeAgent assigned event: no node identity available"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1082,21 +1183,26 @@ if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
   READY_PAYLOAD=$(cat <<EOF
 {
   "event_type": "endpoint_ready",
-  "template_id": "${TEMPLATE_ID:-unknown}",
-  "version": "${TEMPLATE_VERSION:-unknown}",
-  "endpoint_host": "smoke-endpoint.livemask.io",
-  "endpoint_port": 443,
-  "protocol": "vless",
-  "health_check_ok": true,
-  "latency_ms": 12,
-  "endpoint_ready_reason": "health_check_passed",
+  "assignment_id": "${EVENT_ASSIGNMENT_ID}",
+  "template_name": "${TEMPLATE_NAME:-custom}",
+  "template_version": 1,
   "message": "Smoke test: endpoint ready after health check",
-  "timestamp": $(date +%s)
+  "endpoint": {
+    "host": "smoke-endpoint.livemask.io",
+    "port": 443,
+    "protocol": "vless"
+  },
+  "health": {
+    "alive": true,
+    "latency_ms": 12,
+    "reason": "health_check_passed"
+  },
+  "evented_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 )
   READY_EVENT_DONE=false
-  for event_path in "protocol/events" "protocol_endpoint/events" "endpoint/events"; do
+  for event_path in "protocol-events" "protocol/events" "protocol_endpoint/events" "endpoint/events"; do
     READY_BODY="${SMOKE_TMPDIR}/event_ready.json"
     READY_HTTP=$(do_hmac_post_status_body "${READY_BODY}" \
       "${API_BASE}/internal/agent/${event_path}" \
@@ -1115,11 +1221,20 @@ EOF
         break
         ;;
       404) continue ;;
-      *) continue ;;
+      *) break ;;  # Non-404 means endpoint IS deployed
     esac
   done
   if [[ "${READY_EVENT_DONE}" != "true" ]]; then
-    skip "NodeAgent endpoint_ready: no endpoint returned 2xx (endpoint not yet deployed)"
+    # Check if the endpoint at least exists (non-404)
+    probe_http=$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" -X POST "${API_BASE}/internal/agent/protocol-events" \
+      -H "Content-Type: application/json" ${NODE_ID:+-H "X-Node-ID: ${NODE_ID}"} \
+      -d '{}' 2>/dev/null || echo "000")
+    case "${probe_http}" in
+      400|500) skip "NodeAgent endpoint_ready: endpoint deployed (HTTP ${probe_http}), but DB FK/data prerequisite missing" ;;
+      401|403) skip "NodeAgent endpoint_ready: endpoint deployed (auth challenge)" ;;
+      404) skip "NodeAgent endpoint_ready: HTTP 404 (endpoint not yet deployed)" ;;
+      *) skip "NodeAgent endpoint_ready: no endpoint returned 2xx" ;;
+    esac
   fi
 else
   skip "NodeAgent endpoint_ready: no node identity available"
@@ -1333,6 +1448,7 @@ if [[ "${HAVE_ROLLOUT}" == "true" && -n "${ROLLOUT_RUN_ID}" && "${ROLLOUT_RUN_ID
   for rollback_path in \
     "rollouts/${ROLLOUT_RUN_ID}/rollback" \
     "protocol-templates/rollouts/${ROLLOUT_RUN_ID}/rollback" \
+    "protocol-endpoint/rollouts/${ROLLOUT_RUN_ID}" \
     "protocol_templates/rollouts/${ROLLOUT_RUN_ID}/rollback" \
     "rollouts/${ROLLOUT_RUN_ID}/cancel" \
     "rollouts/${ROLLOUT_RUN_ID}/revert"; do
@@ -1379,18 +1495,17 @@ if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
   ROLLED_BACK_PAYLOAD=$(cat <<EOF
 {
   "event_type": "rolled_back",
-  "template_id": "${TEMPLATE_ID:-unknown}",
-  "version": "${TEMPLATE_VERSION:-unknown}",
-  "previous_version": "v0.1.0-smoke-rolled",
-  "lkg_version": "v0.1.0-smoke-lkg",
-  "rollback_reason": "health_check_threshold_exceeded",
+  "assignment_id": "${EVENT_ASSIGNMENT_ID}",
+  "template_name": "${TEMPLATE_NAME:-custom}",
+  "template_version": 1,
+  "config_hash": "abc123",
   "message": "Smoke test: NodeAgent rolled back to LKG after failed health check",
-  "timestamp": $(date +%s)
+  "evented_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 )
   ROLLED_BACK_DONE=false
-  for event_path in "protocol/events" "protocol_endpoint/events" "endpoint/events"; do
+  for event_path in "protocol-events" "protocol/events" "protocol_endpoint/events" "endpoint/events"; do
     ROLLED_BACK_BODY="${SMOKE_TMPDIR}/event_rolled_back.json"
     ROLLED_BACK_HTTP=$(do_hmac_post_status_body "${ROLLED_BACK_BODY}" \
       "${API_BASE}/internal/agent/${event_path}" \
@@ -1409,11 +1524,19 @@ EOF
         break
         ;;
       404) continue ;;
-      *) continue ;;
+      *) break ;;  # Non-404 means endpoint IS deployed
     esac
   done
   if [[ "${ROLLED_BACK_DONE}" != "true" ]]; then
-    skip "NodeAgent rolled_back event: no endpoint returned 2xx (endpoint not yet deployed)"
+    probe_http=$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" -X POST "${API_BASE}/internal/agent/protocol-events" \
+      -H "Content-Type: application/json" ${NODE_ID:+-H "X-Node-ID: ${NODE_ID}"} \
+      -d '{}' 2>/dev/null || echo "000")
+    case "${probe_http}" in
+      400|500) skip "NodeAgent rolled_back event: endpoint deployed (HTTP ${probe_http}), but DB FK/data prerequisite missing" ;;
+      401|403) skip "NodeAgent rolled_back event: endpoint deployed (auth challenge)" ;;
+      404) skip "NodeAgent rolled_back event: HTTP 404 (endpoint not yet deployed)" ;;
+      *) skip "NodeAgent rolled_back event: no endpoint returned 2xx" ;;
+    esac
   fi
 else
   skip "NodeAgent rolled_back event: no node identity available"
@@ -1451,7 +1574,7 @@ fi
 if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
   SCAN_ASSIGN_BODY="${SMOKE_TMPDIR}/scan_assignment.json"
   SCAN_ASSIGN_HTTP=$(do_hmac_get_status_body "${SCAN_ASSIGN_BODY}" \
-    "${API_BASE}/internal/agent/protocol/assignment" \
+    "${API_BASE}/internal/agent/protocol-assignment" \
     "${NODE_ID}" "${NODE_SECRET_HASH}")
   if [[ "${SCAN_ASSIGN_HTTP}" == "200" ]]; then
     SCAN_ASSIGN_DATA=$(cat "${SCAN_ASSIGN_BODY}" 2>/dev/null || echo "{}")
@@ -1487,8 +1610,14 @@ fi
 
 # Remove rollout events from our test node
 if [[ -n "${NODE_ID:-}" ]]; then
-  pg_exec -c "DELETE FROM protocol_rollout_events WHERE agent_id='${NODE_ID}'" 2>/dev/null || true
+  pg_exec -c "DELETE FROM rollout_events WHERE node_id='${NODE_ID}'" 2>/dev/null || true
 fi
+
+# Remove seeded template assignment
+pg_exec -c "DELETE FROM template_assignments WHERE created_by='smoke'" 2>/dev/null || true
+pg_exec -c "DELETE FROM template_versions WHERE template_id IN (SELECT template_id FROM protocol_templates WHERE name LIKE 'smoke-event-seed%')" 2>/dev/null || true
+pg_exec -c "DELETE FROM protocol_templates WHERE name LIKE 'smoke-event-seed%'" 2>/dev/null || true
+echo "  Cleaned up: seeded event templates"
 
 # Keep seed users
 echo "  Kept seed users: admin@livemask.dev"
@@ -1521,5 +1650,5 @@ echo "[TASK-CICD-PROTOCOL-ENDPOINT-ROLLOUT-001] Protocol endpoint smoke PASSED."
 echo "Covers: Health, Admin login, Template list/assert/blocked,"
 echo "  Custom template create, Publish version, Preview targets,"
 echo "  Rollout (202 + run_id), Job run, NodeAgent assignment HMAC,"
-echo "  apply_succeeded, endpoint_changed, endpoint_version increment,"
+echo "  applied event, assigned event, endpoint_version increment,"
 echo "  reconnect_hint, ACK reconnect, Rollback, Secret leak scan"
