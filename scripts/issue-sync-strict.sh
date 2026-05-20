@@ -16,15 +16,17 @@ set -euo pipefail
 #
 # Options:
 #   --repo REPO            Runtime repo to check (repeatable or comma-separated).
-#                          Default: all runtime repos except livemask-docs.
+#                          Default: current GitHub repo, or livemask-ci-cd locally.
 #   --gh-token TOKEN       GitHub token with issues:read access.
-#                          Default: GITHUB_TOKEN env.
+#                          Default: LIVEMASK_BOT_TOKEN, then GITHUB_TOKEN env.
 #   --format text|json     Output format (default: text).
+#   --docs-required BOOL   Whether a docs Issue is required (default: true).
+#   --missing-runtime MODE Runtime missing Issue policy: fail|warn (default: fail).
 #   --verbose              Show raw issue data.
 #   --help                 Show this help.
 #
 # Exit codes:
-#   0 = PASS  (1 issue found in docs repo, 1 in each checked runtime repo)
+#   0 = PASS  (issue sync is acceptable under configured policy)
 #   1 = FAIL  (one or more repos missing or mismatched)
 #   2 = AMBIGUOUS (multiple open issues match the same TASK ID)
 #   3 = MISSING (no issue found in docs repo)
@@ -36,7 +38,7 @@ set -euo pipefail
 
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 ORG="${GITHUB_REPOSITORY_OWNER:-MyAiDevs}"
-GH_TOKEN="${GITHUB_TOKEN:-}"
+GH_TOKEN="${LIVEMASK_BOT_TOKEN:-${GITHUB_TOKEN:-}}"
 
 DOCS_REPO="livemask-docs"
 ALL_REPOS=(
@@ -61,7 +63,11 @@ NC='\033[0m' # No Color
 # Help
 # ============================================================
 usage() {
-  sed -n '3,/^# =/p' "${BASH_SOURCE[0]}" | sed 's/^# //;s/^#$//'
+  awk '
+    /^# =+$/ { block++; next }
+    block == 1 && /^#/ { sub(/^# ?/, ""); print }
+    block == 2 { exit }
+  ' "${BASH_SOURCE[0]}"
   exit 0
 }
 
@@ -72,6 +78,8 @@ task_id=""
 repos_to_check=()
 format="text"
 verbose=false
+docs_required=true
+missing_runtime="fail"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -89,6 +97,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --format)
       format="${2:-text}"
+      shift 2
+      ;;
+    --docs-required)
+      docs_required="${2:-true}"
+      shift 2
+      ;;
+    --missing-runtime)
+      missing_runtime="${2:-fail}"
       shift 2
       ;;
     --verbose)
@@ -119,18 +135,61 @@ if [[ ! "${task_id}" =~ ^TASK-[A-Z0-9]+(-[A-Z0-9]+)*(-[A-Za-z0-9_-]+)*$ ]]; then
 fi
 
 if [[ -z "${GH_TOKEN}" ]]; then
-  echo "ERROR: GITHUB_TOKEN or --gh-token is required for GitHub API access" >&2
+  echo "ERROR: LIVEMASK_BOT_TOKEN, GITHUB_TOKEN, or --gh-token is required for GitHub API access" >&2
   exit 2
 fi
 
-# If no --repo given, check all runtime repos (excluding docs, which is always checked)
+if [[ "${format}" != "text" && "${format}" != "json" ]]; then
+  echo "ERROR: --format must be text or json, got '${format}'" >&2
+  exit 2
+fi
+
+if [[ "${docs_required}" != "true" && "${docs_required}" != "false" ]]; then
+  echo "ERROR: --docs-required must be true or false, got '${docs_required}'" >&2
+  exit 2
+fi
+
+if [[ "${missing_runtime}" != "fail" && "${missing_runtime}" != "warn" ]]; then
+  echo "ERROR: --missing-runtime must be fail or warn, got '${missing_runtime}'" >&2
+  exit 2
+fi
+
+# If no --repo given, check the current repo. This avoids turning a repo-local
+# CI gate into an all-runtime-repo blocker.
 if [[ ${#repos_to_check[@]} -eq 0 ]]; then
-  for r in "${ALL_REPOS[@]}"; do
-    if [[ "${r}" != "${DOCS_REPO}" ]]; then
-      repos_to_check+=("${r}")
+  current_repo="${GITHUB_REPOSITORY:-}"
+  current_repo="${current_repo##*/}"
+  if [[ -z "${current_repo}" || "${current_repo}" == "${GITHUB_REPOSITORY}" || "${current_repo}" == "${DOCS_REPO}" ]]; then
+    current_repo="livemask-ci-cd"
+  fi
+  repos_to_check+=("${current_repo}")
+fi
+
+expanded_repos=()
+for repo_arg in "${repos_to_check[@]}"; do
+  IFS=',' read -r -a split_repos <<< "${repo_arg}"
+  for repo in "${split_repos[@]}"; do
+    repo="${repo//[[:space:]]/}"
+    if [[ -n "${repo}" ]]; then
+      expanded_repos+=("${repo}")
     fi
   done
-fi
+done
+repos_to_check=("${expanded_repos[@]}")
+
+for repo in "${repos_to_check[@]}"; do
+  known=false
+  for known_repo in "${ALL_REPOS[@]}"; do
+    if [[ "${repo}" == "${known_repo}" ]]; then
+      known=true
+      break
+    fi
+  done
+  if [[ "${known}" != "true" || "${repo}" == "${DOCS_REPO}" ]]; then
+    echo "ERROR: --repo must be a known runtime repo, got '${repo}'" >&2
+    exit 2
+  fi
+done
 
 # ============================================================
 # Helpers
@@ -233,8 +292,12 @@ docs_count="$(echo "${docs_response}" | issue_count)"
 docs_ambiguous="$(echo "${docs_response}" | is_ambiguous)"
 
 if [[ "${docs_count}" -eq 0 ]]; then
-  fail "No Issue found in ${DOCS_REPO} with TASK ID '${task_id}'"
-  OVERALL_EXIT=3
+  if [[ "${docs_required}" == "true" ]]; then
+    fail "No Issue found in ${DOCS_REPO} with TASK ID '${task_id}'"
+    OVERALL_EXIT=3
+  else
+    warn "No Issue found in ${DOCS_REPO} with TASK ID '${task_id}' (docs-required=false)"
+  fi
 fi
 
 if [[ "${docs_ambiguous}" == "true" ]]; then
@@ -269,11 +332,18 @@ for repo in "${repos_to_check[@]}"; do
 
   if [[ "${count}" -eq 0 ]]; then
     if [[ "${DOCS_OK}" == "true" ]]; then
-      fail "${repo}: MISSING (no Issue found for ${task_id}, but exists in ${DOCS_REPO})"
+      missing_message="${repo}: MISSING (no Issue found for ${task_id}, but exists in ${DOCS_REPO})"
     else
-      fail "${repo}: MISSING (no Issue found for ${task_id})"
+      missing_message="${repo}: MISSING (no Issue found for ${task_id})"
     fi
-    OVERALL_EXIT=1
+    if [[ "${missing_runtime}" == "fail" ]]; then
+      fail "${missing_message}"
+      if [[ "${OVERALL_EXIT}" -eq 0 ]]; then
+        OVERALL_EXIT=1
+      fi
+    else
+      warn "${missing_message} (missing-runtime=warn)"
+    fi
   elif [[ "${ambiguous}" == "true" ]]; then
     warn "${repo}: AMBIGUOUS — ${count} open Issues match ${task_id} (${states})"
     if [[ "${OVERALL_EXIT}" -eq 0 ]]; then
@@ -294,7 +364,7 @@ data = json.loads('''${RUNNING_RESULTS}''')
 data['${repo}'] = {
     'count': ${count},
     'issues': '${states}',
-    'ambiguous': ${ambiguous}
+    'ambiguous': json.loads('${ambiguous}')
 }
 print(json.dumps(data))
 ")"
@@ -304,11 +374,13 @@ JSON_RESULTS="$(python3 -c "
 import json
 result = {
     'task_id': '${task_id}',
+    'docs_required': json.loads('${docs_required}'),
+    'missing_runtime': '${missing_runtime}',
     'docs_repo': {
         'repo': '${DOCS_REPO}',
         'count': ${docs_count},
         'issues': '$(echo "${docs_response}" | issue_states)',
-        'ambiguous': ${docs_ambiguous}
+        'ambiguous': json.loads('${docs_ambiguous}')
     },
     'runtime_repos': json.loads('''${RUNNING_RESULTS}'''),
     'overall_exit': ${OVERALL_EXIT}
