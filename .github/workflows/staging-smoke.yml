@@ -30,7 +30,7 @@ jobs:
       JOB_SERVICE_REF: dev
     runs-on:
       group: livemask-staging
-      labels: [self-hosted, linux, livemask, docker, staging]
+      labels: [self-hosted, Linux, livemask, docker, staging]
     steps:
       - uses: actions/checkout@v4
       - name: Enforce dev-only smoke refs
