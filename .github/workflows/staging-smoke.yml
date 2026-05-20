@@ -153,6 +153,8 @@ jobs:
         run: bash scripts/i18n-smoke.sh
       - name: Jobs Hardening smoke (TASK-CICD-JOBS-HARDENING-001)
         run: bash scripts/jobs-hardening-smoke.sh
+      - name: OpenAPI Drift Check (TASK-CICD-OPENAPI-DRIFT-CHECK-001)
+        run: bash scripts/openapi-drift-smoke.sh
       - name: Upload runtime status artifact
         if: always()
         uses: actions/upload-artifact@v4

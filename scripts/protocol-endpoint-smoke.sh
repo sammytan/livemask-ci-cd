@@ -3,6 +3,7 @@ set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TASK-CICD-PROTOCOL-ENDPOINT-ROLLOUT-001 (enhanced for TASK-CICD-PROTOCOL-STABILITY-001)
+# TASK-CICD-RECONNECT-HINT-RUNTIME-SMOKE-001 (reconnect hint runtime deep checks)
 # Protocol & Endpoint Template Rollout Smoke
 # ═══════════════════════════════════════════════════════════════════════════════
 # Covers:
@@ -18,9 +19,12 @@ set -euo pipefail
 #  [10]  Get job run
 #  [11]  NodeAgent pulls assignment (HMAC via protocol-assignment)
 #  [11b] Assignment DB record verification
-#  [11c] App Reconnect Hint API (GET /api/v1/reconnect-hints)
-#  [11cii] Admin protocol-rollouts API
-#  [11ciii] App connect/config endpoint (SKIP expected — embedded in session)
+#  [11c] App Reconnect Hint Runtime Smoke (TASK-CICD-RECONNECT-HINT-RUNTIME-SMOKE-001)
+#        [11c-a] Create connect session
+#        [11c-b] Connect config with session_id (GET /api/v1/connect/config?session_id=...)
+#        [11c-c] Reconnect hints with session_id — deep field assertions
+#        [11c-d] Reconnect hints without session_id — broader query
+#        [11c-e] Admin protocol-rollouts API
 #  [12]  NodeAgent posts applied event (HMAC via protocol-events)
 #  [13]  NodeAgent posts assigned event (HMAC via protocol-events)
 #  [13b] NodeAgent posts endpoint_ready event (HMAC via protocol-events)
@@ -927,13 +931,16 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [11c] App Reconnect Hint API — real runtime endpoint verification
+# [11c] App Reconnect Hint Runtime Smoke — deep reconnect hint and connect config checks
+# TASK-CICD-RECONNECT-HINT-RUNTIME-SMOKE-001
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "--- [11c] App Reconnect Hint API Endpoint ---"
+echo "--- [11c] App Reconnect Hint Runtime Smoke ---"
 
-# Backend registers GET /api/v1/reconnect-hints with appAuth middleware.
-# App clients poll this endpoint for reconnect signals.
+# Backend registers:
+#   GET /api/v1/reconnect-hints[?session_id=...]   (appAuth)
+#   GET /api/v1/connect/config[?session_id=...]     (appAuth)
+# TASK-BACKEND-RECONNECT-HINT-RUNTIME-001
 
 # Self-contained: register temporary app user for this probe
 PROBE_APP_EMAIL="proto-reconnect-probe-${SUFFIX}@test.livemask"
@@ -942,7 +949,7 @@ pg_exec -c "DELETE FROM users WHERE email='${PROBE_APP_EMAIL}'" 2>/dev/null || t
 
 PROBE_APP_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{\"request_id\":\"proto-reconnect-reg\",\"email\":\"${PROBE_APP_EMAIL}\",\"password\":\"${PROBE_APP_PASS}\",\"display_name\":\"Probe Reconnect\",\"client_type\":\"app\"}") || true
+  -d "{\"request_id\":\"proto-reconnect-reg\",\"email\":\"${PROBE_APP_EMAIL}\",\"password\":\"${PROBE_APP_PASS}\",\"display_name\":\"Probe Reconnect Runtime\",\"client_type\":\"app\"}") || true
 PROBE_APP_TOKEN=$(echo "${PROBE_APP_REG}" | quiet_json "access_token")
 if [[ -z "${PROBE_APP_TOKEN}" ]]; then
   PROBE_APP_LOGIN=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/login" \
@@ -951,47 +958,160 @@ if [[ -z "${PROBE_APP_TOKEN}" ]]; then
   PROBE_APP_TOKEN=$(echo "${PROBE_APP_LOGIN}" | quiet_json "access_token")
 fi
 
-# — [11c-i] App-facing reconnect-hints endpoint —
-if [[ -n "${PROBE_APP_TOKEN}" ]]; then
-  RECONNECT_HINT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-    "${API_BASE}/api/v1/reconnect-hints" \
-    -H "Authorization: Bearer ${PROBE_APP_TOKEN}" 2>/dev/null || true)
-
-  case "${RECONNECT_HINT_HTTP}" in
-    200)
-      RECONNECT_HINT_RESP=$(curl -sS --max-time 5 "${API_BASE}/api/v1/reconnect-hints" \
-        -H "Authorization: Bearer ${PROBE_APP_TOKEN}") || true
-      pass "App reconnect hints (GET /api/v1/reconnect-hints): HTTP 200"
-      collect_response "app_reconnect_hints" "${RECONNECT_HINT_RESP}"
-      security_check "App reconnect hints" "${RECONNECT_HINT_RESP}" || true
-      ;;
-    404)
-      skip "App reconnect hints: HTTP 404 (endpoint not yet deployed)"
-      ;;
-    *)
-      skip "App reconnect hints: HTTP ${RECONNECT_HINT_HTTP}"
-      ;;
-  esac
-elif [[ -n "${ADMIN_TOKEN}" ]]; then
-  RECONNECT_HINT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-    "${API_BASE}/api/v1/reconnect-hints" \
-    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
-  case "${RECONNECT_HINT_HTTP}" in
-    200)
-      pass "App reconnect hints (admin token): HTTP 200"
-      ;;
-    401|403)
-      skip "App reconnect hints: admin token not accepted (appAuth expected app token)"
-      ;;
-    *)
-      skip "App reconnect hints: HTTP ${RECONNECT_HINT_HTTP}"
-      ;;
-  esac
+if [[ -z "${PROBE_APP_TOKEN}" ]]; then
+  skip "App reconnect hint runtime: no app token (register/login failed)"
+  RECONNECT_RUNTIME_HAD_TOKEN=false
 else
-  skip "App reconnect hints: no app or admin token available"
+  RECONNECT_RUNTIME_HAD_TOKEN=true
+  pass "App reconnect hint runtime: app token obtained (len=${#PROBE_APP_TOKEN})"
+
+  # — [11c-a] Create connect session —
+  SESSION_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${PROBE_APP_TOKEN}" \
+    -d "{\"platform\":\"ios\",\"app_version\":\"0.1.0\"}") || true
+  PROBE_SESSION_ID=$(echo "${SESSION_RESP}" | quiet_json "session.session_id" || echo "${SESSION_RESP}" | quiet_json "session_id" || echo "")
+
+  if [[ -z "${PROBE_SESSION_ID}" ]]; then
+    skip "App reconnect hint runtime: no session created (may need active nodes)"
+    RECONNECT_RUNTIME_HAD_SESSION=false
+  else
+    RECONNECT_RUNTIME_HAD_SESSION=true
+    pass "App reconnect hint runtime: session created (id=${PROBE_SESSION_ID:0:12}...)"
+
+    # — [11c-b] Connect config with session_id —
+    CONFIG_URL="${API_BASE}/api/v1/connect/config?session_id=${PROBE_SESSION_ID}"
+    CONFIG_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${CONFIG_URL}" \
+      -H "Authorization: Bearer ${PROBE_APP_TOKEN}" 2>/dev/null || true)
+
+    case "${CONFIG_HTTP}" in
+      200)
+        CONFIG_BODY=$(curl -sS --max-time 5 "${CONFIG_URL}" \
+          -H "Authorization: Bearer ${PROBE_APP_TOKEN}") || true
+        pass "Connect config (GET /api/v1/connect/config?session_id=...): HTTP 200"
+        collect_response "connect_config_session" "${CONFIG_BODY}"
+        security_check "Connect config (session_id)" "${CONFIG_BODY}" || true
+        ;;
+      404)
+        skip "Connect config: HTTP 404 (endpoint not yet deployed or session_id required)"
+        ;;
+      400)
+        skip "Connect config: HTTP 400 (session_id may be invalid)"
+        ;;
+      *)
+        skip "Connect config: HTTP ${CONFIG_HTTP}"
+        ;;
+    esac
+
+    # — [11c-c] Reconnect hints with session_id —
+    HINTS_URL="${API_BASE}/api/v1/reconnect-hints?session_id=${PROBE_SESSION_ID}"
+    HINTS_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${HINTS_URL}" \
+      -H "Authorization: Bearer ${PROBE_APP_TOKEN}" 2>/dev/null || true)
+
+    case "${HINTS_HTTP}" in
+      200)
+        HINTS_BODY=$(curl -sS --max-time 5 "${HINTS_URL}" \
+          -H "Authorization: Bearer ${PROBE_APP_TOKEN}") || true
+        pass "Reconnect hints (GET /api/v1/reconnect-hints?session_id=...): HTTP 200"
+        collect_response "reconnect_hints_session" "${HINTS_BODY}"
+        security_check "Reconnect hints (session_id)" "${HINTS_BODY}" || true
+
+        # Deep response shape assertion: {"hints":[...]}
+        HINTS_VALID=$(echo "${HINTS_BODY}" | python3 -c "
+import sys,json
+try:
+    data = json.load(sys.stdin)
+    if not isinstance(data, dict):
+        print('ROOT_NOT_DICT')
+        sys.exit(1)
+    if 'hints' not in data:
+        print('MISSING_HINTS_KEY')
+        sys.exit(1)
+    hints = data['hints']
+    if not isinstance(hints, list):
+        print('HINTS_NOT_LIST')
+        sys.exit(1)
+    # Check each hint for safe fields and forbidden internal fields
+    SAFE = {'hint_id','reason','reconnect_after_ms','expires_at'}
+    FORBIDDEN = {'node_id','session_id','config_hash','rollout_id','created_at'}
+    issues = []
+    for i, h in enumerate(hints):
+        if not isinstance(h, dict):
+            issues.append(f'hints[{i}]: not a dict')
+            continue
+        h_keys = set(h.keys())
+        # Ensure at least one safe field is present
+        present_safe = SAFE & h_keys
+        if not present_safe:
+            issues.append(f'hints[{i}]: no safe fields found (expected at least one of {SAFE})')
+        # Check forbidden fields are absent
+        present_forbidden = FORBIDDEN & h_keys
+        if present_forbidden:
+            issues.append(f'hints[{i}]: has forbidden internal fields: {present_forbidden}')
+        # Check for nil/null values in safe fields
+        for sf in present_safe:
+            if h[sf] is None:
+                issues.append(f'hints[{i}].{sf} is null')
+    if issues:
+        print('ISSUES: ' + '; '.join(issues))
+        sys.exit(1)
+    print(f'VALID: {len(hints)} hint(s), safe fields={SAFE}, forbidden absent')
+except json.JSONDecodeError as e:
+    print(f'INVALID_JSON: {e}')
+    sys.exit(1)
+" 2>/dev/null || echo "PARSE_ERROR")
+
+        case "${HINTS_VALID}" in
+          VALID:*)
+            pass "Reconnect hints response shape: ${HINTS_VALID}"
+            ;;
+          MISSING_HINTS_KEY)
+            fail "Reconnect hints response missing 'hints' key"
+            ;;
+          HINTS_NOT_LIST)
+            fail "Reconnect hints 'hints' is not a list"
+            ;;
+          ISSUES:*)
+            fail "Reconnect hints field assertion: ${HINTS_VALID}"
+            ;;
+          *)
+            fail "Reconnect hints response validation: ${HINTS_VALID}"
+            ;;
+        esac
+        ;;
+      401|403)
+        skip "Reconnect hints: HTTP ${HINTS_HTTP} (auth may not match app token)"
+        ;;
+      404)
+        skip "Reconnect hints: HTTP 404 (endpoint not yet deployed)"
+        ;;
+      *)
+        skip "Reconnect hints: HTTP ${HINTS_HTTP}"
+        ;;
+    esac
+
+    # — [11c-d] Reconnect hints without session_id (should still work, just broader) —
+    HINTS_NOSESSION_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${API_BASE}/api/v1/reconnect-hints" \
+      -H "Authorization: Bearer ${PROBE_APP_TOKEN}" 2>/dev/null || true)
+    case "${HINTS_NOSESSION_HTTP}" in
+      200)
+        HINTS_NOSESSION_BODY=$(curl -sS --max-time 5 "${API_BASE}/api/v1/reconnect-hints" \
+          -H "Authorization: Bearer ${PROBE_APP_TOKEN}") || true
+        pass "Reconnect hints (without session_id): HTTP 200"
+        collect_response "reconnect_hints_no_session" "${HINTS_NOSESSION_BODY}"
+        security_check "Reconnect hints (no session_id)" "${HINTS_NOSESSION_BODY}" || true
+        ;;
+      *)
+        skip "Reconnect hints (without session_id): HTTP ${HINTS_NOSESSION_HTTP}"
+        ;;
+    esac
+  fi
 fi
 
-# — [11c-ii] Admin reconnect summary (if Backend exposes it via protocol-rollouts) —
+# — [11c-e] Admin reconnect summary (if Backend exposes it via protocol-rollouts) —
 if [[ -n "${ADMIN_TOKEN}" ]]; then
   ADMIN_ROLLOUTS_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
     "${API_BASE}/admin/api/v1/protocol-rollouts/" \
@@ -1012,40 +1132,6 @@ if [[ -n "${ADMIN_TOKEN}" ]]; then
       skip "Admin protocol-rollouts: HTTP ${ADMIN_ROLLOUTS_HTTP}"
       ;;
   esac
-fi
-
-# — [11c-iii] App-facing connect/config endpoint —
-# Backend does not expose a standalone GET /api/v1/connect/config.
-# connect_config is embedded in the session create/current response.
-if [[ -n "${PROBE_APP_TOKEN}" ]]; then
-  CONFIG_CONNECT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-    "${API_BASE}/api/v1/connect/config" \
-    -H "Authorization: Bearer ${PROBE_APP_TOKEN}" 2>/dev/null || true)
-  case "${CONFIG_CONNECT_HTTP}" in
-    200)
-      pass "App connect/config: HTTP 200"
-      ;;
-    404)
-      skip "App connect/config: HTTP 404 — not a standalone route; config embedded in session response"
-      ;;
-    *)
-      skip "App connect/config: HTTP ${CONFIG_CONNECT_HTTP}"
-      ;;
-  esac
-elif [[ -n "${ADMIN_TOKEN}" ]]; then
-  CONFIG_CONNECT_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-    "${API_BASE}/api/v1/connect/config" \
-    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
-  case "${CONFIG_CONNECT_HTTP}" in
-    401|403)
-      skip "App connect/config: auth protected (admin token, need app token)"
-      ;;
-    *)
-      skip "App connect/config: HTTP ${CONFIG_CONNECT_HTTP}"
-      ;;
-  esac
-else
-  skip "App connect/config: no token available"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1962,9 +2048,15 @@ if [[ "${FAILED}" -eq 1 ]]; then
 fi
 
 echo "[TASK-CICD-PROTOCOL-ENDPOINT-ROLLOUT-001] Protocol endpoint smoke PASSED."
+echo "[TASK-CICD-RECONNECT-HINT-RUNTIME-SMOKE-001] Reconnect hint runtime smoke PASSED."
 echo "Covers: Health, Admin login, Template list/assert/blocked,"
 echo "  Custom template create, Publish version, Preview targets,"
 echo "  Rollout (202 + run_id), Job run, NodeAgent assignment HMAC,"
 echo "  applied event, assigned event, endpoint_version increment,"
 echo "  reconnect_hint, ACK reconnect, Rollback, Secret leak scan,"
 echo "  LKG/rollback (templates list, detail, eligibility, assignments)"
+echo "Reconnect Runtime: session create, connect/config?session_id=,"
+echo "  reconnect-hints?session_id= deep field assertions,"
+echo "  reconnect-hints(no session) broader query,"
+echo "  safe field whitelist (hint_id,reason,reconnect_after_ms,expires_at),"
+echo "  forbidden internal field rejection (node_id,session_id,config_hash,rollout_id,created_at)"
