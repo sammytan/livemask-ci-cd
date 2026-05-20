@@ -537,7 +537,7 @@ if [[ "${CAP_REPORTED_VIA_HEARTBEAT}" == "false" && -n "${NODE_ID}" && -n "${NOD
 }
 EOF
 )
-  for cap_path in "capabilities" "protocol/capabilities" "node-capabilities" "agent/capabilities"; do
+  for cap_path in "protocol-capabilities" "capabilities" "protocol/capabilities" "node-capabilities" "agent/capabilities"; do
     CAP_BODY="${SMOKE_TMPDIR}/capabilities.json"
     CAP_HTTP=$(do_hmac_post_status_body "${CAP_BODY}" \
       "${API_BASE}/internal/agent/${cap_path}" \
