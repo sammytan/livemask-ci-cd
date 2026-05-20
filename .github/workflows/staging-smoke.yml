@@ -46,6 +46,22 @@ jobs:
           whoami
           docker --version
           docker compose version
+      - name: Checkout backend source into build context
+        uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-backend
+          ref: ${{ env.BACKEND_REF }}
+          path: infra/_build_deps/backend
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+      - name: Checkout job-service source into build context
+        uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-job-service
+          ref: ${{ env.JOB_SERVICE_REF }}
+          path: infra/_build_deps/job-service
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+      - name: Prepare staging build context
+        run: bash scripts/prepare-staging-build-context.sh --ci
       - name: Start staging
         run: docker compose -f infra/docker-compose.staging.yml up -d --build
       - name: Smoke
