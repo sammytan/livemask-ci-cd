@@ -147,6 +147,28 @@ bool_json() {
   esac
 }
 
+http_code_with_retries() {
+  local url="$1"
+  local attempts="${2:-15}"
+  local delay="${3:-2}"
+  local code="000"
+
+  for attempt in $(seq 1 "${attempts}"); do
+    code="$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "${url}" 2>/dev/null || true)"
+    if [[ "${code}" =~ ^(200|301|302|307|308)$ ]]; then
+      echo "${code}"
+      return 0
+    fi
+    sleep "${delay}"
+  done
+
+  if [[ -z "${code}" ]]; then
+    code="000"
+  fi
+  echo "${code}"
+  return 1
+}
+
 # ============================================================
 # 3. Health endpoints
 # ============================================================
@@ -224,7 +246,7 @@ print(json.dumps(results))
 
   # Admin and website HTTP reachability
   ADMIN_URL="http://127.0.0.1:${ADMIN_PORT}/login"
-  ADMIN_CODE=$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "${ADMIN_URL}" 2>/dev/null || echo "000")
+  ADMIN_CODE=$(http_code_with_retries "${ADMIN_URL}" 20 2 || true)
   if [[ "${ADMIN_CODE}" =~ ^(200|301|302|307|308)$ ]]; then
     HEALTH_DETAILS+="admin page: HTTP ${ADMIN_CODE}\n"
   else
@@ -233,7 +255,7 @@ print(json.dumps(results))
   fi
 
   WEBSITE_URL="http://127.0.0.1:${WEBSITE_PORT}/"
-  WEBSITE_CODE=$(curl -sS --max-time 3 -o /dev/null -w "%{http_code}" "${WEBSITE_URL}" 2>/dev/null || echo "000")
+  WEBSITE_CODE=$(http_code_with_retries "${WEBSITE_URL}" 10 2 || true)
   if [[ "${WEBSITE_CODE}" =~ ^(200|301|302|307|308)$ ]]; then
     HEALTH_DETAILS+="website page: HTTP ${WEBSITE_CODE}\n"
   else
