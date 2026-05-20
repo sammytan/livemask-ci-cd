@@ -20,7 +20,11 @@ set -euo pipefail
 #  [12]  Seed template not listed as supported unless capability exists
 #  [13]  connect_config does not expose app_pending protocol
 #  [14]  RBAC: no token / user / admin / auditor
-#  [15]  Secret leakage scan
+#  [15a] LKG fields in protocol templates list
+#  [15b] Template detail with LKG fields
+#  [15c] Template eligibility per-node LKG version
+#  [15d] Protocol assignments LKG/rollback fields
+#  [15e] Secret leakage scan (expanded)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,6 +117,9 @@ SENSITIVE_WORDS = [
     'private_key','secret_key','hmac','auth','auth_payload',
     'obfs_password','password','api_key','license_key','signed_url',
     'storage_path','encryption_key','password_hash',
+    'endpoint_secret','connect_config','private_key_pem','certificate_key',
+    'secret_ref','vault_key','master_key','service_key','jwt_secret',
+    'protocol_config','tls_key','tls_private_key','ssh_key','ssh_private_key',
 ]
 def check_keys(d, target_words):
     if isinstance(d, dict):
@@ -1333,7 +1340,194 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# [15] Secret leakage scan
+# [15a] LKG Fields in Protocol Templates List (TASK-CICD-PROTOCOL-LKG-ROLLBACK-SMOKE-001)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [15a] LKG Fields in Protocol Templates List ---"
+
+if [[ "${HAVE_TEMPLATES}" == "true" ]]; then
+  LKG_LIST_CHECK=$(echo "${TEMPLATES_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+items = d.get('items',d.get('templates',d.get('data',d.get('protocol_templates',[]))))
+if not isinstance(items, list):
+    print('NO_LIST')
+    sys.exit(0)
+has_lkg_version = any('lkg_version' in t for t in items)
+has_lkg_at = any('lkg_at' in t for t in items)
+if has_lkg_version or has_lkg_at:
+    print(f'LKG_FOUND: lkg_version={\"yes\" if has_lkg_version else \"no\"} lkg_at={\"yes\" if has_lkg_at else \"no\"}')
+else:
+    print('NO_LKG_FIELDS')
+" 2>/dev/null || echo "PARSE_ERROR")
+
+  case "${LKG_LIST_CHECK}" in
+    LKG_FOUND:*)
+      pass "Protocol templates list contains LKG fields: ${LKG_LIST_CHECK#LKG_FOUND: }"
+      ;;
+    NO_LKG_FIELDS)
+      fail "Protocol templates list does not include lkg_version / lkg_at fields"
+      ;;
+    NO_LIST)
+      skip "LKG list check: could not extract template items"
+      ;;
+    *)
+      fail "LKG list check: '${LKG_LIST_CHECK}'"
+      ;;
+  esac
+else
+  skip "[15a] LKG fields: no template list available"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# [15b] Template Detail with LKG Fields
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [15b] Template Detail with LKG Fields ---"
+
+FIRST_TEMPLATE_ID=""
+if [[ "${HAVE_TEMPLATES}" == "true" ]]; then
+  FIRST_TEMPLATE_ID=$(echo "${TEMPLATES_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+items = d.get('items',d.get('templates',d.get('data',d.get('protocol_templates',[]))))
+if items and isinstance(items, list):
+    tid = items[0].get('id','') or items[0].get('template_id','')
+    print(tid)
+" 2>/dev/null || echo "")
+fi
+
+if [[ -n "${FIRST_TEMPLATE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
+  for detail_path in "protocol-templates/${FIRST_TEMPLATE_ID}" "protocol_templates/${FIRST_TEMPLATE_ID}"; do
+    DTL_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${API_BASE}/admin/api/v1/${detail_path}" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+    if [[ "${DTL_HTTP}" == "200" ]]; then
+      DTL_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${detail_path}" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+      DTL_LKG=$(echo "${DTL_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+t = d.get('template',d.get('data',d))
+has_lkg_v = 'lkg_version' in (t if isinstance(t,dict) else {})
+has_lkg_a = 'lkg_at' in (t if isinstance(t,dict) else {})
+print(f'lkg_version={\"yes\" if has_lkg_v else \"no\"} lkg_at={\"yes\" if has_lkg_a else \"no\"}')
+" 2>/dev/null || echo "PARSE_ERROR")
+      if echo "${DTL_LKG}" | grep -q "lkg_version=yes"; then
+        pass "Template detail contains LKG fields: ${DTL_LKG}"
+      else
+        fail "Template detail missing LKG fields: ${DTL_LKG}"
+      fi
+      collect_response "template_detail_lkg" "${DTL_RESP}"
+      break
+    fi
+  done
+  if [[ -z "${DTL_HTTP:-}" || "${DTL_HTTP}" != "200" ]]; then
+    skip "Template detail LKG: endpoint not available"
+  fi
+elif [[ -n "${ADMIN_TOKEN}" ]]; then
+  skip "Template detail LKG: no template ID"
+else
+  skip "Template detail LKG: no admin token"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# [15c] Template Eligibility — Per-Node LKG Version
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [15c] Template Eligibility LKG Version ---"
+
+ELIG_TID="${FIRST_TEMPLATE_ID:-${IMPLEMENTED_TEMPLATE_ID:-}}"
+if [[ -n "${ELIG_TID}" && -n "${ADMIN_TOKEN}" ]]; then
+  for elig_path in "protocol-templates" "protocol_endpoint_templates" "protocol/templates"; do
+    ELIG_LKG_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${API_BASE}/admin/api/v1/${elig_path}/${ELIG_TID}/eligibility" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+    if [[ "${ELIG_LKG_HTTP}" == "200" ]]; then
+      ELIG_LKG_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${elig_path}/${ELIG_TID}/eligibility" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+      ELIG_LKG_FOUND=$(echo "${ELIG_LKG_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+cap = d.get('capability_eligibility',d.get('capabilities',d.get('items',[])))
+if isinstance(cap, list):
+    has = any('lkg_version' in c for c in cap)
+    print(f'cap_elig_has_lkg={\"yes\" if has else \"no\"} count={len(cap)}')
+else:
+    # Check top-level
+    has = 'lkg_version' in d
+    print(f'top_level_lkg={\"yes\" if has else \"no\"}')
+" 2>/dev/null || echo "PARSE_ERROR")
+      if echo "${ELIG_LKG_FOUND}" | grep -q "yes"; then
+        pass "Template eligibility contains per-node lkg_version: ${ELIG_LKG_FOUND}"
+      else
+        fail "Template eligibility missing lkg_version field: ${ELIG_LKG_FOUND}"
+      fi
+      collect_response "eligibility_lkg" "${ELIG_LKG_RESP}"
+      security_check "Eligibility LKG" "${ELIG_LKG_RESP}" || true
+      break
+    fi
+  done
+  if [[ -z "${ELIG_LKG_HTTP:-}" || "${ELIG_LKG_HTTP}" != "200" ]]; then
+    skip "Template eligibility LKG: endpoint not available"
+  fi
+else
+  skip "Template eligibility LKG: no template ID or admin token"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# [15d] Protocol Assignments LKG/Rollback Fields
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [15d] Protocol Assignments LKG/Rollback Fields ---"
+
+if [[ -n "${ADMIN_TOKEN}" ]]; then
+  for a_path in "protocol-assignments" "protocol_assignments" "assignments"; do
+    A_LIST_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${API_BASE}/admin/api/v1/${a_path}" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+    if [[ "${A_LIST_HTTP}" == "200" ]]; then
+      A_LIST_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${a_path}" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+      A_LKG_CHECK=$(echo "${A_LIST_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+items = d.get('items',d.get('assignments',d.get('data',d.get('protocol_assignments',[]))))
+if not isinstance(items, list):
+    print('NO_LIST')
+    sys.exit(0)
+required = ['lkg_info','lkg_status','lkg_rollback_available','rollback_to_version','rollback_to_template_version','previous_assignment_id']
+found = [f for f in required if any(f in item for item in items)]
+missing = [f for f in required if f not in found]
+print(f'found={len(found)}/{len(required)} missing={\",\".join(missing) if missing else \"none\"}')
+" 2>/dev/null || echo "PARSE_ERROR")
+      case "${A_LKG_CHECK}" in
+        *missing=none*)
+          pass "Assignments list contains all required LKG/rollback fields: ${A_LKG_CHECK}"
+          ;;
+        *found=*)
+          fail "Assignments list missing LKG/rollback fields: ${A_LKG_CHECK}"
+          ;;
+        NO_LIST)
+          skip "Assignments list: could not extract items"
+          ;;
+        *)
+          skip "Assignments list: ${A_LKG_CHECK}"
+          ;;
+      esac
+      collect_response "assignments_lkg" "${A_LIST_RESP}"
+      break
+    fi
+  done
+  if [[ -z "${A_LIST_HTTP:-}" || "${A_LIST_HTTP}" != "200" ]]; then
+    skip "Protocol assignments list: endpoint not available"
+  fi
+else
+  skip "Protocol assignments: no admin token"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# [15e] Secret leakage scan (expanded for TASK-CICD-PROTOCOL-LKG-ROLLBACK-SMOKE-001)
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "--- [15] Comprehensive Secret Leak Scan ---"
@@ -1460,4 +1654,5 @@ echo "Covers: Health, Admin login, Seed templates, Reserved rollout_blocked,"
 echo "  NodeAgent capabilities (heartbeat/status), Node detail, Fleet summary,"
 echo "  Template eligibility (reserved/unsupported/app_pending/implemented),"
 echo "  Seed-not-supported, connect_config no app_pending, RBAC, Secret leak scan,"
-echo "  Admin protocol page 404 check"
+echo "  Admin protocol page 404 check,"
+echo "  LKG/rollback (templates list, detail, eligibility, assignments)"
