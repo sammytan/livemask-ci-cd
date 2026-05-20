@@ -64,7 +64,7 @@ services:
     ports:
       - "${LIVEMASK_BACKEND_HTTP_PORT:-18080}:8080"
     volumes:
-      - ../../livemask-backend:/workspace/livemask-backend
+      - ${LIVEMASK_WORKSPACE_ROOT:-/Users/sammytan/Developer/LiveMask}/livemask-backend:/workspace/livemask-backend
       - livemask-local-go-cache:/workspace/.cache
     depends_on:
       postgres:
@@ -84,7 +84,7 @@ services:
     ports:
       - "${LIVEMASK_ADMIN_PORT:-3001}:3000"
     volumes:
-      - ../../livemask-admin:/workspace/livemask-admin
+      - ${LIVEMASK_WORKSPACE_ROOT:-/Users/sammytan/Developer/LiveMask}/livemask-admin:/workspace/livemask-admin
       - livemask-local-admin-node-modules:/workspace/livemask-admin/node_modules
       - livemask-local-admin-next:/workspace/livemask-admin/.next
     depends_on:
@@ -101,7 +101,7 @@ services:
     ports:
       - "${LIVEMASK_WEBSITE_PORT:-3002}:5173"
     volumes:
-      - ../../livemask-website:/workspace/livemask-website
+      - ${LIVEMASK_WORKSPACE_ROOT:-/Users/sammytan/Developer/LiveMask}/livemask-website:/workspace/livemask-website
       - livemask-local-website-node-modules:/workspace/livemask-website/node_modules
     depends_on:
       - backend
@@ -128,7 +128,7 @@ services:
     ports:
       - "${LIVEMASK_NODEAGENT_PORT:-19090}:9100"
     volumes:
-      - ../../livemask-nodeagent:/workspace/livemask-nodeagent
+      - ${LIVEMASK_WORKSPACE_ROOT:-/Users/sammytan/Developer/LiveMask}/livemask-nodeagent:/workspace/livemask-nodeagent
       - livemask-local-nodeagent-state:/workspace/.state
       - livemask-local-go-cache:/workspace/.cache
     depends_on:
@@ -156,7 +156,7 @@ services:
     ports:
       - "${LIVEMASK_JOB_SERVICE_PORT:-19191}:19191"
     volumes:
-      - ../../livemask-job-service:/workspace/livemask-job-service
+      - ${LIVEMASK_WORKSPACE_ROOT:-/Users/sammytan/Developer/LiveMask}/livemask-job-service:/workspace/livemask-job-service
       - livemask-local-go-cache:/workspace/.cache
     depends_on:
       postgres:
