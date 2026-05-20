@@ -10,6 +10,10 @@ on:
         description: Backend ref to build for smoke. Must be dev.
         required: false
         default: dev
+      keep_alive:
+        description: Keep containers running on failure for SSH debugging
+        required: false
+        default: 'false'
   repository_dispatch:
     types:
       - staging-promote
@@ -152,7 +156,23 @@ jobs:
             --format text || true
       - name: Stop staging
         if: always()
-        run: docker compose -f infra/docker-compose.staging.yml down --remove-orphans
+        run: |
+          # Check keep_alive from event payload (only set on workflow_dispatch)
+          keep_alive="false"
+          if [[ -f "$GITHUB_EVENT_PATH" ]]; then
+            keep_alive=$(python3 -c "import json; print(json.load(open('$GITHUB_EVENT_PATH')).get('inputs', {}).get('keep_alive', 'false'))" 2>/dev/null || echo "false")
+          fi
+          if [[ "${{ job.status }}" != "success" && "${keep_alive}" == "true" ]]; then
+            echo "=== KEEP_ALIVE enabled — containers left running for SSH debugging ==="
+            echo ""
+            echo "SSH to monitoring-stack and inspect:"
+            echo "  docker ps --filter name=livemask-staging"
+            echo "  docker compose -f infra/docker-compose.staging.yml logs --tail=50 <service>"
+            echo "  docker compose -f infra/docker-compose.staging.yml down --remove-orphans"
+            exit 0
+          fi
+          echo "=== Stopping staging containers ==="
+          docker compose -f infra/docker-compose.staging.yml down --remove-orphans
 
   notify-lark:
     needs: [smoke]
