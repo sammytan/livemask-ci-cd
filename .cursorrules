@@ -165,6 +165,28 @@ evidence for `livemask-docs`. Do not create or update docs files from this repo.
    - whether the temporary smoke environment was cleaned up
 
 ## Task Completion Report
+## Task Lease And Audit Boundary
+
+Before editing for any TASK, check the docs-owned lease registry contract:
+@../livemask-docs/docs/development/task-leases.json
+
+For multi-repo or shared-file work, the docs dispatcher should register an
+active lease with `task_id`, `repo`, `branch`, `expected_files`, `lease_owner`,
+`started_at`, `expires_at`, `depends_on`, `blocked_by`, and `status`.
+
+Runtime repo windows must not modify `../livemask-docs/task-leases.json`.
+If a lease is missing, expired, or collides with the expected files, stop and
+report the lease issue instead of editing code.
+
+The docs audit source is:
+@../livemask-docs/docs/development/AUTO_AUDIT_CENTER.md
+
+Remote audit and Issue close/reopen are docs/CI-CD owned. This repo must not run
+remote audit as final authority, must not close/reopen Issues directly, and must
+not mark a task completed without dev merge, pushed `origin/dev`, and validation
+evidence.
+
+## Task Completion Report
 When a task or subtask is complete, use the standard completion report from:
 @../livemask-docs/ai-rules/v3.7/16-Task-Completion-Report.md
 
