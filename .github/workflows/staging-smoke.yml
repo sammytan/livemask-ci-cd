@@ -153,6 +153,8 @@ jobs:
         run: bash scripts/i18n-smoke.sh
       - name: Jobs Hardening smoke (TASK-CICD-JOBS-HARDENING-001)
         run: bash scripts/jobs-hardening-smoke.sh
+      - name: NodeAgent Config Sync smoke (TASK-CICD-NODEAGENT-CONFIG-SMOKE-001)
+        run: bash scripts/nodeagent-config-smoke.sh
       - name: OpenAPI Drift Check (TASK-CICD-OPENAPI-DRIFT-CHECK-001)
         run: bash scripts/openapi-drift-smoke.sh
       - name: Upload runtime status artifact
