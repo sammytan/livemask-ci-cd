@@ -159,6 +159,8 @@ jobs:
         run: bash scripts/nat-sharing-smoke.sh
       - name: OpenAPI Drift Check (TASK-CICD-OPENAPI-DRIFT-CHECK-001)
         run: bash scripts/openapi-drift-smoke.sh
+      - name: Real Data Closed Loop smoke (TASK-CICD-REAL-DATA-CLOSED-LOOP-SMOKE-001)
+        run: bash scripts/real-data-closed-loop-smoke.sh
       - name: Upload runtime status artifact
         if: always()
         uses: actions/upload-artifact@v4
