@@ -149,8 +149,14 @@ jobs:
         run: bash scripts/sentry-config-smoke.sh
       - name: Observability smoke (TASK-CICD-OBSERVABILITY-SMOKE-001)
         run: bash scripts/observability-smoke.sh
-      - name: I18n smoke (TASK-CICD-I18N-001)
+      - name: I18n Language smoke (TASK-CICD-I18N-LANGUAGE-SMOKE-001)
         run: bash scripts/i18n-smoke.sh
+      - name: Bandwidth Auto-Reconnect smoke (TASK-CICD-BANDWIDTH-AUTO-RECONNECT-SMOKE-001)
+        run: bash scripts/bandwidth-auto-reconnect-smoke.sh
+      - name: Traffic Analytics V2 smoke (TASK-CICD-TRAFFIC-ANALYTICS-V2-SMOKE-001)
+        run: bash scripts/traffic-analytics-v2-smoke.sh
+      - name: Admin Nav IA smoke (TASK-CICD-ADMIN-NAV-IA-001)
+        run: bash scripts/admin-nav-ia-smoke.sh
       - name: Jobs Hardening smoke (TASK-CICD-JOBS-HARDENING-001)
         run: bash scripts/jobs-hardening-smoke.sh
       - name: NodeAgent Config Sync smoke (TASK-CICD-NODEAGENT-CONFIG-SMOKE-001)

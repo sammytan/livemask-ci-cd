@@ -15,7 +15,9 @@
 #   [6]  NodeAgent /config/reload (if exposed)
 #   [7]  Invalid config rejection / LKG preservation
 #   [8]  Heartbeat carries config_version / server_config_version
-#   [9]  Secret leak scan (raw config, node_secret, private_key, token,
+#   [9]  Protocol capability fields in node detail (protocol_capabilities, supported_protocols)
+#  [10]  bandwidth_auto_reconnect config from system-configs (if Backend/NodeAgent ready)
+#  [11]  Secret leak scan (raw config, node_secret, private_key, token,
 #        full sing-box config, endpoint secret, service key)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -189,6 +191,35 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 pass "Backend health ok"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Admin login (for sections requiring admin token)
+# ──────────────────────────────────────────────────────────────────────────────
+ADMIN_TOKEN=""
+ADMIN_LOGIN_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/admin/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"nacfg-${TIMESTAMP}\",\"email\":\"admin@livemask.dev\",\"password\":\"AdminPass123!\",\"client_type\":\"admin\"}") || true
+ADMIN_TOKEN=$(echo "${ADMIN_LOGIN_RESP}" | quiet_json "access_token")
+
+if [[ -z "${ADMIN_TOKEN}" ]]; then
+  echo "  Seeding admin..."
+  pg_exec -c "DELETE FROM users WHERE email='admin@livemask.dev'" 2>/dev/null || true
+  ADMIN_HASH=$(pg_exec -c "SELECT crypt('AdminPass123!', gen_salt('bf', 12))" 2>/dev/null || echo "")
+  if [[ -n "${ADMIN_HASH}" ]]; then
+    pg_exec -c "INSERT INTO users (email, password_hash, display_name) VALUES ('admin@livemask.dev', '${ADMIN_HASH}', 'Dev Admin') ON CONFLICT (email) DO UPDATE SET password_hash='${ADMIN_HASH}'" 2>/dev/null
+    pg_exec -c "INSERT INTO user_roles (user_id, role_key, reason) SELECT id, 'admin', 'dev seed by nodeagent-config-smoke.sh' FROM users WHERE email='admin@livemask.dev' ON CONFLICT DO NOTHING" 2>/dev/null
+  fi
+  ADMIN_LOGIN_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/admin/api/v1/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"request_id\":\"nacfg-retry-${TIMESTAMP}\",\"email\":\"admin@livemask.dev\",\"password\":\"AdminPass123!\",\"client_type\":\"admin\"}") || true
+  ADMIN_TOKEN=$(echo "${ADMIN_LOGIN_RESP}" | quiet_json "access_token")
+fi
+
+if [[ -n "${ADMIN_TOKEN}" ]]; then
+  echo "  Admin login OK for protocol capability / bandwidth_auto_reconnect checks"
+else
+  echo "  Admin login failed — protocol capability / bandwidth_auto_reconnect checks will be SKIP"
+fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 # [2] NodeAgent registration
@@ -585,7 +616,92 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [9] Comprehensive secret leak scan
+# [9] Protocol capability fields in node detail
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [9] Protocol Capability Fields ---"
+
+if [[ -n "${ADMIN_TOKEN:-}" && -n "${NODE_ID:-}" ]]; then
+  # Fetch node detail to check protocol capability fields
+  NODE_DETAIL_RESP=$(curl -sS --max-time 5 \
+    "${API_BASE}/admin/api/v1/nodes/${NODE_ID}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
+  NODE_DETAIL_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/admin/api/v1/nodes/${NODE_ID}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+
+  if [[ "${NODE_DETAIL_HTTP}" == "200" ]]; then
+    PROTO_CAP_FIELDS=$(echo "${NODE_DETAIL_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+cap_fields = ['protocol_capabilities','supported_protocols','protocols','capabilities','protocol_version','supported_endpoints']
+found = [f for f in cap_fields if f in str(d)]
+if found:
+    print('FOUND: ' + ', '.join(found))
+else:
+    print('NOT_FOUND')
+" 2>/dev/null || echo "NOT_FOUND")
+
+    if echo "${PROTO_CAP_FIELDS}" | grep -q "FOUND:"; then
+      pass "Protocol capability fields in node detail: ${PROTO_CAP_FIELDS#FOUND: }"
+    else
+      skip "Protocol capability fields not found in node detail (may be in separate endpoint)"
+    fi
+    security_check "Node detail (protocol caps)" "${NODE_DETAIL_RESP}" || true
+  else
+    skip "Node detail: HTTP ${NODE_DETAIL_HTTP} — cannot check protocol capability fields"
+  fi
+else
+  skip "Protocol capability fields: no admin token or node ID available"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# [10] bandwidth_auto_reconnect config from system-configs
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [10] bandwidth_auto_reconnect Config ---"
+
+if [[ -n "${ADMIN_TOKEN:-}" ]]; then
+  SYS_CONFIGS_RESP=$(curl -sS --max-time 10 "${API_BASE}/admin/api/v1/system-configs" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
+
+  BW_AUTO_RECONNECT=$(echo "${SYS_CONFIGS_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+def find_val(obj, target):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if target in k.lower():
+                return v
+            r = find_val(v, target)
+            if r is not None:
+                return r
+        return None
+    if isinstance(obj, list):
+        for item in obj:
+            r = find_val(item, target)
+            if r is not None:
+                return r
+    return None
+val = find_val(d, 'bandwidth_auto_reconnect')
+if val is not None:
+    print('FOUND: ' + str(val)[:200])
+else:
+    print('NOT_FOUND')
+" 2>/dev/null || echo "NOT_FOUND")
+
+  if echo "${BW_AUTO_RECONNECT}" | grep -q "FOUND:"; then
+    pass "bandwidth_auto_reconnect config: ${BW_AUTO_RECONNECT#FOUND: }"
+    security_check "system-configs (bandwidth)" "${SYS_CONFIGS_RESP}" || true
+  else
+    skip "bandwidth_auto_reconnect: not found in system-configs"
+  fi
+else
+  skip "bandwidth_auto_reconnect: no admin token available"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# [11] Comprehensive secret leak scan
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [9] Comprehensive Secret Leak Scan ---"

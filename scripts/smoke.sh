@@ -614,20 +614,73 @@ else
 fi
 
 echo ""
-# ── I18n Smoke (TASK-CICD-I18N-001) ──────────────────────────────────
+# ── I18n Language Smoke (TASK-CICD-I18N-LANGUAGE-SMOKE-001) ──────────
 echo ""
-echo "=== Smoke: I18n (TASK-CICD-I18N-001) ==="
+echo "=== Smoke: I18n Language (TASK-CICD-I18N-LANGUAGE-SMOKE-001) ==="
 if bash "${SCRIPT_DIR}/i18n-smoke.sh" 2>&1; then
-  echo "I18n smoke PASSED."
+  echo "I18n language smoke PASSED."
 else
   i18n_rc=$?
   echo ""
-  echo "=== I18n Smoke FAILED ==="
+  echo "=== I18n Language Smoke FAILED ==="
   echo "--- docker compose ps ---"
   docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
   echo "--- docker compose logs backend (last 100) ---"
   docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
   exit ${i18n_rc}
+fi
+
+echo ""
+# ── Bandwidth Auto-Reconnect Smoke (TASK-CICD-BANDWIDTH-AUTO-RECONNECT-SMOKE-001) ──
+echo ""
+echo "=== Smoke: Bandwidth Auto-Reconnect (TASK-CICD-BANDWIDTH-AUTO-RECONNECT-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/bandwidth-auto-reconnect-smoke.sh" 2>&1; then
+  echo "Bandwidth auto-reconnect smoke PASSED."
+else
+  bw_rc=$?
+  echo ""
+  echo "=== Bandwidth Auto-Reconnect Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${bw_rc}
+fi
+
+echo ""
+# ── Traffic Analytics V2 Smoke (TASK-CICD-TRAFFIC-ANALYTICS-V2-SMOKE-001) ──
+echo ""
+echo "=== Smoke: Traffic Analytics V2 (TASK-CICD-TRAFFIC-ANALYTICS-V2-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/traffic-analytics-v2-smoke.sh" 2>&1; then
+  echo "Traffic analytics V2 smoke PASSED."
+else
+  tav2_rc=$?
+  echo ""
+  echo "=== Traffic Analytics V2 Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${tav2_rc}
+fi
+
+echo ""
+# ── Admin Nav IA Smoke (TASK-CICD-ADMIN-NAV-IA-001) ──────────────────
+echo ""
+echo "=== Smoke: Admin Nav Info Architecture (TASK-CICD-ADMIN-NAV-IA-001) ==="
+if bash "${SCRIPT_DIR}/admin-nav-ia-smoke.sh" 2>&1; then
+  echo "Admin nav IA smoke PASSED."
+else
+  navia_rc=$?
+  echo ""
+  echo "=== Admin Nav IA Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs admin (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs admin --tail=100 2>/dev/null || true
+  echo "--- docker compose logs backend (last 50) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=50 2>/dev/null || true
+  exit ${navia_rc}
 fi
 
 echo ""
@@ -722,4 +775,4 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync + nat-sharing-guard + real-data-closed-loop)"
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n-language + bandwidth-auto-reconnect + traffic-analytics-v2 + admin-nav-ia + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync + nat-sharing-guard + real-data-closed-loop)"

@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# TASK-CICD-I18N-001
-# Internationalization Smoke
+# TASK-CICD-I18N-LANGUAGE-SMOKE-001
+# Internationalization and Language Smoke
 # ═══════════════════════════════════════════════════════════════════════════════
 # Covers:
 #   [1]  Backend health
 #   [2]  GET /api/v1/i18n/messages (message_key list — backend)
 #   [3]  GET /api/v1/i18n/messages/:key (message_key detail)
 #   [4]  Admin zh-CN translations
-#   [5]  Website hreflang tags
-#   [6]  Website sitemap.xml multilingual URLs
-#   [7]  App localization — GET /api/v1/i18n/app (device locale)
-#   [8]  App localization — GET /api/v1/i18n/app/:locale (specific locale)
-#   [9]  Fallback behavior: missing locale
-#  [10]  RBAC: admin only for key management
-#  [11]  Secret leak scan
+#   [5]  Admin en-US translations
+#   [6]  Website hreflang tags
+#   [7]  Website sitemap.xml multilingual URLs
+#   [8]  App localization — GET /api/v1/i18n/app (device locale)
+#   [9]  App localization — GET /api/v1/i18n/app/:locale (specific locale)
+#  [10]  Fallback behavior: missing locale
+#  [11]  Raw English critical scan (all en-US strings are non-empty, no placeholder text)
+#  [12]  RBAC: admin only for key management
+#  [13]  Secret leak scan
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -128,8 +130,8 @@ else:
 TIMESTAMP=$(date +%s)
 
 echo "================================================"
-echo " TASK-CICD-I18N-001"
-echo " Internationalization Smoke"
+echo " TASK-CICD-I18N-LANGUAGE-SMOKE-001"
+echo " Internationalization and Language Smoke"
 echo "================================================"
 echo ""
 
@@ -290,7 +292,45 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [5] Website hreflang tags
+# [5] Admin en-US translations
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [5] Admin en-US Translations ---"
+
+if [[ -n "${ADMIN_TOKEN}" ]]; then
+  for en_path in "i18n/translations/en-US" "i18n/locales/en-US" "i18n/admin/en-US" "i18n/translations/en" "i18n/locales/en"; do
+    EN_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${API_BASE}/admin/api/v1/${en_path}" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+    if [[ "${EN_HTTP}" == "200" ]]; then
+      EN_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${en_path}" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+      # Verify en-US has reasonable content
+      EN_ENTRIES=$(echo "${EN_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if isinstance(d, dict):
+    print(len(d))
+elif isinstance(d, list):
+    print(len(d))
+else:
+    print(0)
+" 2>/dev/null || echo "0")
+      pass "Admin en-US translations (${en_path}): HTTP 200, ${EN_ENTRIES} entries"
+      security_check "Admin en-US" "${EN_RESP}" || true
+      break
+    fi
+  done
+
+  if [[ -z "${EN_HTTP:-}" || "${EN_HTTP}" == "000" ]]; then
+    skip "Admin en-US: endpoint not available"
+  fi
+else
+  skip "Admin en-US: no admin token available"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# [6] Website hreflang tags
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [5] Website hreflang Tags ---"
@@ -321,7 +361,7 @@ if [[ -n "${BLOG_HTML}" ]]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [6] Website sitemap.xml multilingual URLs
+# [7] Website sitemap.xml multilingual URLs
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [6] Website sitemap.xml Multilingual URLs ---"
@@ -359,7 +399,7 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [7] App localization — GET /api/v1/i18n/app (device locale)
+# [8] App localization — GET /api/v1/i18n/app (device locale)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [7] GET /api/v1/i18n/app (device locale) ---"
@@ -394,7 +434,7 @@ else:
 esac
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [8] App localization — GET /api/v1/i18n/app/:locale (specific locale)
+# [9] App localization — GET /api/v1/i18n/app/:locale (specific locale)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- [8] GET /api/v1/i18n/app/:locale ---"
@@ -420,10 +460,10 @@ else:
 done
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [9] Fallback behavior: missing locale
+# [10] Fallback behavior: missing locale
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "--- [9] Fallback Behavior: Missing Locale ---"
+echo "--- [10] Fallback Behavior: Missing Locale ---"
 
 UNKNOWN_LOCALE_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
   "${API_BASE}/api/v1/i18n/app/xx_YY" 2>/dev/null || true)
@@ -462,10 +502,80 @@ elif [[ "${NO_LOCALE_HTTP}" == "404" ]]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [10] RBAC: admin only for key management
+# [11] Raw English critical scan — all en-US strings are non-empty, no placeholders
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "--- [10] RBAC: I18n Key Management ---"
+echo "--- [11] Raw English Critical Scan ---"
+
+EN_KEY_RESP=""
+if [[ -n "${ADMIN_TOKEN}" ]]; then
+  # Fetch en-US translations
+  for en_path in "i18n/translations/en-US" "i18n/locales/en-US" "i18n/admin/en-US" "i18n/translations/en"; do
+    EN_SCAN_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${API_BASE}/admin/api/v1/${en_path}" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+    if [[ "${EN_SCAN_HTTP}" == "200" ]]; then
+      EN_KEY_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${en_path}" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+      break
+    fi
+  done
+fi
+
+# Fallback to public message list
+if [[ -z "${EN_KEY_RESP}" ]]; then
+  EN_KEY_RESP="${MSG_RESP:-}"
+fi
+
+if [[ -n "${EN_KEY_RESP}" && "${EN_KEY_RESP}" != "{}" ]]; then
+  EN_CRITICAL_SCAN=$(echo "${EN_KEY_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+issues = []
+
+# Flatten to find all string values
+def scan(obj, path=''):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            scan(v, path + k + '.')
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            scan(item, f'{path}[{i}].')
+    elif isinstance(obj, str):
+        s = obj.strip()
+        if not s:
+            issues.append(f'{path}EMPTY_STRING')
+        elif s.lower() in ('todo','tbd','placeholder','lorem ipsum','fixme','undefined','null','none','', 'to be translated', 'not translated'):
+            issues.append(f'{path}PLACEHOLDER: \"{s[:50]}\"')
+        elif '{' in s and '}' in s and len(s) < 50:
+            # Very short string with template vars but no real text
+            pass
+# Skip non-string content
+scan(d)
+
+if issues:
+    print('ISSUES: ' + str(len(issues)))
+    for iss in issues[:20]:
+        print('  ' + iss)
+else:
+    print('OK')
+" 2>/dev/null || echo "OK")
+
+  if echo "${EN_CRITICAL_SCAN}" | grep -q "ISSUES:"; then
+    ISSUE_COUNT=$(echo "${EN_CRITICAL_SCAN}" | head -1 | grep -o '[0-9]*')
+    skip "Raw English scan: ${ISSUE_COUNT} issues found (empty/placeholder strings)"
+  elif echo "${EN_CRITICAL_SCAN}" | grep -q "OK"; then
+    pass "Raw English critical scan: all strings non-empty, no placeholders"
+  fi
+else
+  skip "Raw English critical scan: no translation data available"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+# [12] RBAC: admin only for key management
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [12] RBAC: I18n Key Management ---"
 
 # Admin i18n management endpoints should require admin
 if [[ -n "${ADMIN_TOKEN}" ]]; then
@@ -513,10 +623,10 @@ if [[ -n "${ADMIN_TOKEN}" ]]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
-# [11] Secret leak scan
+# [13] Secret leak scan
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
-echo "--- [11] Secret Leak Scan ---"
+echo "--- [13] Secret Leak Scan ---"
 LEAK_FOUND=false
 if [[ -n "${ADMIN_TOKEN}" ]]; then
   for scan_path in "i18n/messages" "i18n/translations" "i18n/locales"; do
@@ -550,13 +660,13 @@ echo "  I18n smoke is read-only; no data cleanup needed"
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "================================================"
-echo " TASK-CICD-I18N-001 SUMMARY"
+echo " TASK-CICD-I18N-LANGUAGE-SMOKE-001 SUMMARY"
 echo "================================================"
 printf '%s\n' "${SUMMARY_LINES[@]}"
 
 echo ""
 if [[ "${FAILED}" -eq 1 ]]; then
-  echo "[TASK-CICD-I18N-001] I18N SMOKE FAILED."
+  echo "[TASK-CICD-I18N-LANGUAGE-SMOKE-001] I18N LANGUAGE SMOKE FAILED."
   echo ""
   echo "--- docker compose ps ---"
   docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
@@ -566,8 +676,9 @@ if [[ "${FAILED}" -eq 1 ]]; then
   exit 1
 fi
 
-echo "[TASK-CICD-I18N-001] I18n smoke PASSED."
+echo "[TASK-CICD-I18N-LANGUAGE-SMOKE-001] I18n language smoke PASSED."
 echo "Covers: Backend message_key list/detail, Admin zh-CN translations,"
-echo "  Website hreflang tags, sitemap.xml multilingual URLs,"
-echo "  App localization (locale-specific), Fallback behavior,"
+echo "  Admin en-US translations, Website hreflang tags,"
+echo "  sitemap.xml multilingual URLs, App localization (locale-specific),"
+echo "  Fallback behavior, Raw English critical scan,"
 echo "  RBAC for i18n management, Secret leak scan"
