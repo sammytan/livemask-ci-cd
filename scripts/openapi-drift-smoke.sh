@@ -129,7 +129,7 @@ fi
 check_app_release_route() {
   local route="$1"
   local desc="$2"
-  if rg -q "${route}" "${OPENAPI_PATH}" 2>/dev/null; then
+  if grep -c -F "${route}" "${OPENAPI_PATH}" >/dev/null 2>&1; then
     pass_result "App Release OpenAPI: ${desc} (${route}) documented"
   else
     fail_result "App Release OpenAPI: ${desc} (${route}) NOT documented"
