@@ -686,4 +686,21 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync)"
+# ── NAT Sharing Guard Smoke (TASK-CICD-NAT-SHARING-GUARD-001) ─────────────────
+echo ""
+echo "=== Smoke: NAT Sharing Guard (TASK-CICD-NAT-SHARING-GUARD-001) ==="
+if bash "${SCRIPT_DIR}/nat-sharing-smoke.sh" 2>&1; then
+  echo "NAT Sharing guard smoke PASSED."
+else
+  natsharing_rc=$?
+  echo ""
+  echo "=== NAT Sharing Guard Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${natsharing_rc}
+fi
+
+echo ""
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync + nat-sharing-guard)"
