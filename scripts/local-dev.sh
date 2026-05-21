@@ -9,6 +9,13 @@ LIVEMASK_WORKSPACE_ROOT="${LIVEMASK_WORKSPACE_ROOT:-$(cd "${REPO_DIR}/.." && pwd
 WORKSPACE_DIR="${LIVEMASK_WORKSPACE_ROOT}"
 RUNTIME_SH="${SCRIPT_DIR}/runtime.sh"
 
+# Source auto-sync library
+SYNC_LIB="${SCRIPT_DIR}/lib/sync.sh"
+if [[ -f "${SYNC_LIB}" ]]; then
+  # shellcheck source=scripts/lib/sync.sh
+  source "${SYNC_LIB}"
+fi
+
 export LIVEMASK_BACKEND_HTTP_PORT="18080"
 export LIVEMASK_ADMIN_PORT="3001"
 export LIVEMASK_WEBSITE_PORT="3002"
@@ -28,6 +35,7 @@ usage() {
 Usage:
   bash scripts/local-dev.sh start   [options]
   bash scripts/local-dev.sh sync    [options]  # pull clean repos and recreate selected services
+  bash scripts/local-dev.sh sync    --changed-repo <repo-path> [--auto] [--dry-run]
   bash scripts/local-dev.sh status  [options]
   bash scripts/local-dev.sh logs    [options]
   bash scripts/local-dev.sh restart [options]  # explicit local runtime restart
@@ -37,6 +45,10 @@ Options:
   --services LIST       Comma-separated services: backend,admin,website,nodeagent,job-service,all.
                         Defaults to all for local-dev.sh.
   --no-pull             For sync only: recreate services without git pull.
+  --auto                For sync only: detect service from changed-repo and sync automatically.
+  --dry-run             For sync only: show what would happen without making changes.
+  --changed-repo PATH   For sync only: path or name of repo that was just built.
+                        Detects the affected Docker service(s) and syncs only those.
   --auto-reload         Enable backend hot reload in local mode.
   --pull                Pull images before start/restart.
   --env-file FILE       Load a local runtime env file.
@@ -189,6 +201,9 @@ wait_backend_health() {
 
 run_sync() {
   local sync_pull=true
+  local dry_run=false
+  local auto_mode=false
+  local changed_repo=""
   local clean_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -197,6 +212,22 @@ run_sync() {
         sync_pull=false
         shift
         ;;
+      --dry-run)
+        dry_run=true
+        shift
+        ;;
+      --auto)
+        auto_mode=true
+        shift
+        ;;
+      --changed-repo)
+        if [[ -z "${2:-}" ]]; then
+          echo "[sync] ERROR: --changed-repo requires a repo path or name" >&2
+          exit 2
+        fi
+        changed_repo="$2"
+        shift 2
+        ;;
       *)
         clean_args+=("$1")
         shift
@@ -204,6 +235,58 @@ run_sync() {
     esac
   done
 
+  # -----------------------------------------------------------------------
+  # MODE 1: --changed-repo (post-build auto-sync)
+  # -----------------------------------------------------------------------
+  if [[ -n "${changed_repo}" ]]; then
+    echo "[sync] Changed repo detected: ${changed_repo}"
+    local repo_name
+    repo_name="$(basename "${changed_repo}")"
+    echo "[sync] Repo name: ${repo_name}"
+
+    # Detect service from repo name
+    local detected_service
+    detected_service="$(lm_sync_detect_services "${repo_name}")" || {
+      echo "[sync] WARNING: Could not map repo '${repo_name}' to a known service." >&2
+      echo "[sync] Known mappings:" >&2
+      echo "  livemask-admin  → admin" >&2
+      echo "  livemask-website  → website" >&2
+      echo "  livemask-backend  → backend" >&2
+      echo "  livemask-nodeagent  → nodeagent" >&2
+      echo "  livemask-job-service → job-service" >&2
+      echo "  livemask-app     → app (Flutter, not Docker-managed)" >&2
+      echo "[sync] No sync needed." >&2
+      return 1
+    }
+
+    echo "[sync] Detected service: ${detected_service}"
+
+    # Validate docker service
+    if lm_sync_is_docker_service "${detected_service}"; then
+      echo "[sync] Service is Docker-managed: ${detected_service}"
+    else
+      echo "[sync] Service is not Docker-managed: ${detected_service} (e.g. Flutter app)"
+      echo "[sync] No Docker sync needed."
+      return 0
+    fi
+
+    # Optionally pull repo if clean and --auto mode
+    if [[ "${auto_mode}" == "true" && "${sync_pull}" == "true" ]]; then
+      pull_repo_if_clean "${detected_service}"
+    fi
+
+    # Execute sync via sync library
+    if [[ "${dry_run}" == "true" ]]; then
+      lm_sync_execute --dry-run "${detected_service}"
+    else
+      lm_sync_execute "${detected_service}"
+    fi
+    return $?
+  fi
+
+  # -----------------------------------------------------------------------
+  # MODE 2: --services / default (legacy behaviour, now using sync lib)
+  # -----------------------------------------------------------------------
   services_to_sync=()
   while IFS= read -r service; do
     [[ -n "${service}" ]] && services_to_sync+=("${service}")
@@ -213,6 +296,9 @@ run_sync() {
     exit 2
   fi
 
+  # Validate services
+  lm_sync_validate_services "${services_to_sync[@]}"
+
   if [[ "${sync_pull}" == "true" ]]; then
     for service in "${services_to_sync[@]}"; do
       pull_repo_if_clean "${service}"
@@ -221,28 +307,21 @@ run_sync() {
 
   local docker_services=()
   for service in "${services_to_sync[@]}"; do
-    case "${service}" in
-      backend|admin|website|nodeagent|job-service)
-        docker_services+=("${service}")
-        ;;
-      app)
-        echo "[sync] app: Flutter app is not managed by Docker; use livemask-app/scripts/local-app.sh for build/run"
-        ;;
-    esac
+    if lm_sync_is_docker_service "${service}"; then
+      docker_services+=("${service}")
+    else
+      local desc
+      desc="$(lm_sync_service_desc "${service}")"
+      echo "[sync] ${service}: ${desc} — not Docker-managed, skipping"
+    fi
   done
 
+  # Use sync library for execution
   if [[ "${#docker_services[@]}" -gt 0 ]]; then
-    if has_service backend "${docker_services[@]}" && has_service nodeagent "${docker_services[@]}"; then
-      local first_services=()
-      local service
-      for service in "${docker_services[@]}"; do
-        [[ "${service}" != "nodeagent" ]] && first_services+=("${service}")
-      done
-      recreate_local_services "${first_services[@]}"
-      wait_backend_health
-      recreate_local_services nodeagent
+    if [[ "${dry_run}" == "true" ]]; then
+      lm_sync_execute --dry-run "${docker_services[@]}"
     else
-      recreate_local_services "${docker_services[@]}"
+      lm_sync_execute "${docker_services[@]}"
     fi
   fi
 }
