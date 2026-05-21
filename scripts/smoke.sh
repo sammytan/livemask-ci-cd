@@ -650,4 +650,21 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n + jobs-hardening + growth-revenue + reward-notification + release-control)"
+# ── Connection Quality Report Smoke (TASK-CICD-CONNECTION-QUALITY-SMOKE-001) ──
+echo ""
+echo "=== Smoke: Connection Quality Report (TASK-CICD-CONNECTION-QUALITY-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/connection-quality-smoke.sh" 2>&1; then
+  echo "Connection quality report smoke PASSED."
+else
+  cq_rc=$?
+  echo ""
+  echo "=== Connection Quality Report Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${cq_rc}
+fi
+
+echo ""
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality)"
