@@ -116,6 +116,47 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Step 4: App Release route documentation coverage (TASK-CICD-APP-RELEASE-001)
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [4] App Release route documentation (TASK-CICD-APP-RELEASE-001) ---"
+
+OPENAPI_PATH="${BACKEND_REPO}/docs/openapi.yaml"
+if [[ ! -f "${OPENAPI_PATH}" ]]; then
+  OPENAPI_PATH="${BACKEND_REPO}/internal/swagger/openapi.yaml"
+fi
+
+check_app_release_route() {
+  local route="$1"
+  local desc="$2"
+  if rg -q "${route}" "${OPENAPI_PATH}" 2>/dev/null; then
+    pass_result "App Release OpenAPI: ${desc} (${route}) documented"
+  else
+    fail_result "App Release OpenAPI: ${desc} (${route}) NOT documented"
+  fi
+}
+
+echo "  OpenAPI spec: ${OPENAPI_PATH}"
+echo ""
+
+# Admin App Release API
+check_app_release_route "/admin/api/v1/app/releases" "Admin list/create/releases"
+
+# Admin App Release storage settings
+check_app_release_route "/admin/api/v1/app-release-storage" "Admin storage settings"
+
+# Public latest release API
+check_app_release_route "/api/v1/app/releases/latest" "Public latest release"
+
+# Internal executor APIs (6 paths)
+check_app_release_route "/internal/job-executors/app-release/artifact-verify" "Executor artifact-verify"
+check_app_release_route "/internal/job-executors/app-release/publish" "Executor publish"
+check_app_release_route "/internal/job-executors/app-release/revoke" "Executor revoke"
+check_app_release_route "/internal/job-executors/app-release/storage-verify" "Executor storage-verify"
+check_app_release_route "/internal/job-executors/app-release/adoption-aggregate" "Executor adoption-aggregate"
+check_app_release_route "/internal/job-executors/app-release/website-downloads-refresh" "Executor website-downloads-refresh"
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Summary
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
