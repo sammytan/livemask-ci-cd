@@ -57,6 +57,7 @@ services:
       DEV_USER_PASSWORD: "${DEV_USER_PASSWORD:-UserPass123!}"
       # GeoIP credential encryption (dev-only; production uses a real key)
       GEOIP_CREDENTIAL_ENCRYPTION_KEY: "${GEOIP_CREDENTIAL_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+      INTERNAL_SERVICE_SECRET: "${INTERNAL_SERVICE_SECRET:-local-dev-secret}"
       GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
       GOCACHE: /workspace/.cache/go-build
       GOMODCACHE: /workspace/.cache/go/pkg/mod
@@ -149,6 +150,7 @@ services:
       JOB_SERVICE_REDIS_ENABLED: "true"
       JOB_SERVICE_INTERNAL_AUTH_ENABLED: "${JOB_SERVICE_INTERNAL_AUTH_ENABLED:-false}"
       BACKEND_INTERNAL_URL: "http://backend:8080"
+      BACKEND_INTERNAL_SECRET: "${BACKEND_INTERNAL_SECRET:-local-dev-secret}"
       GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
       GOCACHE: /workspace/.cache/go-build
       GOMODCACHE: /workspace/.cache/go/pkg/mod
