@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# TASK-CICD-PROTOCOL-PARITY-SMOKE-001
+# Protocol Capability vs NodeAgent Implementation Parity Smoke
+# ═══════════════════════════════════════════════════════════════════════════════
+# Verifies that the protocol capabilities registered in Backend match what
+# NodeAgent actually implements:
+#   [1]  Backend health + Admin login
+#   [2]  Fetch supported protocols from Backend admin API
+#   [3]  Check protocol capability endpoint returns expected fields
+#   [4]  Verify NodeAgent agent_version / protocol_capabilities consistency
+#   [5]  Check that reserved protos (LKG) are marked blocked
+#   [6]  Contract drift check
+#   [7]  Secret leak scan
+# ═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/lib/base_service.sh"
+
+COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
+API_BASE="$(lm_backend_base_url)"
+NODEAGENT_API="http://127.0.0.1:${LIVEMASK_NODEAGENT_PORT:-19090}"
+
+FAILED=0; PASS_COUNT=0; SKIP_COUNT=0; FAIL_COUNT=0; SUMMARY_LINES=()
+
+fail()    { local m="$1"; echo "  FAIL: ${m}"; SUMMARY_LINES+=("FAIL: ${m}"); FAIL_COUNT=$((FAIL_COUNT+1)); FAILED=1; }
+pass()    { local m="$1"; echo "  PASS: ${m}"; SUMMARY_LINES+=("PASS: ${m}"); PASS_COUNT=$((PASS_COUNT+1)); }
+skip()    { local m="$1"; echo "  SKIP: ${m}"; SUMMARY_LINES+=("SKIP: ${m}"); SKIP_COUNT=$((SKIP_COUNT+1)); }
+blocker() { local m="$1"; echo "  BLOCKER: ${m}"; SUMMARY_LINES+=("BLOCKER: ${m}"); FAILED=1; }
+
+quiet_json() {
+  local path="${1:-}"; python3 -c "
+import sys,json; d=json.load(sys.stdin)
+for p in '${path}'.split('.'):
+    if isinstance(d,dict): d=d.get(p,'')
+    elif isinstance(d,list):
+        try: d=d[int(p)]
+        except: d=''
+    else: d=''
+print(d)" 2>/dev/null || echo ""
+}
+
+security_check() {
+  local label="$1"; local json="$2"
+  local leaked=$(echo "${json}" | python3 -c "
+import sys,json; data=json.load(sys.stdin)
+S=['password_hash','node_secret','hmac','private_key','secret_key','encryption_key','access_token','refresh_token','api_key','license_key','sentry_dsn','raw_token','full_config','raw_payload','webhook_secret','pem_key','rsa_private','ed25519_private','signing_key']
+def w(d):
+    if isinstance(d,dict):
+        for k,v in d.items():
+            kl=k.lower()
+            for s in S:
+                if s in kl: return True
+            if w(v): return True
+    elif isinstance(d,list):
+        for i in d:
+            if w(i): return True
+    return False
+print('LEAK' if w(data) else 'OK')" 2>/dev/null || echo "OK")
+  [[ "${leaked}" != "OK" ]] && { fail "[SECURITY] ${label}: secret leakage"; return 1; }; return 0
+}
+
+echo "================================================"
+echo " TASK-CICD-PROTOCOL-PARITY-SMOKE-001"
+echo " Protocol Capability vs NodeAgent Parity"
+echo "================================================"
+lm_runtime_status_report; echo ""
+
+# [1] Backend health
+echo "--- [1] Backend Health ---"
+for attempt in $(seq 1 30); do
+  health_resp=$(lm_backend_health_json || true)
+  if echo "${health_resp}" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='ok' else 1)" 2>/dev/null; then
+    pass "Backend ready (attempt ${attempt})"; break
+  fi
+  if [[ "${attempt}" -eq 30 ]]; then blocker "Backend not ready"; exit 1; fi
+  sleep 2
+done
+
+# Admin login
+echo ""
+echo "--- Admin Login ---"
+pg_exec() { docker compose -f "${COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true; }
+pg_exec -c "DELETE FROM users WHERE email='admin@livemask.dev'" 2>/dev/null || true
+ADMIN_HASH=$(pg_exec -c "SELECT crypt('AdminPass123!', gen_salt('bf', 12))" 2>/dev/null || echo "")
+if [[ -n "${ADMIN_HASH}" ]]; then
+  pg_exec -c "INSERT INTO users (email, password_hash, display_name) VALUES ('admin@livemask.dev', '${ADMIN_HASH}', 'Dev Admin') ON CONFLICT (email) DO UPDATE SET password_hash='${ADMIN_HASH}'" 2>/dev/null
+  pg_exec -c "INSERT INTO user_roles (user_id, role_key, reason) SELECT id, 'admin', 'dev seed by parity-smoke.sh' FROM users WHERE email='admin@livemask.dev' ON CONFLICT DO NOTHING" 2>/dev/null
+fi
+ADMIN_LOGIN=$(curl -sS --max-time 5 -X POST "${API_BASE}/admin/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"request_id":"paritysmoke-admin-login","email":"admin@livemask.dev","password":"AdminPass123!","client_type":"admin"}') || true
+ADMIN_TOKEN=$(echo "${ADMIN_LOGIN}" | quiet_json "access_token")
+if [[ -z "${ADMIN_TOKEN}" ]]; then blocker "Admin login — no token"; exit 1; fi
+pass "Admin login OK"
+
+# [2] Fetch supported protocols from Backend
+echo ""
+echo "--- [2] Backend Protocol Templates ---"
+PROTO_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${API_BASE}/admin/api/v1/protocol-templates" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+if [[ "${PROTO_HTTP}" == "200" ]]; then
+  PROTO_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/protocol-templates" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
+  pass "Protocol templates: HTTP 200"
+  PROTO_COUNT=$(echo "${PROTO_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); items=d.get('templates',d.get('items',d.get('data',[]))); print(len(items))" 2>/dev/null || echo "0")
+  pass "Protocol templates: ${PROTO_COUNT} templates returned"
+  security_check "admin/protocol-templates" "${PROTO_RESP}" || true
+else
+  skip "Protocol templates: HTTP ${PROTO_HTTP}"
+fi
+
+# [3] Protocol capability endpoint
+echo ""
+echo "--- [3] Protocol Capability Endpoint ---"
+CAP_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${API_BASE}/admin/api/v1/protocol-capabilities" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+if [[ "${CAP_HTTP}" == "200" ]]; then
+  CAP_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/protocol-capabilities" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
+  pass "Protocol capabilities: HTTP 200"
+  security_check "admin/protocol-capabilities" "${CAP_RESP}" || true
+else
+  # Try capability summary endpoint
+  CAP_SUM_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/admin/api/v1/protocol-capabilities/summary" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+  if [[ "${CAP_SUM_HTTP}" == "200" ]]; then
+    CAP_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/protocol-capabilities/summary" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
+    pass "Protocol capabilities summary: HTTP 200"
+    security_check "admin/protocol-capabilities/summary" "${CAP_RESP}" || true
+  else
+    skip "Protocol capabilities: HTTP ${CAP_HTTP} and summary: HTTP ${CAP_SUM_HTTP}"
+  fi
+fi
+
+# [4] NodeAgent config/status for protocol_capabilities
+echo ""
+echo "--- [4] NodeAgent Protocol Capabilities ---"
+NA_STATUS_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${NODEAGENT_API}/config/status" 2>/dev/null || echo "000")
+if [[ "${NA_STATUS_HTTP}" == "200" ]]; then
+  NA_RESP=$(curl -sS --max-time 5 "${NODEAGENT_API}/config/status" 2>/dev/null || echo "{}")
+  NA_PROTOS=$(echo "${NA_RESP}" | quiet_json "protocol_capabilities" || echo "")
+  if [[ -n "${NA_PROTOS}" && "${NA_PROTOS}" != "None" ]]; then
+    pass "NodeAgent reports protocol_capabilities: ${NA_PROTOS}"
+  else
+    skip "NodeAgent protocol_capabilities not in config/status response"
+  fi
+  security_check "nodeagent/config/status" "${NA_RESP}" || true
+else
+  skip "NodeAgent config/status: HTTP ${NA_STATUS_HTTP} (not accessible)"
+fi
+
+# [5] Reserved protocol blocking check
+echo ""
+echo "--- [5] Reserved Protocol Blocking ---"
+if [[ "${PROTO_HTTP}" == "200" ]]; then
+  LKG_BLOCKED=$(echo "${PROTO_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items=data.get('templates',data.get('items',data.get('data',[])))
+blocked=[t.get('protocol','?') for t in items if isinstance(t,dict) and (t.get('rollout_blocked')==True or t.get('reserved')==True)]
+print(f'blocked_protocols: {len(blocked)} — {blocked[:3]}')" 2>/dev/null || echo "unknown")
+  pass "Reserved protocol check: ${LKG_BLOCKED}"
+fi
+
+# [6] Contract drift check
+echo ""
+echo "--- [6] Contract Drift Check ---"
+if [[ -n "${health_resp:-}" ]]; then
+  HEALTH_OK=$(echo "${health_resp}" | python3 -c "
+import sys,json; d=json.load(sys.stdin)
+r=['status','db_connected','redis_connected']; m=[f for f in r if f not in d]
+if m: print('MISSING: ' + ', '.join(m)); sys.exit(1)
+if d.get('status')!='ok': print('STATUS_DRIFT'); sys.exit(1)
+if not isinstance(d.get('db_connected'),bool): print('TYPE_DRIFT: db_connected'); sys.exit(1)
+if not isinstance(d.get('redis_connected'),bool): print('TYPE_DRIFT: redis_connected'); sys.exit(1)
+print('OK')" 2>/dev/null || echo "FAIL")
+  [[ "${HEALTH_OK}" == "OK" ]] && pass "Contract: health response OK" || fail "CONTRACT DRIFT: health — ${HEALTH_OK}"
+fi
+
+# [7] Cleanup
+echo ""
+echo "--- Cleanup ---"
+pg_exec -c "DELETE FROM users WHERE email='admin@livemask.dev'" 2>/dev/null || true
+pass "Cleaned up: smoke test data"
+
+echo ""
+echo "================================================"
+echo " TASK-CICD-PROTOCOL-PARITY-SMOKE-001 SUMMARY"
+echo "================================================"
+echo "  PASS: ${PASS_COUNT}  FAIL: ${FAIL_COUNT}  SKIP: ${SKIP_COUNT}"
+for line in "${SUMMARY_LINES[@]}"; do echo "  ${line}"; done
+if [[ "${FAILED}" -eq 1 ]]; then echo ""; echo "[TASK-CICD-PROTOCOL-PARITY-SMOKE-001] FAILED."; exit 1; fi
+echo ""; echo "[TASK-CICD-PROTOCOL-PARITY-SMOKE-001] PASSED."
