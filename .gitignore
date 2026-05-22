@@ -4,3 +4,5 @@ infra/env/*.env
 # Staging Docker build context (checked-out dependency repos)
 # Staging Docker build context (checked-out dependency repos)
 infra/_build_deps/
+# Build artifacts
+infra/.next/
