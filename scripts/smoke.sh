@@ -775,4 +775,117 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n-language + bandwidth-auto-reconnect + traffic-analytics-v2 + admin-nav-ia + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync + nat-sharing-guard + real-data-closed-loop)"
+# ── Jobs Real Data Smoke (TASK-CICD-JOBS-REAL-DATA-SMOKE-001) ──────────
+echo ""
+echo "=== Smoke: Jobs Real Data (TASK-CICD-JOBS-REAL-DATA-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/jobs-real-data-smoke.sh" 2>&1; then
+  echo "Jobs real data smoke PASSED."
+else
+  jrd_rc=$?
+  echo ""
+  echo "=== Jobs Real Data Smoke FAILED ==="
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  docker compose -f "${COMPOSE_FILE}" logs job-service --tail=100 2>/dev/null || true
+  exit ${jrd_rc}
+fi
+
+echo ""
+# ── Node Status Freshness Smoke (TASK-CICD-NODE-STATUS-FRESHNESS-SMOKE-001) ──
+echo ""
+echo "=== Smoke: Node Status Freshness (TASK-CICD-NODE-STATUS-FRESHNESS-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/node-status-freshness-smoke.sh" 2>&1; then
+  echo "Node status freshness smoke PASSED."
+else
+  nsf_rc=$?
+  echo ""
+  echo "=== Node Status Freshness Smoke FAILED ==="
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${nsf_rc}
+fi
+
+echo ""
+# ── App Runtime Governance Smoke (TASK-CICD-APP-RUNTIME-GOVERNANCE-SMOKE-001) ──
+echo ""
+echo "=== Smoke: App Runtime Governance (TASK-CICD-APP-RUNTIME-GOVERNANCE-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/app-runtime-governance-smoke.sh" 2>&1; then
+  echo "App runtime governance smoke PASSED."
+else
+  arg_rc=$?
+  echo ""
+  echo "=== App Runtime Governance Smoke FAILED ==="
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${arg_rc}
+fi
+
+echo ""
+# ── Protocol Parity Smoke (TASK-CICD-PROTOCOL-PARITY-SMOKE-001) ─────────
+echo ""
+echo "=== Smoke: Protocol Parity (TASK-CICD-PROTOCOL-PARITY-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/protocol-parity-smoke.sh" 2>&1; then
+  echo "Protocol parity smoke PASSED."
+else
+  pp_rc=$?
+  echo ""
+  echo "=== Protocol Parity Smoke FAILED ==="
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${pp_rc}
+fi
+
+echo ""
+# ── Log Retention Smoke (TASK-CICD-LOG-RETENTION-SMOKE-001) ────────────
+echo ""
+echo "=== Smoke: Log Retention (TASK-CICD-LOG-RETENTION-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/log-retention-smoke.sh" 2>&1; then
+  echo "Log retention smoke PASSED."
+else
+  lr_rc=$?
+  echo ""
+  echo "=== Log Retention Smoke FAILED ==="
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${lr_rc}
+fi
+
+echo ""
+# ── Admin Nodes UX Smoke (TASK-CICD-ADMIN-NODES-UX-SMOKE-001) ──────────
+echo ""
+echo "=== Smoke: Admin Nodes UX (TASK-CICD-ADMIN-NODES-UX-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/admin-nodes-ux-smoke.sh" 2>&1; then
+  echo "Admin nodes UX smoke PASSED."
+else
+  anux_rc=$?
+  echo ""
+  echo "=== Admin Nodes UX Smoke FAILED ==="
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${anux_rc}
+fi
+
+echo ""
+# ── Website i18n Announcement Smoke (TASK-CICD-WEBSITE-I18N-ANNOUNCEMENT-SMOKE-001) ──
+echo ""
+echo "=== Smoke: Website i18n Announcement (TASK-CICD-WEBSITE-I18N-ANNOUNCEMENT-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/website-i18n-announcement-smoke.sh" 2>&1; then
+  echo "Website i18n announcement smoke PASSED."
+else
+  wia_rc=$?
+  echo ""
+  echo "=== Website i18n Announcement Smoke FAILED ==="
+  docker compose -f "${COMPOSE_FILE}" logs website --tail=100 2>/dev/null || true
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  exit ${wia_rc}
+fi
+
+echo ""
+# ── Secret Leak Standard Smoke (TASK-CICD-SECRET-LEAK-STANDARD-SMOKE-001) ──
+echo ""
+echo "=== Smoke: Secret Leak Standard (TASK-CICD-SECRET-LEAK-STANDARD-SMOKE-001) ==="
+if bash "${SCRIPT_DIR}/secret-leak-standard-smoke.sh" 2>&1; then
+  echo "Secret leak standard smoke PASSED."
+else
+  sls_rc=$?
+  echo ""
+  echo "=== Secret Leak Standard Smoke FAILED ==="
+  exit ${sls_rc}
+fi
+
+echo ""
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n-language + bandwidth-auto-reconnect + traffic-analytics-v2 + admin-nav-ia + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync + nat-sharing-guard + real-data-closed-loop + jobs-real-data + node-status-freshness + app-runtime-governance + protocol-parity + log-retention + admin-nodes-ux + website-i18n-announcement + secret-leak-standard)"
