@@ -167,6 +167,22 @@ jobs:
         run: bash scripts/openapi-drift-smoke.sh
       - name: Real Data Closed Loop smoke (TASK-CICD-REAL-DATA-CLOSED-LOOP-SMOKE-001)
         run: bash scripts/real-data-closed-loop-smoke.sh
+      - name: Jobs Real Data smoke (TASK-CICD-JOBS-REAL-DATA-SMOKE-001)
+        run: bash scripts/jobs-real-data-smoke.sh
+      - name: Node Status Freshness smoke (TASK-CICD-NODE-STATUS-FRESHNESS-SMOKE-001)
+        run: bash scripts/node-status-freshness-smoke.sh
+      - name: App Runtime Governance smoke (TASK-CICD-APP-RUNTIME-GOVERNANCE-SMOKE-001)
+        run: bash scripts/app-runtime-governance-smoke.sh
+      - name: Protocol Parity smoke (TASK-CICD-PROTOCOL-PARITY-SMOKE-001)
+        run: bash scripts/protocol-parity-smoke.sh
+      - name: Log Retention smoke (TASK-CICD-LOG-RETENTION-SMOKE-001)
+        run: bash scripts/log-retention-smoke.sh
+      - name: Admin Nodes UX smoke (TASK-CICD-ADMIN-NODES-UX-SMOKE-001)
+        run: bash scripts/admin-nodes-ux-smoke.sh
+      - name: Website i18n Announcement smoke (TASK-CICD-WEBSITE-I18N-ANNOUNCEMENT-SMOKE-001)
+        run: bash scripts/website-i18n-announcement-smoke.sh
+      - name: Secret Leak Standard smoke (TASK-CICD-SECRET-LEAK-STANDARD-SMOKE-001)
+        run: bash scripts/secret-leak-standard-smoke.sh
       - name: Upload runtime status artifact
         if: always()
         uses: actions/upload-artifact@v4
