@@ -30,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/base_service.sh"
 
-COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
+LM_COMPOSE_FILE="${LM_COMPOSE_FILE:-$(lm_detect_compose_file)}"
 API_BASE="$(lm_backend_base_url)"
 JOB_SERVICE_URL="$(lm_job_service_url)"
 NODEAGENT_API="http://127.0.0.1:${LIVEMASK_NODEAGENT_PORT:-19090}"
@@ -97,19 +97,8 @@ print(current)
 " 2>/dev/null || echo ""
 }
 
-# Auto-detect the correct compose file (local takes precedence over staging)
-detect_compose_file() {
-  if docker compose -f infra/docker-compose.local.yml ps -q postgres &>/dev/null 2>&1; then
-    echo "infra/docker-compose.local.yml"
-  elif docker compose -f infra/docker-compose.staging.yml ps -q postgres &>/dev/null 2>&1; then
-    echo "infra/docker-compose.staging.yml"
-  else
-    echo "${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
-  fi
-}
-DETECTED_COMPOSE_FILE="$(detect_compose_file)"
 pg_exec() {
-  docker compose -f "${DETECTED_COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true
+  lm_pg_exec "$@"
 }
 
 # ── Security leak scanner ──────────────────────────────────────────────────
@@ -1114,13 +1103,13 @@ if [[ "${FAILED}" -eq 1 ]]; then
   echo "[TASK-CICD-REAL-DATA-CLOSED-LOOP-SMOKE-001] REAL DATA CLOSED LOOP SMOKE FAILED."
   echo ""
   echo "--- docker compose ps ---"
-  docker compose -f "${DETECTED_COMPOSE_FILE}" ps 2>/dev/null || true
+  docker compose -f "${LM_COMPOSE_FILE}" ps 2>/dev/null || true
   echo ""
   echo "--- docker compose logs backend (last 100) ---"
-  docker compose -f "${DETECTED_COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  docker compose -f "${LM_COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
   echo ""
   echo "--- docker compose logs job-service (last 50) ---"
-  docker compose -f "${DETECTED_COMPOSE_FILE}" logs job-service --tail=50 2>/dev/null || true
+  docker compose -f "${LM_COMPOSE_FILE}" logs job-service --tail=50 2>/dev/null || true
   exit 1
 fi
 

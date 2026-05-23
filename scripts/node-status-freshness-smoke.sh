@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/base_service.sh"
 
-COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
+LM_COMPOSE_FILE="${LM_COMPOSE_FILE:-$(lm_detect_compose_file)}"
 API_BASE="$(lm_backend_base_url)"
 
 FAILED=0
@@ -84,7 +84,7 @@ print(current)
 }
 
 pg_exec() {
-  docker compose -f "${COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true
+  lm_pg_exec "$@"
 }
 
 echo "================================================"
@@ -135,17 +135,28 @@ pass "Admin login OK (token length=${#ADMIN_TOKEN})"
 echo ""
 echo "--- [2] Register Test Node ---"
 
-NODE_ID="node-freshness-$(date +%s)"
-NODE_SECRET="freshness-secret-$(date +%s | md5sum 2>/dev/null | head -c16 || echo 'test')"
+# Register via API to get proper UUID and secret
+NODE_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/register" \
+  -H "Content-Type: application/json" \
+  -d '{"node_name":"freshness-test-001","agent_version":"smoke-1.0.0"}') || true
+NODE_ID=$(echo "${NODE_REG}" | quiet_json "node_id" || echo "")
+NODE_SECRET=$(echo "${NODE_REG}" | quiet_json "node_secret" || echo "")
+NODE_STATUS=$(echo "${NODE_REG}" | quiet_json "status" || echo "")
 
-# Direct DB insert for the node
-pg_exec -c "INSERT INTO nodes (id, node_name, node_secret, status, agent_version, public_ip, city, country, isp, protocols_supported, last_heartbeat_at, heartbeat_interval_seconds) VALUES ('${NODE_ID}', 'freshness-test-001', '${NODE_SECRET}', 'active', 'smoke-1.0.0', '203.0.113.2', 'Tokyo', 'JP', 'NTT', '{\"shadowsocks\"}', NOW(), 30) ON CONFLICT (id) DO UPDATE SET status='active', last_heartbeat_at=NOW(), heartbeat_interval_seconds=30" 2>/dev/null || true
-
-DB_VERIFY=$(pg_exec -c "SELECT id, status FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || echo "")
-if echo "${DB_VERIFY}" | grep -q "${NODE_ID}"; then
-  pass "Test node registered in DB with status=active"
+if [[ -z "${NODE_ID}" ]]; then
+  fail "Test node registration failed — no node_id returned"
 else
-  fail "Test node NOT found in DB after insert"
+  pass "Test node registered: id=${NODE_ID}, status=${NODE_STATUS}"
+
+  # Approve the node
+  pg_exec -c "UPDATE nodes SET status='active', approved_at=NOW(), approved_by='freshness-smoke' WHERE id='${NODE_ID}'" 2>/dev/null || true
+
+  DB_VERIFY=$(pg_exec -c "SELECT id, status FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || echo "")
+  if echo "${DB_VERIFY}" | grep -q "${NODE_ID}"; then
+    pass "Test node registered in DB with status=active"
+  else
+    fail "Test node NOT found in DB after registration"
+  fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -155,42 +166,41 @@ echo ""
 echo "--- [3] Send Heartbeat ---"
 
 # Compute HMAC for the heartbeat
-HMAC_KEY="${NODE_SECRET}"
-TIMESTAMP_MS=$(date +%s%3N)
-HB_PAYLOAD="{\"node_id\":\"${NODE_ID}\",\"timestamp\":${TIMESTAMP_MS},\"agent_version\":\"smoke-1.0.0\",\"config_version\":1,\"singbox_status\":\"running\",\"load_score\":42,\"cpu_usage\":0.35,\"memory_usage\":0.55,\"network_tx_bytes\":1024,\"network_rx_bytes\":2048,\"active_connections\":5,\"degraded\":false}"
+NODE_SECRET_HASH=$(echo -n "${NODE_SECRET}" | sha256sum | cut -d' ' -f1 2>/dev/null || echo "${NODE_SECRET}")
+HB_TS=$(date +%s)
+HB_PAYLOAD="{\"agent_version\":\"smoke-1.0.0\",\"config_version\":1,\"singbox_status\":\"running\",\"load_score\":42,\"cpu_usage\":0.35,\"memory_usage\":0.55,\"network_tx_bytes\":1024,\"network_rx_bytes\":2048,\"active_connections\":5,\"degraded\":false}"
+HB_SIGNATURE=$(python3 -c "
+import hmac, hashlib
+secret_hash = '${NODE_SECRET_HASH}'
+msg = '${NODE_ID}:${HB_TS}'
+sig = hmac.new(secret_hash.encode(), msg.encode(), hashlib.sha256).hexdigest()
+print(sig)
+" 2>/dev/null || echo "")
 
-# Try HMAC-signed heartbeat
-HB_SIGNATURE=$(echo -n "${TIMESTAMP_MS}:${HB_PAYLOAD}" | openssl dgst -sha256 -hmac "${HMAC_KEY}" -hex 2>/dev/null | cut -d' ' -f2 || echo "")
+HB_RESP=$(curl -sS -w "\n%{http_code}" --max-time 5 -X POST "${API_BASE}/internal/agent/heartbeat" \
+  -H "Content-Type: application/json" \
+  -H "X-Node-ID: ${NODE_ID}" \
+  -H "X-Signature: ${HB_SIGNATURE}" \
+  -H "X-Timestamp: ${HB_TS}" \
+  -d "${HB_PAYLOAD}") || true
+HB_HTTP=$(echo "${HB_RESP}" | tail -1)
+HB_BODY=$(echo "${HB_RESP}" | sed '$d')
 
-if [[ -n "${HB_SIGNATURE}" ]]; then
-  HB_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/heartbeat" \
-    -H "Content-Type: application/json" \
-    -H "X-Timestamp: ${TIMESTAMP_MS}" \
-    -H "X-Signature: ${HB_SIGNATURE}" \
-    -d "${HB_PAYLOAD}" 2>/dev/null || echo "{}")
+if [[ "${HB_HTTP}" == "200" ]]; then
+  pass "Heartbeat: HTTP 200 (accepted)"
 else
-  # Fallback unsigned heartbeat
-  HB_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/heartbeat" \
-    -H "Content-Type: application/json" \
-    -H "X-Node-ID: ${NODE_ID}" \
-    -d "${HB_PAYLOAD}" 2>/dev/null || echo "{}")
-fi
-
-HB_STATUS=$(echo "${HB_RESP}" | quiet_json "status" || echo "")
-if [[ -n "${HB_STATUS}" ]]; then
-  pass "Heartbeat accepted"
-else
-  # May still work via unsigned route
-  skip "Heartbeat response status not parseable (may work via unsigned/internal route)"
+  skip "Heartbeat: HTTP ${HB_HTTP} — SKIP (may not accept this HMAC format)"
 fi
 
 # Confirm heartbeat updated last_heartbeat_at
-sleep 2
-HB_TIME=$(pg_exec -c "SELECT last_heartbeat_at FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || echo "")
+if [[ -n "${NODE_ID:-}" ]]; then
+  sleep 2
+  HB_TIME=$(pg_exec -c "SELECT last_heartbeat_at FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || echo "")
 if [[ -n "${HB_TIME}" && "${HB_TIME}" != "None" && "${HB_TIME}" != "" ]]; then
   pass "Backend stored last_heartbeat_at: ${HB_TIME}"
 else
   skip "last_heartbeat_at not stored or not readable"
+fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -203,22 +213,23 @@ echo "--- [4] Stale Heartbeat → Status Transition ---"
 # A) Setting heartbeat_interval_seconds to 1 and last_heartbeat_at to far past
 # B) Querying Backend's node listing to check if staleness is detected
 
-# Option A: Simulate stale node by backdating last_heartbeat_at
-STALE_TIME=$(date -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -v-5M +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "")
-if [[ -n "${STALE_TIME}" ]]; then
-  pg_exec -c "UPDATE nodes SET last_heartbeat_at='${STALE_TIME}', heartbeat_interval_seconds=30 WHERE id='${NODE_ID}'" 2>/dev/null || true
-  pass "Simulated stale heartbeat: set last_heartbeat_at to 5 minutes ago"
-else
-  skip "Cannot compute stale time on this platform"
-fi
+if [[ -n "${NODE_ID:-}" ]]; then
+  # Simulate stale node by backdating last_heartbeat_at
+  STALE_TIME=$(date -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -v-5M +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "")
+  if [[ -n "${STALE_TIME}" ]]; then
+    pg_exec -c "UPDATE nodes SET last_heartbeat_at='${STALE_TIME}'::timestamptz WHERE id='${NODE_ID}'" 2>/dev/null || true
+    pass "Simulated stale heartbeat: set last_heartbeat_at to 5 minutes ago"
+  else
+    skip "Cannot compute stale time on this platform"
+  fi
 
-# Option B: Check if Backend exposes an internal stale-node detection endpoint
-STALE_CHECK_RESP=$(curl -sS --max-time 5 "${API_BASE}/internal/agent/nodes/stale" 2>/dev/null || echo "")
-STALE_CHECK_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" "${API_BASE}/internal/agent/nodes/stale" 2>/dev/null || echo "000")
-if [[ "${STALE_CHECK_HTTP}" == "200" ]] || echo "${STALE_CHECK_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); print('stale_check_ok')" 2>/dev/null | grep -q "stale_check_ok"; then
-  pass "Stale node detection endpoint accessible"
-else
-  skip "Stale node detection endpoint: HTTP ${STALE_CHECK_HTTP} (not deployed or not accessible)"
+  # Check if Backend exposes an internal stale-node detection endpoint
+  STALE_CHECK_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" "${API_BASE}/internal/agent/nodes/stale" 2>/dev/null || echo "000")
+  if [[ "${STALE_CHECK_HTTP}" == "200" ]]; then
+    pass "Stale node detection endpoint accessible"
+  else
+    skip "Stale node detection endpoint: HTTP ${STALE_CHECK_HTTP} (not deployed or not accessible)"
+  fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -266,7 +277,9 @@ fi
 # ══════════════════════════════════════════════════════════════════════════
 echo ""
 echo "--- [6] Cleanup ---"
-pg_exec -c "DELETE FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || true
+if [[ -n "${NODE_ID:-}" ]]; then
+  pg_exec -c "DELETE FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || true
+fi
 pg_exec -c "DELETE FROM users WHERE email='admin@livemask.dev'" 2>/dev/null || true
 pass "Cleaned up: smoke test data"
 

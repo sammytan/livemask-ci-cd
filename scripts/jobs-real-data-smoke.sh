@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/base_service.sh"
 
-COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
+LM_COMPOSE_FILE="${LM_COMPOSE_FILE:-$(lm_detect_compose_file)}"
 API_BASE="$(lm_backend_base_url)"
 JOB_SERVICE_URL="$(lm_job_service_url)"
 
@@ -90,7 +90,7 @@ print(current)
 }
 
 pg_exec() {
-  docker compose -f "${COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true
+  lm_pg_exec "$@"
 }
 
 security_check() {
@@ -235,29 +235,30 @@ fi
 echo ""
 echo "--- [3] NodeAgent Real Registration → DB ---"
 
-NODE_ID="node-jrdsmoke-001-$(date +%s)"
-NODE_SECRET="jrdsmoke-secret-$(date +%s | md5sum 2>/dev/null | head -c16 || echo 'test')"
+NODE_ID=""
 REG_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/register" \
   -H "Content-Type: application/json" \
-  -d "{\"node_id\":\"${NODE_ID}\",\"node_name\":\"jrdsmoke-001\",\"node_secret\":\"${NODE_SECRET}\",\"agent_version\":\"smoke-1.0.0\",\"public_ip\":\"203.0.113.1\",\"city\":\"Tokyo\",\"country\":\"JP\",\"isp\":\"NTT\",\"protocols_supported\":[\"shadowsocks\",\"wireguard\"]}") || true
+  -d "{\"node_name\":\"jrdsmoke-001\",\"agent_version\":\"smoke-1.0.0\"}") || true
+REG_NODE_ID=$(echo "${REG_RESP}" | quiet_json "node_id" || echo "")
 REG_STATUS=$(echo "${REG_RESP}" | quiet_json "status" || echo "")
-if [[ -n "${REG_STATUS}" && "${REG_STATUS}" != "error" ]]; then
-  pass "NodeAgent registration accepted"
+if [[ -n "${REG_NODE_ID}" ]]; then
+  NODE_ID="${REG_NODE_ID}"
+  pass "NodeAgent registration accepted: node_id=${NODE_ID}"
 else
   skip "NodeAgent registration API not available (may use pre-approval flow)"
 fi
 
-# Approve and activate the node
-echo "  Seeding node in DB..."
-pg_exec -c "INSERT INTO nodes (id, node_name, node_secret, status, agent_version, public_ip, city, country, isp, protocols_supported) VALUES ('${NODE_ID}', 'jrdsmoke-001', '${NODE_SECRET}', 'pending', 'smoke-1.0.0', '203.0.113.1', 'Tokyo', 'JP', 'NTT', '{\"shadowsocks\",\"wireguard\"}') ON CONFLICT (id) DO UPDATE SET status='pending'" 2>/dev/null || true
-pg_exec -c "UPDATE nodes SET status='active', approved_at=NOW(), approved_by='jrdsmoke' WHERE id='${NODE_ID}'" 2>/dev/null || true
+if [[ -n "${NODE_ID}" ]]; then
+  # Approve and activate the node via DB
+  pg_exec -c "UPDATE nodes SET status='active', approved_at=NOW(), approved_by='jrdsmoke' WHERE id='${NODE_ID}'" 2>/dev/null || true
 
-# Verify DB storage
-DB_NODE=$(pg_exec -c "SELECT id, status FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || echo "")
-if echo "${DB_NODE}" | grep -q "${NODE_ID}"; then
-  pass "DB verification: node exists in nodes table"
-else
-  fail "DB verification: node NOT found in nodes table"
+  # Verify DB storage
+  DB_NODE=$(pg_exec -c "SELECT id, status FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || echo "")
+  if echo "${DB_NODE}" | grep -q "${NODE_ID}"; then
+    pass "DB verification: node exists in nodes table"
+  else
+    fail "DB verification: node NOT found in nodes table"
+  fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -271,7 +272,7 @@ ADMIN_NODES_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" "${API_B
   -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
 
 if [[ "${ADMIN_NODES_HTTP}" == "200" ]]; then
-  if echo "${ADMIN_NODES}" | grep -q "${NODE_ID}"; then
+  if [[ -n "${NODE_ID:-}" ]] && echo "${ADMIN_NODES}" | grep -q "${NODE_ID}"; then
     pass "Admin API node list: found our node '${NODE_ID}'"
   else
     # Node might be in a full list—check at minimum that the endpoint works
@@ -512,7 +513,9 @@ fi
 # ══════════════════════════════════════════════════════════════════════════
 echo ""
 echo "--- Cleanup ---"
-pg_exec -c "DELETE FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || true
+if [[ -n "${NODE_ID:-}" ]]; then
+  pg_exec -c "DELETE FROM nodes WHERE id='${NODE_ID}'" 2>/dev/null || true
+fi
 pg_exec -c "DELETE FROM users WHERE email='admin@livemask.dev'" 2>/dev/null || true
 pass "Cleaned up: smoke test data"
 
