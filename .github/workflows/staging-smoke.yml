@@ -161,6 +161,8 @@ jobs:
         run: bash scripts/jobs-hardening-smoke.sh
       - name: NodeAgent Config Sync smoke (TASK-CICD-NODEAGENT-CONFIG-SMOKE-001)
         run: bash scripts/nodeagent-config-smoke.sh
+      - name: NodeAgent Speedtest & Bandwidth smoke (TASK-CICD-NODEAGENT-SPEEDTEST-BANDWIDTH-001)
+        run: bash scripts/nodeagent-speedtest-smoke.sh
       - name: NAT Sharing Guard smoke (TASK-CICD-NAT-SHARING-GUARD-001)
         run: bash scripts/nat-sharing-smoke.sh
       - name: OpenAPI Drift Check (TASK-CICD-OPENAPI-DRIFT-CHECK-001)

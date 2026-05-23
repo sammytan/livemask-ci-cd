@@ -166,3 +166,32 @@ lm_runtime_status_report() {
   echo "  Job Service: $(lm_job_service_url) (container=${LIVEMASK_JOB_SERVICE_CONTAINER})"
   echo "  NodeAgent:   http://127.0.0.1:${LIVEMASK_NODEAGENT_PORT} (container=${LIVEMASK_NODEAGENT_CONTAINER})"
 }
+
+# ---------------------------------------------------------------------------
+# Compose file detection and DB helpers (shared across smoke scripts)
+# ---------------------------------------------------------------------------
+# Usage:
+#   source scripts/lib/base_service.sh
+#   LM_COMPOSE_FILE="$(lm_detect_compose_file)"
+#   lm_pg_exec -c "SELECT 1"
+#
+# Callers may override the service name to check (default: postgres).
+
+lm_detect_compose_file() {
+  local service="${1:-postgres}"
+  local candidate
+  # Check local first (takes precedence)
+  for candidate in "infra/docker-compose.local.yml" "infra/docker-compose.staging.yml"; do
+    if [[ -f "${candidate}" ]] && docker compose -f "${candidate}" ps -q "${service}" &>/dev/null 2>&1; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  # Fallback
+  printf '%s' "${LM_COMPOSE_FILE:-infra/docker-compose.staging.yml}"
+}
+
+lm_pg_exec() {
+  local compose_file="${LM_COMPOSE_FILE:-infra/docker-compose.staging.yml}"
+  docker compose -f "${compose_file}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true
+}
