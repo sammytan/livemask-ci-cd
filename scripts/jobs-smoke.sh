@@ -392,6 +392,123 @@ else
   echo "  WARNING: Leaks detected (see above)"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# [12] Backend Endpoint Gap Matrix (TASK-CICD-JOBS-DRIFT-AND-GAP-SMOKE-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [12] Backend Endpoint Gap Matrix ---"
+GAP_MATRIX="${GAP_MATRIX_PATH:-/tmp/backend-endpoint-gap-matrix.json}"
+
+if [[ -f "${GAP_MATRIX}" ]]; then
+  GAP_REPORT=$(python3 -c "
+import sys, json
+with open('${GAP_MATRIX}') as f:
+    data = json.load(f)
+entries = data.get('entries', [])
+totals = {'ready': 0, 'backend_missing_404': 0, 'backend_500': 0, 'unknown': 0, 'auth_error': 0, 'blocked': 0, 'succeeded': 0}
+rows = []
+for e in entries:
+    s = e.get('status', 'unknown')
+    totals[s] = totals.get(s, 0) + 1
+    rows.append((s, e.get('job_type','?'), e.get('backend_path','?'), e.get('owner_domain','?')))
+print('generated_at: ' + data.get('generated_at',''))
+print('task_id: ' + data.get('task_id',''))
+print('total_entries: ' + str(len(entries)))
+for s in ['ready','backend_missing_404','backend_500','auth_error','blocked','succeeded','unknown']:
+    c = totals.get(s, 0)
+    if c > 0:
+        print('status_' + s + '=' + str(c))
+for s, jt, bp, od in rows:
+    if s != 'ready':
+        print('ROW|' + s + '|' + jt + '|' + bp + '|' + od)
+" 2>/dev/null || echo "PARSE_FAILED")
+
+  if [[ "${GAP_REPORT}" == "PARSE_FAILED" ]]; then
+    skip_msg "[GAP] Failed to parse ${GAP_MATRIX}"
+  else
+    echo "  Gap Matrix summary:"
+    while IFS= read -r line; do echo "    ${line}"; done <<< "${GAP_REPORT}"
+
+    ready_count=$(echo "${GAP_REPORT}" | sed -n 's/^status_ready=//p' || echo "0")
+    missing404_count=$(echo "${GAP_REPORT}" | sed -n 's/^status_backend_missing_404=//p' || echo "0")
+    backend500_count=$(echo "${GAP_REPORT}" | sed -n 's/^status_backend_500=//p' || echo "0")
+    unknown_count=$(echo "${GAP_REPORT}" | sed -n 's/^status_unknown=//p' || echo "0")
+
+    [[ "${ready_count:-0}" -gt 0 ]] && ok "[GAP] ${ready_count} endpoint(s) ready"
+    [[ "${missing404_count:-0}" -gt 0 ]] && skip_msg "[GAP] ${missing404_count} endpoint(s) backend_missing_404 (requires Backend deployment)"
+    if [[ "${backend500_count:-0}" -gt 0 ]]; then
+      bad "[GAP] ${backend500_count} endpoint(s) backend_500 — unexpected server error, must be remediated"
+    fi
+    [[ "${unknown_count:-0}" -gt 0 ]] && skip_msg "[GAP] ${unknown_count} endpoint(s) unknown — no runtime evidence yet"
+
+    echo "    ---- Non-ready endpoints ----"
+    while IFS='|' read -r _ status jt bp od; do
+      echo "      [${status}] ${jt} → ${bp} (${od})"
+    done < <(echo "${GAP_REPORT}" | grep '^ROW|')
+  fi
+else
+  skip_msg "[GAP] Backend Endpoint Gap Matrix not found at ${GAP_MATRIX} (run 'go test -run TestClassifier_OutputMatrix' in livemask-job-service first)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# [13] Definition Drift Report (TASK-CICD-JOBS-DRIFT-AND-GAP-SMOKE-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [13] Definition Drift Report ---"
+DRIFT_REPORT="${DRIFT_REPORT_PATH:-/tmp/definition-drift-report.json}"
+
+if [[ -f "${DRIFT_REPORT}" ]]; then
+  DRIFT_CHECK=$(python3 -c "
+import sys, json
+with open('${DRIFT_REPORT}') as f:
+    data = json.load(f)
+all_valid = data.get('all_valid', False)
+unique = data.get('unique_job_types', False)
+total = data.get('total_definitions', 0)
+generated = data.get('generated_at', '')
+task = data.get('task_id', '')
+checks = data.get('checks', [])
+print('generated_at: ' + str(generated))
+print('task_id: ' + str(task))
+print('total_definitions: ' + str(total))
+print('unique_job_types: ' + str(unique))
+print('all_valid: ' + str(all_valid))
+issue_count = 0
+for c in checks:
+    issues = c.get('issues', [])
+    if issues:
+        issue_count += 1
+        for iss in issues:
+            print('ISSUE|' + c.get('job_type','?') + '|' + iss)
+print('definitions_with_issues: ' + str(issue_count))
+" 2>/dev/null || echo "PARSE_FAILED")
+
+  if [[ "${DRIFT_CHECK}" == "PARSE_FAILED" ]]; then
+    skip_msg "[DRIFT] Failed to parse ${DRIFT_REPORT}"
+  else
+    echo "  Drift report summary:"
+    while IFS= read -r line; do echo "    ${line}"; done <<< "${DRIFT_CHECK}"
+
+    all_valid=$(echo "${DRIFT_CHECK}" | sed -n 's/^all_valid=//p')
+    unique=$(echo "${DRIFT_CHECK}" | sed -n 's/^unique_job_types=//p')
+    total_defs=$(echo "${DRIFT_CHECK}" | sed -n 's/^total_definitions=//p')
+
+    if [[ "${all_valid}" == "True" ]]; then
+      ok "[DRIFT] All ${total_defs} definitions valid, unique job types: ${unique}"
+    elif [[ "${all_valid}" == "False" ]]; then
+      echo "    ---- Definitions with issues ----"
+      while IFS='|' read -r _ jt issue; do
+        echo "      [DRIFT] ${jt}: ${issue}"
+      done < <(echo "${DRIFT_CHECK}" | grep '^ISSUE|')
+      bad "[DRIFT] Definition drift detected: not all definitions are valid"
+    else
+      skip_msg "[DRIFT] all_valid field not found in drift report"
+    fi
+  fi
+else
+  skip_msg "[DRIFT] Definition Drift Report not found at ${DRIFT_REPORT} (run 'go test -run TestDefinitionDrift_OutputJSON' in livemask-job-service first)"
+fi
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Cleanup
 # ──────────────────────────────────────────────────────────────────────────────
@@ -421,4 +538,5 @@ fi
 echo "[jobs-smoke] Jobs smoke PASSED."
 echo "Covers: Backend health, Admin login, Job service health, definitions, runs,"
 echo "  Admin job pages 404 check, Admin definitions/runs/schedules API,"
-echo "  RBAC, Secret leak scan"
+echo "  RBAC, Secret leak scan,"
+echo "  [12] Backend Endpoint Gap Matrix, [13] Definition Drift Report"
