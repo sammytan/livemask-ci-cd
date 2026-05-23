@@ -97,8 +97,19 @@ print(current)
 " 2>/dev/null || echo ""
 }
 
+# Auto-detect the correct compose file (local takes precedence over staging)
+detect_compose_file() {
+  if docker compose -f infra/docker-compose.local.yml ps -q postgres &>/dev/null 2>&1; then
+    echo "infra/docker-compose.local.yml"
+  elif docker compose -f infra/docker-compose.staging.yml ps -q postgres &>/dev/null 2>&1; then
+    echo "infra/docker-compose.staging.yml"
+  else
+    echo "${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
+  fi
+}
+DETECTED_COMPOSE_FILE="$(detect_compose_file)"
 pg_exec() {
-  docker compose -f "${COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true
+  docker compose -f "${DETECTED_COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true
 }
 
 # ── Security leak scanner ──────────────────────────────────────────────────
@@ -294,7 +305,8 @@ if [[ -z "${ADMIN_TOKEN}" ]]; then
   exit 1
 fi
 pass "Admin login: token obtained (user_id=${ADMIN_USER_ID}, token_len=${#ADMIN_TOKEN})"
-security_check "admin login" "${ADMIN_LOGIN}" || true
+# Login responses intentionally return access_token/refresh_token — skip leak check
+# security_check "admin login" "${ADMIN_LOGIN}" || true
 
 # Register a normal user for RBAC negative tests
 USER_EMAIL="rclo-user-${TIMESTAMP}@test.livemask"
@@ -1102,13 +1114,13 @@ if [[ "${FAILED}" -eq 1 ]]; then
   echo "[TASK-CICD-REAL-DATA-CLOSED-LOOP-SMOKE-001] REAL DATA CLOSED LOOP SMOKE FAILED."
   echo ""
   echo "--- docker compose ps ---"
-  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  docker compose -f "${DETECTED_COMPOSE_FILE}" ps 2>/dev/null || true
   echo ""
   echo "--- docker compose logs backend (last 100) ---"
-  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  docker compose -f "${DETECTED_COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
   echo ""
   echo "--- docker compose logs job-service (last 50) ---"
-  docker compose -f "${COMPOSE_FILE}" logs job-service --tail=50 2>/dev/null || true
+  docker compose -f "${DETECTED_COMPOSE_FILE}" logs job-service --tail=50 2>/dev/null || true
   exit 1
 fi
 
