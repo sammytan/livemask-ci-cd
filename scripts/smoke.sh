@@ -756,6 +756,25 @@ else
 fi
 
 echo ""
+# ── NodeAgent Speedtest & Bandwidth Smoke (TASK-CICD-NODEAGENT-SPEEDTEST-BANDWIDTH-001) ──
+echo ""
+echo "=== Smoke: NodeAgent Speedtest & Bandwidth (TASK-CICD-NODEAGENT-SPEEDTEST-BANDWIDTH-001) ==="
+if bash "${SCRIPT_DIR}/nodeagent-speedtest-smoke.sh" 2>&1; then
+  echo "NodeAgent speedtest smoke PASSED."
+else
+  nst_rc=$?
+  echo ""
+  echo "=== NodeAgent Speedtest Smoke FAILED ==="
+  echo "--- docker compose ps ---"
+  docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
+  echo "--- docker compose logs backend (last 100) ---"
+  docker compose -f "${COMPOSE_FILE}" logs backend --tail=100 2>/dev/null || true
+  echo "--- docker compose logs nodeagent (last 50) ---"
+  docker compose -f "${COMPOSE_FILE}" logs nodeagent --tail=50 2>/dev/null || true
+  exit ${nst_rc}
+fi
+
+echo ""
 # ── Real Data Closed Loop Smoke (TASK-CICD-REAL-DATA-CLOSED-LOOP-SMOKE-001) ──
 echo ""
 echo "=== Smoke: Real Data Closed Loop (TASK-CICD-REAL-DATA-CLOSED-LOOP-SMOKE-001) ==="
@@ -888,4 +907,4 @@ else
 fi
 
 echo ""
-echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n-language + bandwidth-auto-reconnect + traffic-analytics-v2 + admin-nav-ia + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync + nat-sharing-guard + real-data-closed-loop + jobs-real-data + node-status-freshness + app-runtime-governance + protocol-parity + log-retention + admin-nodes-ux + website-i18n-announcement + secret-leak-standard)"
+echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n-language + bandwidth-auto-reconnect + traffic-analytics-v2 + admin-nav-ia + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync + nat-sharing-guard + nodeagent-speedtest-bandwidth + real-data-closed-loop + jobs-real-data + node-status-freshness + app-runtime-governance + protocol-parity + log-retention + admin-nodes-ux + website-i18n-announcement + secret-leak-standard)"
