@@ -58,6 +58,9 @@ services:
       # GeoIP credential encryption (dev-only; production uses a real key)
       GEOIP_CREDENTIAL_ENCRYPTION_KEY: "${GEOIP_CREDENTIAL_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
       INTERNAL_SERVICE_SECRET: "${INTERNAL_SERVICE_SECRET:-local-dev-secret}"
+      # Job Service gateway
+      JOB_SERVICE_ENABLED: "${JOB_SERVICE_ENABLED:-true}"
+      JOB_SERVICE_INTERNAL_URL: "${JOB_SERVICE_INTERNAL_URL:-http://job-service:19191}"
       GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
       GOCACHE: /workspace/.cache/go-build
       GOMODCACHE: /workspace/.cache/go/pkg/mod
