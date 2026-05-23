@@ -129,7 +129,17 @@ jobs:
         run: bash scripts/growth-revenue-smoke.sh
       - name: Release Control smoke (TASK-CICD-RELEASE-CONTROL-SMOKE-001)
         run: bash scripts/release-control-smoke.sh
-      - name: Job Service smoke (TASK-CICD-JOBS-001)
+      - name: Generate Backend Endpoint Gap Matrix & Definition Drift Report (TASK-CICD-JOBS-DRIFT-AND-GAP-SMOKE-001)
+        continue-on-error: true
+        working-directory: infra/_build_deps/job-service
+        run: |
+          echo "=== Generating backend-endpoint-gap-matrix.json ==="
+          go test -run TestClassifier_OutputMatrix ./internal/... 2>&1 || echo "WARN: gap matrix generation skipped"
+          echo "=== Generating definition-drift-report.json ==="
+          go test -run TestDefinitionDrift_OutputJSON ./internal/... 2>&1 || echo "WARN: drift report generation skipped"
+          echo "=== Checking artifacts ==="
+          ls -la /tmp/backend-endpoint-gap-matrix.json /tmp/definition-drift-report.json 2>/dev/null || echo "WARN: artifacts not found at /tmp/"
+      - name: Job Service smoke (TASK-CICD-JOBS-001 / TASK-CICD-JOBS-DRIFT-AND-GAP-SMOKE-001)
         run: bash scripts/jobs-smoke.sh
       - name: Admin Dashboard smoke (TASK-CICD-DASHBOARD-REALTIME-001)
         run: bash scripts/dashboard-smoke.sh
