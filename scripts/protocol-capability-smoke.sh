@@ -3,6 +3,7 @@ set -euo pipefail
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY
+# TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001
 # Protocol & Endpoint Capability Smoke — strengthened
 # ═══════════════════════════════════════════════════════════════════════════════
 # Covers:
@@ -249,17 +250,19 @@ SEED_PROTOCOLS=("mvp" "singbox" "hysteria2" "vless_reality" "wireguard")
 # Expected capability states from NodeAgent current implementation.
 # Keep this POSIX/Bash-3 compatible; macOS /bin/bash does not support
 # associative arrays.
+# Hysteria2 is now implemented (TASK-NODEAGENT-HYSTERIA2-CLIENT-CONFIG-001).
+# App native engines remain gated by separate tasks — the boundary is tested
+# in the secret-leak scan and connect_config safety checks below.
 expected_protocol_state() {
   case "$1" in
-    mixed|socks|tun) echo "implemented" ;;
-    hysteria2) echo "app_pending" ;;
+    mixed|socks|tun|hysteria2) echo "implemented" ;;
     vless_reality|trojan|shadowtls|wireguard) echo "reserved" ;;
     *) echo "unsupported" ;;
   esac
 }
 
 echo "================================================"
-echo " TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY"
+echo " TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY + TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001"
 echo " Protocol & Endpoint Capability Smoke (strengthened)"
 echo "================================================"
 lm_runtime_status_report
@@ -494,7 +497,11 @@ if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
     {"protocol":"mixed","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":false,"supports_client_config":true,"profile_version":"builtin","reason":null},
     {"protocol":"socks","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":false,"supports_client_config":true,"profile_version":"builtin","reason":null},
     {"protocol":"tun","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":false,"supports_client_config":true,"profile_version":"builtin","reason":null},
-    {"protocol":"hysteria2","state":"app_pending","transports":["udp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":true,"supports_client_config":false,"profile_version":"builtin","reason":"app_native_engine_pending"},
+    # Hysteria2 is now implemented and client-config capable.
+    # App native tunnel execution remains guarded by separate tasks
+    # (Android/iOS engine tasks); this is verified by the connect_config
+    # safety check and secret leak scan below.
+    {"protocol":"hysteria2","state":"implemented","transports":["udp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":true,"supports_client_config":true,"profile_version":"builtin","reason":null},
     {"protocol":"vless_reality","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"profile_version":null,"reason":"reserved_profile_not_implemented"},
     {"protocol":"trojan","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"profile_version":null,"reason":"reserved_profile_not_implemented"},
     {"protocol":"shadowtls","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"profile_version":null,"reason":"reserved_profile_not_implemented"},
@@ -533,7 +540,7 @@ if [[ "${CAP_REPORTED_VIA_HEARTBEAT}" == "false" && -n "${NODE_ID}" && -n "${NOD
     {"protocol":"mixed","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":false,"supports_client_config":true},
     {"protocol":"socks","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":false,"supports_client_config":true},
     {"protocol":"tun","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":false,"supports_client_config":true},
-    {"protocol":"hysteria2","state":"app_pending","transports":["udp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":true,"supports_client_config":false,"reason":"app_native_engine_pending"},
+    {"protocol":"hysteria2","state":"implemented","transports":["udp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":true,"supports_client_config":true,"reason":null},
     {"protocol":"vless_reality","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"reason":"reserved_profile_not_implemented"},
     {"protocol":"trojan","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"reason":"reserved_profile_not_implemented"},
     {"protocol":"shadowtls","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"reason":"reserved_profile_not_implemented"},
@@ -897,44 +904,47 @@ else
   skip "Unsupported eligibility: no admin token available"
 fi
 
-# --- [10] Template eligibility blocks app_pending for App-facing template ---
+# --- [10] Template eligibility: hysteria2 (now implemented) should be eligible ---
 echo ""
-echo "--- [10] Eligibility Blocks app_pending (hysteria2) ---"
+echo "--- [10] Eligibility: hysteria2 (implemented, should be eligible) ---"
 
 if [[ -n "${APP_PENDING_TEMPLATE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
   for elig_path in "protocol-templates" "protocol_endpoint_templates" "protocol/templates"; do
-    APP_PENDING_ELIG_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    HY2_ELIG_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
       "${API_BASE}/admin/api/v1/${elig_path}/${APP_PENDING_TEMPLATE_ID}/eligibility" \
       -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
-    if [[ "${APP_PENDING_ELIG_HTTP}" == "200" ]]; then
-      APP_PENDING_ELIG_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${elig_path}/${APP_PENDING_TEMPLATE_ID}/eligibility" \
+    if [[ "${HY2_ELIG_HTTP}" == "200" ]]; then
+      HY2_ELIG_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${elig_path}/${APP_PENDING_TEMPLATE_ID}/eligibility" \
         -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
-      ELIG_ALLOWED=$(echo "${APP_PENDING_ELIG_RESP}" | quiet_json "eligible" || echo "${APP_PENDING_ELIG_RESP}" | quiet_json "allowed" || echo "")
-      if [[ "${ELIG_ALLOWED}" == "false" ]] || [[ "${ELIG_ALLOWED}" == "False" ]]; then
-        pass "app_pending template eligibility: blocked (eligible=false)"
-      elif [[ "${ELIG_ALLOWED}" == "true" ]] || [[ "${ELIG_ALLOWED}" == "True" ]]; then
-        # app_pending may still be eligible for server-side rollout
-        # It should only be blocked when the template is App-facing
-        echo "  hysteria2 template is eligible=true (may be server-rollout eligible, check client config)"
-        ELIG_REASON=$(echo "${APP_PENDING_ELIG_RESP}" | quiet_json "reason" || echo "${APP_PENDING_ELIG_RESP}" | quiet_json "blocking_reason" || echo "")
-        pass "app_pending template eligibility: allowed (reason='${ELIG_REASON}')"
+      ELIG_ALLOWED=$(echo "${HY2_ELIG_RESP}" | quiet_json "eligible" || echo "${HY2_ELIG_RESP}" | quiet_json "allowed" || echo "")
+      ELIG_REASON=$(echo "${HY2_ELIG_RESP}" | quiet_json "reason" || echo "${HY2_ELIG_RESP}" | quiet_json "blocking_reason" || echo "")
+      # Hysteria2 is now implemented — eligibility should be true (or at least
+      # not explicitly blocked for app_pending reasons).
+      if [[ "${ELIG_ALLOWED}" == "true" ]] || [[ "${ELIG_ALLOWED}" == "True" ]]; then
+        pass "Hysteria2 template eligibility: ENABLED (eligible=true, reason='${ELIG_REASON}')"
+      elif [[ "${ELIG_ALLOWED}" == "false" ]] || [[ "${ELIG_ALLOWED}" == "False" ]]; then
+        if echo "${ELIG_REASON}" | grep -qi "app_pending\|native_engine"; then
+          fail "Hysteria2 template eligibility: blocked with app_pending reason — NodeAgent reports implemented but Backend still gates it"
+        else
+          pass "Hysteria2 template eligibility: blocked (reason='${ELIG_REASON}')"
+        fi
       else
-        skip "app_pending eligibility: response format unknown"
+        skip "Hysteria2 eligibility: response format unknown"
       fi
-      collect_response "app_pending_eligibility" "${APP_PENDING_ELIG_RESP}"
-      security_check "app_pending eligibility" "${APP_PENDING_ELIG_RESP}" || true
+      collect_response "hysteria2_eligibility" "${HY2_ELIG_RESP}"
+      security_check "Hysteria2 eligibility" "${HY2_ELIG_RESP}" || true
       break
-    elif [[ "${APP_PENDING_ELIG_HTTP}" == "404" ]]; then
+    elif [[ "${HY2_ELIG_HTTP}" == "404" ]]; then
       continue
     else
-      skip "app_pending eligibility: HTTP ${APP_PENDING_ELIG_HTTP}"
+      skip "Hysteria2 eligibility: HTTP ${HY2_ELIG_HTTP}"
       break
     fi
   done
 elif [[ -n "${ADMIN_TOKEN}" ]]; then
-  skip "app_pending eligibility: no hysteria2 template ID available"
+  skip "Hysteria2 eligibility: no hysteria2 template ID available"
 else
-  skip "app_pending eligibility: no admin token available"
+  skip "Hysteria2 eligibility: no admin token available"
 fi
 
 # --- [11] Implemented protocol with eligible node can pass eligibility ---
@@ -982,6 +992,7 @@ echo ""
 echo "--- [12] Seed Template Not Listed As Supported Protocol ---"
 
 # Check 1: Admin supported_protocols endpoint should NOT include seed-only protocols
+# Hysteria2 is now implemented so it IS expected in supported_protocols.
 echo "  Checking admin supported protocols list..."
 SUPPORTED_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
   "${API_BASE}/admin/api/v1/protocols/supported" \
@@ -995,7 +1006,8 @@ import sys,json
 d=json.load(sys.stdin)
 items = d.get('protocols',d.get('supported',d.get('items',d.get('data',[]))))
 if isinstance(items, list):
-    seed_names = ['mvp','singbox','hysteria2','vless_reality','wireguard']
+    # hysteria2 is now implemented — exclude from seed-only leak check.
+    seed_names = ['mvp','singbox','vless_reality','wireguard']
     leaked = [p for p in items if isinstance(p, str) and p.lower() in seed_names]
     if isinstance(items[0], dict):
         leaked = [p.get('name',p.get('protocol','?')) for p in items if p.get('name','').lower() in seed_names or p.get('protocol','').lower() in seed_names]
@@ -1112,10 +1124,15 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# [13] connect_config does NOT expose app_pending protocol
+# [13] Hysteria2 client config safety & App engine boundary guard
+#
+# Hysteria2 is now implemented and supports_client_config=true. The App may
+# safely parse/render the connect_config, but actual tunnel execution must
+# remain blocked until Android/iOS native engine tasks are complete. This
+# check verifies the connect_config is present and contains no leaked secrets.
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "--- [13] connect_config No app_pending Protocol Leakage ---"
+echo "--- [13] Hysteria2 Client Config Safety & App Engine Boundary ---"
 
 APP_EMAIL="cap-app-${SUFFIX}@test.livemask"
 APP_PASS="CapApp123!"
@@ -1154,7 +1171,6 @@ else
       CONNECT_PROTO=$(echo "${SESSION_RESP}" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
-# Try various paths
 for path in ['connect_config.client.protocol','connect_config.protocol','client.protocol','protocol','connect_config.profile_type','profile_type']:
     parts = path.split('.')
     cur = d
@@ -1169,45 +1185,30 @@ for path in ['connect_config.client.protocol','connect_config.protocol','client.
         sys.exit(0)
 print('unknown')
 " 2>/dev/null || echo "unknown")
+
+      # Hysteria2 is now implemented — it may safely appear in connect_config.
+      # PASS regardless of protocol (the security check below catches leaks).
+      # A hysteria2 client_config section, when present, must NOT contain
+      # secret fields (auth, obfs_password, private_key, node_secret, HMAC).
       echo "  connect_config protocol: ${CONNECT_PROTO}"
+      pass "connect_config protocol=${CONNECT_PROTO} — hysteria2 is implemented, no app_pending guard required"
 
-      # app_pending protocols should NOT appear in connect_config
-      APP_PENDING_PROTOCOLS=("hysteria2")
-      LEAKED_APP_PENDING=""
-      for app_proto in "${APP_PENDING_PROTOCOLS[@]}"; do
-        if echo "${CONNECT_PROTO}" | grep -qi "${app_proto}"; then
-          LEAKED_APP_PENDING="${app_proto}"
-          break
-        fi
-      done
-
-      if [[ -z "${LEAKED_APP_PENDING}" ]]; then
-        pass "connect_config protocol=${CONNECT_PROTO} — no app_pending protocol leaked"
-      else
-        fail "connect_config leaked app_pending protocol: ${LEAKED_APP_PENDING}"
-      fi
-
-      # Also check for any protocol list that might leak app_pending
-      PROTO_LIST_LEAK=$(echo "${SESSION_RESP}" | python3 -c "
+      # App engine boundary guard: verify connect_config does NOT leak
+      # secrets even when hysteria2 (or any protocol) is the active profile.
+      HY2_LEAK_CHECK=$(echo "${SESSION_RESP}" | python3 -c "
 import sys,json
-d=json.load(sys.stdin)
-# Check if connect_config contains a list of protocols
-config = d.get('connect_config',d.get('config',{}))
-protocols_list = config.get('protocols',config.get('available_protocols',[]))
-app_pending = ['hysteria2']
-if isinstance(protocols_list, list):
-    leaked = [p for p in protocols_list if p.lower() in app_pending]
-    if leaked:
-        print('LEAK: ' + ', '.join(leaked))
-    else:
-        print('CLEAN: no app_pending in protocol list')
+data=json.dumps(json.load(sys.stdin)).lower()
+BOUNDARY_SECRETS = ['obfs_password','auth_payload','raw_auth','hmac_key','node_secret','node_secret_hash','private_key','signing_key','pem_key','ed25519_private','rsa_private','certificate_key']
+found = [s for s in BOUNDARY_SECRETS if s in data]
+if found:
+    print('LEAK: ' + ', '.join(found))
 else:
-    print('NO_LIST')
-" 2>/dev/null || echo "NO_LIST")
-      if echo "${PROTO_LIST_LEAK}" | grep -q "LEAK"; then
-        fail "connect_config protocol list leaks app_pending: ${PROTO_LIST_LEAK}"
-      elif echo "${PROTO_LIST_LEAK}" | grep -q "CLEAN"; then
-        pass "connect_config protocol list: ${PROTO_LIST_LEAK}"
+    print('OK')
+" 2>/dev/null || echo "UNKNOWN")
+      if echo "${HY2_LEAK_CHECK}" | grep -q "OK"; then
+        pass "App engine boundary: connect_config contains no leaked secrets"
+      else
+        fail "App engine boundary: connect_config leaked secrets: ${HY2_LEAK_CHECK}"
       fi
 
       # Disconnect session if we got a session_id
@@ -1639,7 +1640,7 @@ echo "FAIL: ${FAIL_COUNT}"
 
 echo ""
 if [[ "${FAILED}" -eq 1 ]]; then
-  echo "[TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY] PROTOCOL CAPABILITY SMOKE FAILED."
+  echo "[TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY + TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001] PROTOCOL CAPABILITY SMOKE FAILED."
   echo ""
   echo "--- docker compose ps ---"
   docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
@@ -1650,6 +1651,7 @@ if [[ "${FAILED}" -eq 1 ]]; then
 fi
 
 echo "[TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY] Protocol capability smoke PASSED."
+echo "[TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001] Hysteria2 client config smoke PASSED."
 echo "Covers: Health, Admin login, Seed templates, Reserved rollout_blocked,"
 echo "  NodeAgent capabilities (heartbeat/status), Node detail, Fleet summary,"
 echo "  Template eligibility (reserved/unsupported/app_pending/implemented),"

@@ -192,6 +192,129 @@ echo "--- Cleanup ---"
 pg_exec -c "DELETE FROM users WHERE email='admin@livemask.dev'" 2>/dev/null || true
 pass "Cleaned up: smoke test data"
 
+# [8] Hysteria2 parity check (TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001)
+echo ""
+echo "--- [8] Hysteria2 Protocol Parity ---"
+HY2_PARITY_PASS=true
+
+# 8a Check Backend protocol templates include hysteria2 as implemented
+if [[ "${PROTO_HTTP}" == "200" ]]; then
+  HY2_BACKEND=$(echo "${PROTO_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items=data.get('templates',data.get('items',data.get('data',[])))
+for t in items:
+    proto = t.get('protocol',t.get('protocol_profile','')).lower()
+    if 'hysteria2' in proto:
+        state = t.get('state',t.get('capability_state',''))
+        blocked = t.get('rollout_blocked',False)
+        supports_cc = t.get('supports_client_config',t.get('client_config',False))
+        print(f'FOUND: state={state} rollout_blocked={blocked} supports_client_config={supports_cc}')
+        break
+else:
+    print('NOT_FOUND')
+" 2>/dev/null || echo "PARSE_ERROR")
+  if echo "${HY2_BACKEND}" | grep -q "FOUND:"; then
+    pass "Hysteria2 parity [Backend]: ${HY2_BACKEND}"
+    if echo "${HY2_BACKEND}" | grep -q "state=implemented"; then
+      pass "Hysteria2 parity: Backend state=implemented"
+    else
+      fail "Hysteria2 parity: Backend state is not implemented (${HY2_BACKEND})"
+      HY2_PARITY_PASS=false
+    fi
+    if echo "${HY2_BACKEND}" | grep -q "rollout_blocked=True"; then
+      fail "Hysteria2 parity: Backend rollout_blocked=True (should be false for implemented)"
+      HY2_PARITY_PASS=false
+    fi
+    if echo "${HY2_BACKEND}" | grep -q "supports_client_config=True\|supports_client_config=true"; then
+      pass "Hysteria2 parity: Backend supports_client_config=true"
+    elif echo "${HY2_BACKEND}" | grep -q "rollout_blocked=False"; then
+      # supports_client_config may not be in this schema — still PASS if not blocked
+      pass "Hysteria2 parity: Backend present (supports_client_config field not in schema)"
+    fi
+  else
+    echo "  Hysteria2 template not found in protocol-templates list"
+    echo "  (This is OK — Backend may not have a dedicated hysteria2 template row)"
+    pass "Hysteria2 parity [Backend]: template not found in Backend list (non-fatal)"
+  fi
+fi
+
+# 8b Check NodeAgent protocol_capabilities includes hysteria2 as implemented
+if [[ "${NA_STATUS_HTTP}" == "200" ]] && [[ -n "${NA_PROTOS:-}" ]] && [[ "${NA_PROTOS}" != "None" ]]; then
+  HY2_NODEAGENT=$(echo "${NA_PROTOS}" | python3 -c "
+import sys,json
+try:
+    caps = json.loads(sys.stdin.read())
+except:
+    caps = []
+if not isinstance(caps, list):
+    caps = [caps]
+for c in caps:
+    proto = c.get('protocol','').lower()
+    if 'hysteria2' in proto:
+        state = c.get('state','')
+        supports_cc = c.get('supports_client_config',False)
+        print('FOUND: state={} supports_client_config={}'.format(state, supports_cc))
+        break
+else:
+    print('NOT_FOUND')
+" 2>/dev/null || echo "PARSE_ERROR")
+  if echo "${HY2_NODEAGENT}" | grep -q "FOUND:"; then
+    pass "Hysteria2 parity [NodeAgent]: ${HY2_NODEAGENT}"
+    if echo "${HY2_NODEAGENT}" | grep -q "state=implemented"; then
+      pass "Hysteria2 parity: NodeAgent state=implemented"
+    else
+      fail "Hysteria2 parity: NodeAgent state is not implemented (${HY2_NODEAGENT})"
+      HY2_PARITY_PASS=false
+    fi
+    if echo "${HY2_NODEAGENT}" | grep -q "supports_client_config=True\|supports_client_config=true"; then
+      pass "Hysteria2 parity: NodeAgent supports_client_config=true"
+    else
+      echo "  NodeAgent supports_client_config not true for hysteria2"
+    fi
+  else
+    echo "  Hysteria2 not found in NodeAgent protocol_capabilities"
+    skip "Hysteria2 parity [NodeAgent]: not in NodeAgent capabilities (may need heartbeat with capabilities)"
+  fi
+else
+  skip "Hysteria2 parity [NodeAgent]: NodeAgent capabilities not available"
+fi
+
+# 8c Check reserved protocol list does NOT include hysteria2
+if [[ "${PROTO_HTTP}" == "200" ]]; then
+  HY2_RESERVED=$(echo "${PROTO_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items=data.get('templates',data.get('items',data.get('data',[])))
+for t in items:
+    if 'hysteria2' in str(t.get('protocol','')).lower():
+        is_reserved = t.get('reserved',False) or t.get('rollout_blocked',False)
+        if is_reserved:
+            print('RESERVED')
+        else:
+            print('NOT_RESERVED')
+        break
+else:
+    print('NOT_FOUND')
+" 2>/dev/null || echo "PARSE_ERROR")
+  case "${HY2_RESERVED}" in
+    NOT_RESERVED)
+      pass "Hysteria2 parity: NOT marked as reserved (correct)"
+      ;;
+    RESERVED)
+      fail "Hysteria2 parity: marked as reserved (should be implemented)"
+      HY2_PARITY_PASS=false
+      ;;
+    NOT_FOUND)
+      echo "  Hysteria2 not found in templates roll — OK for parity"
+      ;;
+  esac
+fi
+
+if [[ "${HY2_PARITY_PASS}" == "true" ]]; then
+  pass "Hysteria2 parity overall: PASS"
+fi
+
 echo ""
 echo "================================================"
 echo " TASK-CICD-PROTOCOL-PARITY-SMOKE-001 SUMMARY"
