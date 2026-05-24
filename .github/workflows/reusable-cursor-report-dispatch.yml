@@ -1,0 +1,123 @@
+# TASK-CICD-CURSOR-REPORT-DISPATCH-001
+#
+# Reusable workflow for runtime repos to dispatch Cursor completion reports
+# to livemask-docs via repository_dispatch + Lark notification.
+#
+# Usage (in a runtime repo workflow):
+#
+#   jobs:
+#     cursor-report:
+#       uses: MyAiDevs/livemask-ci-cd/.github/workflows/reusable-cursor-report-dispatch.yml@dev
+#       with:
+#         task-id: TASK-CICD-FOO-001
+#         source-repo: livemask-backend
+#         branch: dev
+#         commit: abc123def456
+#         task-branch: task/TASK-CICD-FOO-001
+#         task-commit: abc123def000
+#         dev-merge-commit: abc123def789
+#         validation: "smoke PASS, go test PASS"
+#         result: completed
+#       secrets:
+#         LIVEMASK_BOT_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN }}
+#         LARK_BOT_WEBHOOK: ${{ secrets.LARK_BOT_WEBHOOK }}
+#         LARK_BOT_SECRET: ${{ secrets.LARK_BOT_SECRET }}
+
+name: Reusable Cursor Report Dispatch
+
+on:
+  workflow_call:
+    inputs:
+      task-id:
+        description: TASK ID (e.g. TASK-CICD-FOO-001)
+        required: true
+        type: string
+      source-repo:
+        description: Source repository name (e.g. livemask-backend)
+        required: true
+        type: string
+      branch:
+        description: Git branch (defaults to dev)
+        required: false
+        type: string
+        default: dev
+      commit:
+        description: Dev merge commit SHA
+        required: true
+        type: string
+      task-branch:
+        description: Task branch name
+        required: true
+        type: string
+      task-commit:
+        description: Task branch commit SHA
+        required: true
+        type: string
+      dev-merge-commit:
+        description: Dev merge commit SHA
+        required: true
+        type: string
+      validation:
+        description: Validation evidence summary
+        required: true
+        type: string
+      result:
+        description: Report result (completed / partial / blocked / evidence_missing)
+        required: false
+        type: string
+        default: completed
+      target-repo:
+        description: Target repository for dispatch
+        required: false
+        type: string
+        default: MyAiDevs/livemask-docs
+      dry-run:
+        description: Validate without sending
+        required: false
+        type: boolean
+        default: false
+
+    secrets:
+      LIVEMASK_BOT_TOKEN:
+        required: true
+        description: GitHub token with repo scope to send repository_dispatch
+      LARK_BOT_WEBHOOK:
+        required: false
+        description: Lark bot webhook URL for notification
+      LARK_BOT_SECRET:
+        required: false
+        description: Lark bot HMAC sign secret
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-ci-cd
+          ref: dev
+
+      - name: Dispatch cursor completion report
+        id: dispatch
+        env:
+          LIVEMASK_BOT_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN }}
+          LARK_BOT_WEBHOOK: ${{ secrets.LARK_BOT_WEBHOOK || '' }}
+          LARK_BOT_SECRET: ${{ secrets.LARK_BOT_SECRET || '' }}
+        run: |
+          bash scripts/cursor-report-dispatch.sh \
+            --task-id "${{ inputs.task-id }}" \
+            --repo "${{ inputs.source-repo }}" \
+            --branch "${{ inputs.branch }}" \
+            --commit "${{ inputs.commit }}" \
+            --task-branch "${{ inputs.task-branch }}" \
+            --task-commit "${{ inputs.task-commit }}" \
+            --dev-merge-commit "${{ inputs.dev-merge-commit }}" \
+            --validation "${{ inputs.validation }}" \
+            --result "${{ inputs.result }}" \
+            --target-repo "${{ inputs.target-repo }}" \
+            ${{ inputs.dry-run && '--dry-run' || '' }} \
+            ${{ secrets.LARK_BOT_WEBHOOK != '' && format('--lark-webhook-url {0}', secrets.LARK_BOT_WEBHOOK) || '' }} \
+            ${{ secrets.LARK_BOT_SECRET != '' && format('--lark-secret {0}', secrets.LARK_BOT_SECRET) || '' }}
