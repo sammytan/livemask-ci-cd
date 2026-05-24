@@ -102,6 +102,11 @@ does not match, the lease expired, the task is marked manual-only, the worker
 chain/runtime limit is reached, or docs cannot be fetched within the retry
 budget.
 
+By default, the worker waits up to 30 minutes for a docs assignment. If no
+eligible task is received before that timeout, it stops with exit code `10` and
+prints a `Cursor worker stop report` containing the repo, docs source, waited
+seconds, timeout seconds, total repo tasks, and blocked-task reasons.
+
 Exit codes are part of the automation contract:
 
 | Code | Meaning |

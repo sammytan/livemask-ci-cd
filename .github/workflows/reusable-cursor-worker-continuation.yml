@@ -39,6 +39,11 @@ on:
         required: false
         type: number
         default: 90
+      wait-timeout-minutes:
+        description: Stop if no task is accepted within this many minutes
+        required: false
+        type: number
+        default: 30
       docs-repo:
         description: Docs repository containing task readiness JSON
         required: false
@@ -98,6 +103,7 @@ jobs:
             --previous-report-id "${{ inputs.previous-report-id }}"
             --max-chain "${{ inputs.max-chain }}"
             --max-runtime-minutes "${{ inputs.max-runtime-minutes }}"
+            --wait-timeout-minutes "${{ inputs.wait-timeout-minutes }}"
             --docs-repo "${{ inputs.docs-repo }}"
             --docs-ref "${{ inputs.docs-ref }}"
             --tasks-path "${{ inputs.tasks-path }}"

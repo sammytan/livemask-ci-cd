@@ -37,6 +37,7 @@ MAX_RUNTIME_MINUTES="${CURSOR_WORKER_MAX_RUNTIME_MINUTES:-90}"
 POLL_ATTEMPTS="${CURSOR_WORKER_POLL_ATTEMPTS:-3}"
 POLL_INTERVAL="${CURSOR_WORKER_POLL_INTERVAL:-10}"
 FETCH_TIMEOUT="${CURSOR_WORKER_FETCH_TIMEOUT:-30}"
+WAIT_TIMEOUT_SECONDS="${CURSOR_WORKER_WAIT_TIMEOUT_SECONDS:-1800}"
 ACCEPT_STATUSES="${CURSOR_WORKER_ACCEPT_STATUSES:-dispatched,leased}"
 PREVIOUS_TASK_ID="${CURSOR_PREVIOUS_TASK_ID:-}"
 PREVIOUS_REPORT_ID="${CURSOR_PREVIOUS_REPORT_ID:-}"
@@ -59,6 +60,8 @@ Options:
   --poll-attempts N           Poll attempts for docs assignment (default: 3)
   --poll-interval SEC         Delay between polls (default: 10)
   --timeout SEC               GitHub fetch timeout (default: 30)
+  --wait-timeout-minutes N    Stop if no task is accepted in N minutes (default: 30)
+  --wait-timeout-seconds N    Stop if no task is accepted in N seconds
   --tasks-file FILE           Read tasks readiness JSON from local file
   --tasks-path PATH           Path in docs repo (default: scripts/tasks-readiness.json)
   --docs-repo OWNER/REPO      Docs repo (default: MyAiDevs/livemask-docs)
@@ -92,6 +95,40 @@ log() {
   printf '[%s] %s\n' "${SCRIPT_NAME}" "$*"
 }
 
+emit_stop_report() {
+  local reason="$1"
+  local waited_seconds="$2"
+  local selection_json="${3:-{}}"
+  python3 - "${reason}" "${waited_seconds}" "${REPO_NAME}" "${DOCS_REPO}" "${DOCS_REF}" "${TASKS_PATH}" "${WAIT_TIMEOUT_SECONDS}" "${POLL_INTERVAL}" "${selection_json}" <<'PY'
+import json
+import sys
+
+(
+    reason, waited_seconds, repo, docs_repo, docs_ref, tasks_path,
+    wait_timeout_seconds, poll_interval, selection_raw,
+) = sys.argv[1:10]
+try:
+    selection = json.loads(selection_raw)
+except Exception:
+    selection = {}
+
+report = {
+    "outcome": "stopped",
+    "reason": reason,
+    "repo": repo,
+    "docs_source": f"{docs_repo}:{docs_ref}/{tasks_path}",
+    "waited_seconds": int(waited_seconds),
+    "wait_timeout_seconds": int(wait_timeout_seconds),
+    "poll_interval_seconds": int(poll_interval),
+    "eligible_count": selection.get("eligible_count", 0),
+    "total_repo_tasks": selection.get("total_repo_tasks", 0),
+    "blocked": selection.get("blocked", []),
+}
+print("Cursor worker stop report:")
+print(json.dumps(report, indent=2, ensure_ascii=False))
+PY
+}
+
 die() {
   local code="$1"
   shift
@@ -108,6 +145,8 @@ while [[ $# -gt 0 ]]; do
     --poll-attempts) POLL_ATTEMPTS="${2:-}"; shift 2 ;;
     --poll-interval) POLL_INTERVAL="${2:-}"; shift 2 ;;
     --timeout) FETCH_TIMEOUT="${2:-}"; shift 2 ;;
+    --wait-timeout-minutes) WAIT_TIMEOUT_SECONDS=$((${2:-0} * 60)); shift 2 ;;
+    --wait-timeout-seconds) WAIT_TIMEOUT_SECONDS="${2:-}"; shift 2 ;;
     --tasks-file) TASKS_FILE="${2:-}"; shift 2 ;;
     --tasks-path) TASKS_PATH="${2:-}"; shift 2 ;;
     --docs-repo) DOCS_REPO="${2:-}"; shift 2 ;;
@@ -137,6 +176,15 @@ if ! [[ "${MAX_CHAIN}" =~ ^[0-9]+$ ]] || [[ "${MAX_CHAIN}" -lt 1 ]]; then
 fi
 if ! [[ "${MAX_RUNTIME_MINUTES}" =~ ^[0-9]+$ ]] || [[ "${MAX_RUNTIME_MINUTES}" -lt 1 ]]; then
   die "${EXIT_INTERNAL_ERROR}" "--max-runtime-minutes must be a positive integer"
+fi
+if ! [[ "${POLL_ATTEMPTS}" =~ ^[0-9]+$ ]] || [[ "${POLL_ATTEMPTS}" -lt 1 ]]; then
+  die "${EXIT_INTERNAL_ERROR}" "--poll-attempts must be a positive integer"
+fi
+if ! [[ "${POLL_INTERVAL}" =~ ^[0-9]+$ ]]; then
+  die "${EXIT_INTERNAL_ERROR}" "--poll-interval must be a non-negative integer"
+fi
+if ! [[ "${WAIT_TIMEOUT_SECONDS}" =~ ^[0-9]+$ ]] || [[ "${WAIT_TIMEOUT_SECONDS}" -lt 1 ]]; then
+  die "${EXIT_INTERNAL_ERROR}" "--wait-timeout must be a positive duration"
 fi
 
 cd "${REPO_ROOT}"
@@ -255,6 +303,11 @@ except Exception as exc:
 PY
 }
 
+WAIT_STARTED_EPOCH="$(date +%s)"
+WAIT_DEADLINE_EPOCH=$((WAIT_STARTED_EPOCH + WAIT_TIMEOUT_SECONDS))
+SELECTION_JSON="{}"
+
+while true; do
 attempt=1
 while [[ "${attempt}" -le "${POLL_ATTEMPTS}" ]]; do
   log "Fetching task assignments (${attempt}/${POLL_ATTEMPTS}) from ${DOCS_REPO}:${DOCS_REF}/${TASKS_PATH}"
@@ -419,10 +472,28 @@ fi
 SELECTED_TASK_ID="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); s=d.get("selected"); print((s or {}).get("task_id",""))' "${SELECTION_JSON}")"
 
 if [[ -z "${SELECTED_TASK_ID}" ]]; then
-  log "No eligible next task for ${REPO_NAME}."
+  NOW_WAIT_EPOCH="$(date +%s)"
+  WAITED_SECONDS=$((NOW_WAIT_EPOCH - WAIT_STARTED_EPOCH))
+  if [[ "${NOW_WAIT_EPOCH}" -ge "${WAIT_DEADLINE_EPOCH}" ]]; then
+    log "No eligible next task for ${REPO_NAME} after waiting ${WAITED_SECONDS}s."
+    emit_stop_report "no_task_received_before_timeout" "${WAITED_SECONDS}" "${SELECTION_JSON}"
+    exit "${EXIT_IDLE}"
+  fi
+  REMAINING_SECONDS=$((WAIT_DEADLINE_EPOCH - NOW_WAIT_EPOCH))
+  SLEEP_SECONDS="${POLL_INTERVAL}"
+  if [[ "${SLEEP_SECONDS}" -gt "${REMAINING_SECONDS}" ]]; then
+    SLEEP_SECONDS="${REMAINING_SECONDS}"
+  fi
+  log "No eligible next task for ${REPO_NAME}; waiting ${SLEEP_SECONDS}s before retry (${WAITED_SECONDS}s/${WAIT_TIMEOUT_SECONDS}s elapsed)."
   python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(json.dumps({"blocked": d.get("blocked", []), "total_repo_tasks": d.get("total_repo_tasks", 0)}, indent=2, ensure_ascii=False))' "${SELECTION_JSON}" || true
-  exit "${EXIT_IDLE}"
+  if [[ "${SLEEP_SECONDS}" -gt 0 ]]; then
+    sleep "${SLEEP_SECONDS}"
+  fi
+  continue
 fi
+
+break
+done
 
 MANUAL_REQUIRED="$(python3 -c 'import json,sys; s=json.loads(sys.argv[1])["selected"]; print(str(s.get("manual_dispatch_required", False)).lower())' "${SELECTION_JSON}")"
 if [[ "${MANUAL_REQUIRED}" == "true" ]]; then
