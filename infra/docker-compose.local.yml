@@ -126,6 +126,7 @@ services:
       LISTEN_ADDR: ":9100"
       POLL_INTERVAL_SEC: "${POLL_INTERVAL_SEC:-30}"
       SPEEDTEST_DOWNLOAD_URL: "${SPEEDTEST_DOWNLOAD_URL:-http://httpbin.org/bytes/1048576}"
+      LOG_UPLOAD_ENABLED: "${LOG_UPLOAD_ENABLED:-false}"
       GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
       GOCACHE: /workspace/.cache/go-build
       GOMODCACHE: /workspace/.cache/go/pkg/mod
