@@ -84,6 +84,47 @@ The guard creates a `rescue/*` branch from `origin/dev`, tests the merge on an
 `integration/*` branch, re-runs validation on `dev`, and only then pushes
 `origin/dev`.
 
+## Cursor Worker Continuation
+
+After a Cursor task is completed, merged to `dev`, validated, pushed, and
+reported to `livemask-docs`, a worker may ask for the next docs-assigned task
+with:
+
+```bash
+bash scripts/accept-next-task.sh \
+  --repo livemask-backend \
+  --previous-task-id TASK-BACKEND-EXAMPLE-001
+```
+
+The script is fail-closed. It refuses to continue when the local worktree is
+dirty, the previous task report is not confirmed by docs, the repo assignment
+does not match, the lease expired, the task is marked manual-only, the worker
+chain/runtime limit is reached, or docs cannot be fetched within the retry
+budget.
+
+Exit codes are part of the automation contract:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | next task accepted; read the generated brief |
+| `10` | no eligible task for this repo |
+| `20` | local chain/runtime guard blocked continuation |
+| `30` | dirty worktree |
+| `40` | repo/task mismatch |
+| `50` | previous report is pending or not accepted |
+| `60` | validation guard failed |
+| `70` | docs fetch timeout |
+| `80` | lease expired |
+| `90` | manual dispatch required |
+| `100` | script/config error |
+
+Runtime repos can call
+`.github/workflows/reusable-cursor-worker-continuation.yml` to reuse the same
+guard logic and upload the generated brief/state artifact. The workflow reports
+safe stop outcomes (`idle_no_task`, `blocked`, `report_pending`, `lease_expired`,
+`manual_required`) as successful workflow outcomes so the caller can decide
+whether to keep or stop the Cursor window without creating noisy failed checks.
+
 ## Branch Protection
 
 Use `scripts/apply-branch-protection.sh` to apply the baseline GitHub branch

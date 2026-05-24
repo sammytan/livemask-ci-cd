@@ -72,6 +72,11 @@ workflow_contracts = {
     "on" => ["workflow_call"],
     "jobs" => ["dispatch"],
   },
+  ".github/workflows/reusable-cursor-worker-continuation.yml" => {
+    "name" => "Reusable Cursor Worker Continuation",
+    "on" => ["workflow_call"],
+    "jobs" => ["accept-next-task"],
+  },
   ".github/workflows/workflow-syntax-guard.yml" => {
     "name" => "Workflow Syntax Guard",
     "on" => ["pull_request", "push", "workflow_dispatch"],

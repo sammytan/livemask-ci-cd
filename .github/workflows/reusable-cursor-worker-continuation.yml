@@ -1,0 +1,137 @@
+# TASK-DOCS-CURSOR-WORKER-CONTINUATION-001
+#
+# Reusable workflow for repo-local Cursor workers to safely check whether
+# another docs-assigned task can be accepted after a completion report.
+# The workflow never implements task work. It only runs the guard/selection
+# script and publishes the generated brief/state as an artifact.
+
+name: Reusable Cursor Worker Continuation
+
+on:
+  workflow_call:
+    inputs:
+      source-repo:
+        description: Runtime/source repository name, e.g. livemask-backend
+        required: true
+        type: string
+      worker-id:
+        description: Cursor worker/session id
+        required: false
+        type: string
+        default: cursor-worker
+      previous-task-id:
+        description: Previous TASK ID to confirm before accepting another task
+        required: false
+        type: string
+        default: ''
+      previous-report-id:
+        description: Previous completion report id, if available
+        required: false
+        type: string
+        default: ''
+      max-chain:
+        description: Maximum number of tasks per Cursor window
+        required: false
+        type: number
+        default: 3
+      max-runtime-minutes:
+        description: Maximum Cursor window runtime in minutes
+        required: false
+        type: number
+        default: 90
+      docs-repo:
+        description: Docs repository containing task readiness JSON
+        required: false
+        type: string
+        default: MyAiDevs/livemask-docs
+      docs-ref:
+        description: Docs ref to read
+        required: false
+        type: string
+        default: dev
+      tasks-path:
+        description: Task readiness JSON path in docs repo
+        required: false
+        type: string
+        default: scripts/tasks-readiness.json
+      dry-run:
+        description: Validate/select only, without writing state/brief
+        required: false
+        type: boolean
+        default: false
+      require-previous-confirm:
+        description: Require previous task to be confirmed in docs
+        required: false
+        type: boolean
+        default: true
+
+    secrets:
+      LIVEMASK_BOT_TOKEN:
+        required: true
+        description: GitHub token that can read livemask-docs task readiness data
+
+permissions:
+  contents: read
+
+jobs:
+  accept-next-task:
+    runs-on: ubuntu-latest
+    outputs:
+      exit_code: ${{ steps.accept.outputs.exit_code }}
+      outcome: ${{ steps.accept.outputs.outcome }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-ci-cd
+          ref: dev
+
+      - name: Accept next task
+        id: accept
+        env:
+          LIVEMASK_BOT_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN }}
+        run: |
+          set +e
+          args=(
+            --repo "${{ inputs.source-repo }}"
+            --worker "${{ inputs.worker-id }}"
+            --previous-task-id "${{ inputs.previous-task-id }}"
+            --previous-report-id "${{ inputs.previous-report-id }}"
+            --max-chain "${{ inputs.max-chain }}"
+            --max-runtime-minutes "${{ inputs.max-runtime-minutes }}"
+            --docs-repo "${{ inputs.docs-repo }}"
+            --docs-ref "${{ inputs.docs-ref }}"
+            --tasks-path "${{ inputs.tasks-path }}"
+            --state-file ".cursor-worker-state.json"
+            --brief-dir ".cursor-worker/briefs"
+            --skip-origin-check
+          )
+
+          if [[ "${{ inputs.dry-run }}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          if [[ "${{ inputs.require-previous-confirm }}" != "true" ]]; then
+            args+=(--no-previous-confirm)
+          fi
+
+          bash scripts/accept-next-task.sh "${args[@]}"
+          status=$?
+          echo "exit_code=${status}" >> "${GITHUB_OUTPUT}"
+          case "${status}" in
+            0) echo "outcome=accepted_next_task" >> "${GITHUB_OUTPUT}"; exit 0 ;;
+            10) echo "outcome=idle_no_task" >> "${GITHUB_OUTPUT}"; exit 0 ;;
+            20) echo "outcome=blocked" >> "${GITHUB_OUTPUT}"; exit 0 ;;
+            50) echo "outcome=report_pending" >> "${GITHUB_OUTPUT}"; exit 0 ;;
+            80) echo "outcome=lease_expired" >> "${GITHUB_OUTPUT}"; exit 0 ;;
+            90) echo "outcome=manual_required" >> "${GITHUB_OUTPUT}"; exit 0 ;;
+            *) echo "outcome=failed" >> "${GITHUB_OUTPUT}"; exit "${status}" ;;
+          esac
+
+      - name: Upload worker assignment artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cursor-worker-continuation
+          path: |
+            .cursor-worker-state.json
+            .cursor-worker/briefs/*.md
+          if-no-files-found: ignore
