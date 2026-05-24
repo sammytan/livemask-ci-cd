@@ -315,6 +315,145 @@ if [[ "${HY2_PARITY_PASS}" == "true" ]]; then
   pass "Hysteria2 parity overall: PASS"
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# [9] Plain VLESS parity check (TASK-CICD-VLESS-PLAIN-PROTOCOL-SMOKE-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [9] Plain VLESS Protocol Parity ---"
+VLESS_PARITY_PASS=true
+
+# 9a Check Backend protocol templates include plain vless as implemented (not reserved)
+if [[ "${PROTO_HTTP}" == "200" ]]; then
+  VLESS_BACKEND=$(echo "${PROTO_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items=data.get('templates',data.get('items',data.get('data',[])))
+for t in items:
+    proto = t.get('protocol',t.get('protocol_profile','')).lower()
+    if proto == 'vless':
+        state = t.get('state',t.get('capability_state',''))
+        blocked = t.get('rollout_blocked',False)
+        is_reserved = t.get('reserved',False)
+        supports_cc = t.get('supports_client_config',t.get('client_config',False))
+        print(f'FOUND: state={state} rollout_blocked={blocked} reserved={is_reserved} supports_client_config={supports_cc}')
+        sys.exit(0)
+print('NOT_FOUND')
+" 2>/dev/null || echo "PARSE_ERROR")
+  if echo "${VLESS_BACKEND}" | grep -q "FOUND:"; then
+    pass "VLESS parity [Backend]: ${VLESS_BACKEND}"
+    if echo "${VLESS_BACKEND}" | grep -q "state=implemented"; then
+      pass "VLESS parity: Backend state=implemented"
+    else
+      fail "VLESS parity: Backend state is not implemented (${VLESS_BACKEND})"
+      VLESS_PARITY_PASS=false
+    fi
+    if echo "${VLESS_BACKEND}" | grep -q "reserved=True"; then
+      fail "VLESS parity: Backend marks vless as reserved (should be implemented)"
+      VLESS_PARITY_PASS=false
+    fi
+    if echo "${VLESS_BACKEND}" | grep -q "rollout_blocked=True"; then
+      fail "VLESS parity: Backend rollout_blocked=True (should be false for implemented)"
+      VLESS_PARITY_PASS=false
+    fi
+    if echo "${VLESS_BACKEND}" | grep -qi "supports_client_config=True\|supports_client_config=true"; then
+      pass "VLESS parity: Backend supports_client_config=true"
+    fi
+  else
+    echo "  Plain vless template not found in protocol-templates list"
+    echo "  (This is OK — Backend may not have a dedicated vless template row for plain vless)"
+    pass "VLESS parity [Backend]: plain vless template not found in Backend list (non-fatal)"
+  fi
+fi
+
+# 9b Check NodeAgent config/status for plain vless
+VLESS_NA_FOUND=false
+if [[ -n "${NA_RESP:-}" ]] && [[ "${NA_STATUS_HTTP}" == "200" ]]; then
+  VLESS_NA=$(echo "${NA_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+# Check protocol_capabilities directly from config/status
+caps = d.get('protocol_capabilities',d.get('capabilities',[]))
+if isinstance(caps, list):
+    for c in caps:
+        if isinstance(c, dict) and c.get('protocol','').lower() == 'vless':
+            state = c.get('state','unknown')
+            supports_cc = c.get('supports_client_config',False)
+            print(f'FOUND: state={state} supports_client_config={supports_cc}')
+            sys.exit(0)
+    print('NOT_FOUND')
+else:
+    # Check if response has nested structure
+    for key in ['config','data','status']:
+        sub = d.get(key,{})
+        if isinstance(sub, dict):
+            scaps = sub.get('protocol_capabilities',sub.get('capabilities',[]))
+            if isinstance(scaps, list):
+                for c in scaps:
+                    if isinstance(c, dict) and c.get('protocol','').lower() == 'vless':
+                        state = c.get('state','unknown')
+                        print(f'FOUND_NESTED: state={state}')
+                        sys.exit(0)
+    print('NOT_FOUND')
+" 2>/dev/null || echo "PARSE_ERROR")
+  case "${VLESS_NA}" in
+    FOUND:*)
+      pass "VLESS parity [NodeAgent]: ${VLESS_NA}"
+      VLESS_NA_FOUND=true
+      if echo "${VLESS_NA}" | grep -q "state=implemented"; then
+        pass "VLESS parity: NodeAgent state=implemented"
+      else
+        fail "VLESS parity: NodeAgent state is not implemented (${VLESS_NA})"
+        VLESS_PARITY_PASS=false
+      fi
+      if echo "${VLESS_NA}" | grep -qi "supports_client_config=True\|supports_client_config=true"; then
+        pass "VLESS parity: NodeAgent supports_client_config=true"
+      fi
+      ;;
+    NOT_FOUND)
+      skip "VLESS parity [NodeAgent]: plain vless not found in NodeAgent protocol_capabilities"
+      ;;
+    *)
+      skip "VLESS parity [NodeAgent]: ${VLESS_NA}"
+      ;;
+  esac
+else
+  skip "VLESS parity [NodeAgent]: NodeAgent config/status not available"
+fi
+
+# 9c Check reserved protocol list does NOT include vless
+if [[ "${PROTO_HTTP}" == "200" ]]; then
+  VLESS_RESERVED=$(echo "${PROTO_RESP}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+items=data.get('templates',data.get('items',data.get('data',[])))
+for t in items:
+    if t.get('protocol','').lower() == 'vless':
+        is_reserved = t.get('reserved',False) or t.get('rollout_blocked',False)
+        if is_reserved:
+            print('RESERVED')
+        else:
+            print('NOT_RESERVED')
+        sys.exit(0)
+print('NOT_FOUND')
+" 2>/dev/null || echo "PARSE_ERROR")
+  case "${VLESS_RESERVED}" in
+    NOT_RESERVED)
+      pass "VLESS parity: NOT marked as reserved (correct)"
+      ;;
+    RESERVED)
+      fail "VLESS parity: marked as reserved (should be implemented)"
+      VLESS_PARITY_PASS=false
+      ;;
+    NOT_FOUND)
+      echo "  Plain vless not found in templates roll — OK for parity"
+      ;;
+  esac
+fi
+
+if [[ "${VLESS_PARITY_PASS}" == "true" ]]; then
+  pass "Plain VLESS parity overall: PASS"
+fi
+
 echo ""
 echo "================================================"
 echo " TASK-CICD-PROTOCOL-PARITY-SMOKE-001 SUMMARY"

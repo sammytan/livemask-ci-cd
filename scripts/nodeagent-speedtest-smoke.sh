@@ -657,10 +657,10 @@ NO_FILTER_RUN=$(curl -sS --max-time 10 -X POST "${API_BASE}/admin/api/v1/auth/lo
 ADMIN_TOKEN=$(echo "${NO_FILTER_RUN}" | quiet_json "access_token")
 
 if [[ -n "${ADMIN_TOKEN}" ]]; then
-  BLOCKED_RUN=$(curl -sS --max-time 10 -X POST "${API_BASE}/admin/api/v1/jobs/nodeagent_speedtest_schedule/run" \
+  BLOCKED_RUN=$(curl -sS --max-time 10 -X POST "${API_BASE}/admin/api/v1/jobs/runs" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-    -d '{"profile":"quick","count":1}' 2>/dev/null || echo "{}")
+    -d '{"job_type":"nodeagent_speedtest_schedule","parameters":{"profile":"quick","count":1}}' 2>/dev/null || echo "{}")
 
   BLOCKED_STATUS=$(echo "${BLOCKED_RUN}" | quiet_json "error.code")
   if echo "${BLOCKED_RUN}" | grep -qi "JOB_INVALID_PARAMETERS\|target_filter\|blocked\|validation"; then
@@ -687,10 +687,10 @@ if [[ -n "${ADMIN_TOKEN}" ]]; then
 
   # 10b: Run WITH valid target_filter → should succeed
   echo "  [10b] Run with target_filter containing valid node UUID..."
-  WITH_FILTER_RUN=$(curl -sS --max-time 10 -X POST "${API_BASE}/admin/api/v1/jobs/nodeagent_speedtest_schedule/run" \
+  WITH_FILTER_RUN=$(curl -sS --max-time 10 -X POST "${API_BASE}/admin/api/v1/jobs/runs" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-    -d "{\"profile\":\"quick\",\"count\":1,\"target_filter\":[\"${TEST_NODE_UUID}\"]}" 2>/dev/null || echo "{}")
+    -d "{\"job_type\":\"nodeagent_speedtest_schedule\",\"parameters\":{\"profile\":\"quick\",\"count\":1,\"target_filter\":[\"${TEST_NODE_UUID}\"]}}" 2>/dev/null || echo "{}")
 
   if echo "${WITH_FILTER_RUN}" | grep -qi "run_id"; then
     GOOD_RUN_ID=$(echo "${WITH_FILTER_RUN}" | quiet_json "run_id")

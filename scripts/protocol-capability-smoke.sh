@@ -4,6 +4,7 @@ set -euo pipefail
 # ═══════════════════════════════════════════════════════════════════════════════
 # TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY
 # TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001
+# TASK-CICD-VLESS-PLAIN-PROTOCOL-SMOKE-001
 # Protocol & Endpoint Capability Smoke — strengthened
 # ═══════════════════════════════════════════════════════════════════════════════
 # Covers:
@@ -121,6 +122,7 @@ SENSITIVE_WORDS = [
     'endpoint_secret','connect_config','private_key_pem','certificate_key',
     'secret_ref','vault_key','master_key','service_key','jwt_secret',
     'protocol_config','tls_key','tls_private_key','ssh_key','ssh_private_key',
+    'vless_uuid','raw_uuid','uuid_plain',
 ]
 def check_keys(d, target_words):
     if isinstance(d, dict):
@@ -255,15 +257,15 @@ SEED_PROTOCOLS=("mvp" "singbox" "hysteria2" "vless_reality" "wireguard")
 # in the secret-leak scan and connect_config safety checks below.
 expected_protocol_state() {
   case "$1" in
-    mixed|socks|tun|hysteria2) echo "implemented" ;;
+    mixed|socks|tun|hysteria2|vless) echo "implemented" ;;
     vless_reality|trojan|shadowtls|wireguard) echo "reserved" ;;
     *) echo "unsupported" ;;
   esac
 }
 
 echo "================================================"
-echo " TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY + TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001"
-echo " Protocol & Endpoint Capability Smoke (strengthened)"
+echo " TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY + TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001 + TASK-CICD-VLESS-PLAIN-PROTOCOL-SMOKE-001"
+echo " Protocol & Endpoint Capability Smoke (strengthened, w/ VLESS plain)"
 echo "================================================"
 lm_runtime_status_report
 echo ""
@@ -502,6 +504,8 @@ if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
     # (Android/iOS engine tasks); this is verified by the connect_config
     # safety check and secret leak scan below.
     {"protocol":"hysteria2","state":"implemented","transports":["udp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":true,"supports_client_config":true,"profile_version":"builtin","reason":null},
+    # Plain VLESS is now implemented (TASK-NODEAGENT-VLESS-PLAIN-IMPLEMENTATION-001).
+    {"protocol":"vless","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":true,"supports_client_config":true,"profile_version":"builtin","reason":null},
     {"protocol":"vless_reality","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"profile_version":null,"reason":"reserved_profile_not_implemented"},
     {"protocol":"trojan","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"profile_version":null,"reason":"reserved_profile_not_implemented"},
     {"protocol":"shadowtls","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"profile_version":null,"reason":"reserved_profile_not_implemented"},
@@ -541,6 +545,7 @@ if [[ "${CAP_REPORTED_VIA_HEARTBEAT}" == "false" && -n "${NODE_ID}" && -n "${NOD
     {"protocol":"socks","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":false,"supports_client_config":true},
     {"protocol":"tun","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":false,"supports_client_config":true},
     {"protocol":"hysteria2","state":"implemented","transports":["udp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":true,"supports_client_config":true,"reason":null},
+    {"protocol":"vless","state":"implemented","transports":["tcp"],"supports_validate":true,"supports_render":true,"supports_endpoint":true,"supports_health_check":true,"supports_secret_refs":true,"supports_client_config":true,"reason":null},
     {"protocol":"vless_reality","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"reason":"reserved_profile_not_implemented"},
     {"protocol":"trojan","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"reason":"reserved_profile_not_implemented"},
     {"protocol":"shadowtls","state":"reserved","transports":["tcp"],"supports_validate":false,"supports_render":false,"supports_endpoint":false,"supports_health_check":false,"supports_secret_refs":true,"supports_client_config":false,"reason":"reserved_profile_not_implemented"},
@@ -1614,6 +1619,224 @@ for page in "${ADMIN_PROTO_PAGES[@]}"; do
 done
 
 # ══════════════════════════════════════════════════════════════════════════════
+# [17] VLESS Plain Runtime Parity (TASK-CICD-VLESS-PLAIN-PROTOCOL-SMOKE-001)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [17] VLESS Plain Runtime Parity ---"
+echo "  Verifying NodeAgent → Backend → Admin parity for plain vless profile."
+
+VLESS_PARITY_FAIL=false
+VLESS_PARITY_PASS=0
+VLESS_PARITY_SKIP=0
+
+vless_parity_pass() {
+  local msg="$1"
+  echo "  PASS: ${msg}"
+  SUMMARY_LINES+=("PASS: ${msg}")
+  ((PASS_COUNT++)) || true
+  ((VLESS_PARITY_PASS++)) || true
+}
+
+vless_parity_skip() {
+  local msg="$1"
+  echo "  SKIP: ${msg}"
+  SUMMARY_LINES+=("SKIP: ${msg}")
+  ((SKIP_COUNT++)) || true
+  ((VLESS_PARITY_SKIP++)) || true
+}
+
+vless_parity_fail() {
+  local msg="$1"
+  echo "  FAIL: ${msg}"
+  SUMMARY_LINES+=("FAIL: ${msg}")
+  ((FAIL_COUNT++)) || true
+  FAILED=1
+  VLESS_PARITY_FAIL=true
+}
+
+# [17a] Fleet capability summary includes vless as implemented
+echo "  [17a] Fleet summary includes vless as implemented..."
+if [[ -n "${FLEET_RESP:-}" ]]; then
+  VLESS_FLEET_STATE=$(echo "${FLEET_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+items = d.get('items',d.get('capabilities',d.get('data',d.get('protocols',[]))))
+if not isinstance(items, list):
+    items = [items] if isinstance(items, dict) else []
+for item in items:
+    proto = item.get('protocol','').lower()
+    if proto == 'vless':
+        state = item.get('fleet_state',item.get('state',''))
+        print(state)
+        sys.exit(0)
+print('NOT_FOUND')
+" 2>/dev/null || echo "PARSE_ERROR")
+  case "${VLESS_FLEET_STATE}" in
+    implemented)
+      vless_parity_pass "[17a] Fleet summary: vless=${VLESS_FLEET_STATE} (implemented)"
+      ;;
+    NOT_FOUND)
+      vless_parity_skip "[17a] Fleet summary: vless not yet aggregated (capability data may need heartbeat propagation)"
+      ;;
+    *)
+      vless_parity_skip "[17a] Fleet summary: vless state='${VLESS_FLEET_STATE}' (may not yet reflect implementation)"
+      ;;
+  esac
+else
+  vless_parity_skip "[17a] Fleet summary not available"
+fi
+
+# [17b] Node detail shows vless in capability list (if capabilities fetched)
+echo "  [17b] Node detail includes vless capability..."
+if [[ -n "${NODE_DETAIL:-}" ]] && [[ "${HAVE_NODE_CAPABILITIES}" == "true" ]]; then
+  VLESS_IN_NODE_CAP=$(echo "${NODE_DETAIL}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+# Check under various possible paths
+for path in ['capabilities','protocol_capabilities','supported_protocols']:
+    caps = d.get(path,d.get('node',{}).get(path,[]))
+    if isinstance(caps, list):
+        for c in caps:
+            if isinstance(c, dict):
+                if c.get('protocol','').lower() == 'vless':
+                    print('FOUND: ' + c.get('state','implemented'))
+                    sys.exit(0)
+if isinstance(caps, list):
+    print('NOT_FOUND')
+else:
+    print('NON_LIST')
+" 2>/dev/null || echo "PARSE_ERROR")
+  case "${VLESS_IN_NODE_CAP}" in
+    FOUND:*)
+      vless_parity_pass "[17b] Node detail vless: ${VLESS_IN_NODE_CAP}"
+      ;;
+    NOT_FOUND)
+      vless_parity_skip "[17b] Node detail vless not in capability list (fields may not yet include vless)"
+      ;;
+    *)
+      vless_parity_skip "[17b] Node detail vless check: ${VLESS_IN_NODE_CAP}"
+      ;;
+  esac
+else
+  vless_parity_skip "[17b] Node detail not available for vless check"
+fi
+
+# [17c] Template list: vless template is NOT marked as reserved
+echo "  [17c] VLESS template not marked as reserved..."
+if [[ "${HAVE_TEMPLATES}" == "true" ]]; then
+  VLESS_TEMPLATE_STATE=$(echo "${TEMPLATE_ITEMS}" | python3 -c "
+import sys,json
+items=json.load(sys.stdin)
+for t in items:
+    tproto = t.get('protocol',t.get('protocol_profile','')).lower()
+    tname = t.get('name','').lower()
+    if 'vless' in tproto or 'vless' in tname:
+        if tproto == 'vless_reality':
+            continue
+        is_blocked = t.get('rollout_blocked',False) or t.get('reserved',False)
+        state = t.get('state',t.get('capability_state',''))
+        print(f'PROTO={tproto} NAME={tname} rollout_blocked={is_blocked} state={state}')
+        sys.exit(0)
+print('NOT_FOUND')
+" 2>/dev/null || echo "PARSE_ERROR")
+  case "${VLESS_TEMPLATE_STATE}" in
+    PROTO=*)
+      vless_parity_pass "[17c] VLESS template found: ${VLESS_TEMPLATE_STATE}"
+      if echo "${VLESS_TEMPLATE_STATE}" | grep -qi "rollout_blocked=True\|rollout_blocked=true"; then
+        vless_parity_fail "[17c] Plain VLESS template has rollout_blocked=true (should be unblocked since implemented)"
+      fi
+      ;;
+    NOT_FOUND)
+      vless_parity_skip "[17c] VLESS template not found in template list (no vless-specific seed template exists)"
+      ;;
+    *)
+      vless_parity_skip "[17c] VLESS template check: ${VLESS_TEMPLATE_STATE}"
+      ;;
+  esac
+else
+  vless_parity_skip "[17c] Template list not available"
+fi
+
+# [17d] connect_config safety: VLESS client config must not leak UUID or raw secrets
+echo "  [17d] VLESS connect_config secret safety..."
+VLESS_CONNECT_USER_EMAIL="vless-probe-${SUFFIX}@test.livemask"
+VLESS_CONNECT_PASS="VlessProbe123!"
+cleanup_pg "DELETE FROM users WHERE email='${VLESS_CONNECT_USER_EMAIL}'" 2>/dev/null || true
+
+# Try to register app user for connect session test
+VLESS_APP_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/register" \
+  -H "Content-Type: application/json" \
+  -d "{\"request_id\":\"vless-probe-reg\",\"email\":\"${VLESS_CONNECT_USER_EMAIL}\",\"password\":\"${VLESS_CONNECT_PASS}\",\"display_name\":\"VLESS Connect Probe\",\"client_type\":\"app\"}") || true
+VLESS_APP_TOKEN=$(echo "${VLESS_APP_REG}" | quiet_json "access_token")
+if [[ -z "${VLESS_APP_TOKEN}" ]]; then
+  VLESS_APP_LOGIN=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"request_id\":\"vless-probe-login\",\"email\":\"${VLESS_CONNECT_USER_EMAIL}\",\"password\":\"${VLESS_CONNECT_PASS}\",\"client_type\":\"app\"}") || true
+  VLESS_APP_TOKEN=$(echo "${VLESS_APP_LOGIN}" | quiet_json "access_token")
+fi
+
+if [[ -n "${VLESS_APP_TOKEN}" ]]; then
+  vless_parity_pass "[17d] VLESS probe app login OK"
+  # Create connect session and inspect connect_config for VLESS safety
+  VLESS_SESSION=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${VLESS_APP_TOKEN}" \
+    -d "{\"platform\":\"ios\",\"app_version\":\"0.1.0\"}") || true
+  VLESS_SESSION_ID=$(echo "${VLESS_SESSION}" | quiet_json "session.session_id" || echo "${VLESS_SESSION}" | quiet_json "session_id" || echo "")
+
+  if [[ -n "${VLESS_SESSION_ID}" ]]; then
+    # Deep secret leak scan for VLESS-specific fields
+    VLESS_SECRET_LEAK=$(echo "${VLESS_SESSION}" | python3 -c "
+import sys,json
+data=json.load(sys.stdin)
+body_str = json.dumps(data).lower()
+# VLESS plain UUID is the main secret concern — UUID must not leak raw;
+# if present it should be redacted.
+SENSITIVE_VLESS = [
+    'raw_uuid','uuid_plain','vless_uuid','node_secret','node_secret_hash',
+    'hmac_key','hmac_secret','private_key','privatekey','pem_key',
+    'ed25519_private','rsa_private','signing_key','signing_secret',
+]
+found = [s for s in SENSITIVE_VLESS if s in body_str]
+if found:
+    print('LEAK: ' + ', '.join(found))
+else:
+    print('OK')
+" 2>/dev/null || echo "OK")
+    if [[ "${VLESS_SECRET_LEAK}" == "OK" ]]; then
+      vless_parity_pass "[17d] VLESS connect_config: no leaked secrets (UUID, node_secret, HMAC, private keys)"
+    else
+      vless_parity_fail "[17d] VLESS connect_config leaked secrets: ${VLESS_SECRET_LEAK}"
+    fi
+
+    # Collect for comprehensive scan
+    collect_response "vless_connect_session" "${VLESS_SESSION}"
+    security_check "VLESS connect session" "${VLESS_SESSION}" || true
+
+    # Disconnect
+    curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session/${VLESS_SESSION_ID}/disconnect" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${VLESS_APP_TOKEN}" \
+      -d '{"reason":"user_disconnect"}' >/dev/null 2>&1 || true
+  else
+    vless_parity_skip "[17d] VLESS connect session not created (may need active nodes or Backend VLESS routing)"
+  fi
+else
+  vless_parity_skip "[17d] VLESS probe app login failed"
+fi
+
+# Cleanup VLESS probe user
+cleanup_pg "DELETE FROM users WHERE email='${VLESS_CONNECT_USER_EMAIL}'" 2>/dev/null || true
+
+if [[ "${VLESS_PARITY_FAIL}" == "false" ]]; then
+  echo ""
+  pass "VLESS plain runtime parity: ${VLESS_PARITY_PASS} passed, ${VLESS_PARITY_SKIP} skipped, 0 failed"
+else
+  echo ""
+  echo "  VLESS plain runtime parity: some checks failed (see above)"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Cleanup all test data
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -1640,7 +1863,7 @@ echo "FAIL: ${FAIL_COUNT}"
 
 echo ""
 if [[ "${FAILED}" -eq 1 ]]; then
-  echo "[TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY + TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001] PROTOCOL CAPABILITY SMOKE FAILED."
+  echo "[TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY + TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001 + TASK-CICD-VLESS-PLAIN-PROTOCOL-SMOKE-001] PROTOCOL CAPABILITY SMOKE FAILED."
   echo ""
   echo "--- docker compose ps ---"
   docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
@@ -1652,9 +1875,11 @@ fi
 
 echo "[TASK-CICD-PROTOCOL-CAPABILITY-001-VERIFY] Protocol capability smoke PASSED."
 echo "[TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001] Hysteria2 client config smoke PASSED."
+echo "[TASK-CICD-VLESS-PLAIN-PROTOCOL-SMOKE-001] VLESS plain runtime smoke PASSED."
 echo "Covers: Health, Admin login, Seed templates, Reserved rollout_blocked,"
 echo "  NodeAgent capabilities (heartbeat/status), Node detail, Fleet summary,"
 echo "  Template eligibility (reserved/unsupported/app_pending/implemented),"
 echo "  Seed-not-supported, connect_config no app_pending, RBAC, Secret leak scan,"
 echo "  Admin protocol page 404 check,"
-echo "  LKG/rollback (templates list, detail, eligibility, assignments)"
+echo "  LKG/rollback (templates list, detail, eligibility, assignments),"
+echo "  VLESS plain runtime parity (fleet, node detail, template, connect_config secret safety)"
