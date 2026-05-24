@@ -67,6 +67,11 @@ workflow_contracts = {
     "on" => ["workflow_call"],
     "jobs" => ["build", "notify-lark"],
   },
+  ".github/workflows/reusable-cursor-report-dispatch.yml" => {
+    "name" => "Reusable Cursor Report Dispatch",
+    "on" => ["workflow_call"],
+    "jobs" => ["dispatch"],
+  },
   ".github/workflows/workflow-syntax-guard.yml" => {
     "name" => "Workflow Syntax Guard",
     "on" => ["pull_request", "push", "workflow_dispatch"],
