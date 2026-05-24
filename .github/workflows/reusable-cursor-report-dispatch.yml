@@ -1,7 +1,15 @@
-# TASK-CICD-CURSOR-REPORT-DISPATCH-001
+# TASK-CICD-CURSOR-REPORT-DISPATCH-001 / TASK-RUNTIME-CURSOR-REPORT-DISPATCH-ADOPTION-001
 #
 # Reusable workflow for runtime repos to dispatch Cursor completion reports
 # to livemask-docs via repository_dispatch + Lark notification.
+#
+# dev-merge-commit is optional. If missing, the report still dispatches and
+# the docs window downgrades the status. This supports the case where a task
+# completes without a dev merge (e.g. livemask-app local verification).
+#
+# report-kind:
+#   - standard (default): full dev merge with validation evidence
+#   - local-verification: app-side local verification, no runtime deployment
 #
 # Usage (in a runtime repo workflow):
 #
@@ -15,9 +23,10 @@
 #         commit: abc123def456
 #         task-branch: task/TASK-CICD-FOO-001
 #         task-commit: abc123def000
-#         dev-merge-commit: abc123def789
+#         dev-merge-commit: abc123def789        # optional
 #         validation: "smoke PASS, go test PASS"
 #         result: completed
+#         report-kind: standard                  # optional
 #       secrets:
 #         LIVEMASK_BOT_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN }}
 #         LARK_BOT_WEBHOOK: ${{ secrets.LARK_BOT_WEBHOOK }}
@@ -54,9 +63,10 @@ on:
         required: true
         type: string
       dev-merge-commit:
-        description: Dev merge commit SHA
-        required: true
+        description: Dev merge commit SHA (optional; docs downgrades if missing)
+        required: false
         type: string
+        default: ''
       validation:
         description: Validation evidence summary
         required: true
@@ -66,6 +76,11 @@ on:
         required: false
         type: string
         default: completed
+      report-kind:
+        description: Report kind (standard or local-verification)
+        required: false
+        type: string
+        default: standard
       target-repo:
         description: Target repository for dispatch
         required: false
@@ -117,6 +132,7 @@ jobs:
             --dev-merge-commit "${{ inputs.dev-merge-commit }}" \
             --validation "${{ inputs.validation }}" \
             --result "${{ inputs.result }}" \
+            --report-kind "${{ inputs.report-kind }}" \
             --target-repo "${{ inputs.target-repo }}" \
             ${{ inputs.dry-run && '--dry-run' || '' }} \
             ${{ secrets.LARK_BOT_WEBHOOK != '' && format('--lark-webhook-url {0}', secrets.LARK_BOT_WEBHOOK) || '' }} \
