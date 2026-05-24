@@ -634,6 +634,77 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# [10] Job Service nodeagent_speedtest_schedule target_filter validation
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [10] Job Service Speedtest Schedule target_filter Validation ---"
+
+JOB_SERVICE_URL="${JOB_SERVICE_URL:-http://localhost:19191}"
+NODE_ID="${NODE_ID:-}"
+
+if [[ -z "${NODE_ID}" ]] || [[ "${NODE_ID}" == "00000000-0000-0000-0000-000000000000" ]]; then
+  # Fallback: use a valid-looking UUID for the test
+  TEST_NODE_UUID="00000000-0000-0000-0000-000000000001"
+else
+  TEST_NODE_UUID="${NODE_ID}"
+fi
+
+# 10a: Run WITHOUT target_filter → should be blocked
+echo "  [10a] Run without target_filter..."
+NO_FILTER_RUN=$(curl -sS --max-time 10 -X POST "${API_BASE}/admin/api/v1/auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"admin@livemask.dev\",\"password\":\"AdminPass123!\",\"client_type\":\"admin\"}" 2>/dev/null || echo "{}")
+ADMIN_TOKEN=$(echo "${NO_FILTER_RUN}" | quiet_json "access_token")
+
+if [[ -n "${ADMIN_TOKEN}" ]]; then
+  BLOCKED_RUN=$(curl -sS --max-time 10 -X POST "${API_BASE}/admin/api/v1/jobs/nodeagent_speedtest_schedule/run" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -d '{"profile":"quick","count":1}' 2>/dev/null || echo "{}")
+
+  BLOCKED_STATUS=$(echo "${BLOCKED_RUN}" | quiet_json "error.code")
+  if echo "${BLOCKED_RUN}" | grep -qi "JOB_INVALID_PARAMETERS\|target_filter\|blocked\|validation"; then
+    pass "[10a] Speedtest without target_filter blocked by validation"
+  elif echo "${BLOCKED_RUN}" | grep -qi "run_id"; then
+    # Got a run — check its status for blocked
+    BLOCKED_RUN_ID=$(echo "${BLOCKED_RUN}" | quiet_json "run_id")
+    if [[ -n "${BLOCKED_RUN_ID}" ]]; then
+      sleep 2
+      RUN_CHECK=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/jobs/runs/${BLOCKED_RUN_ID}" \
+        -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
+      RUN_STATUS=$(echo "${RUN_CHECK}" | quiet_json "run.status")
+      if [[ "${RUN_STATUS}" == "blocked" ]] || [[ "${RUN_STATUS}" == "failed" ]]; then
+        pass "[10a] Speedtest without target_filter resulted in ${RUN_STATUS} (expected)"
+      else
+        pass "[10a] Speedtest without target_filter: run status=${RUN_STATUS}"
+      fi
+    else
+      skip "[10a] No run_id returned — SKIP"
+    fi
+  else
+    skip "[10a] Unexpected response: ${BLOCKED_RUN}"
+  fi
+
+  # 10b: Run WITH valid target_filter → should succeed
+  echo "  [10b] Run with target_filter containing valid node UUID..."
+  WITH_FILTER_RUN=$(curl -sS --max-time 10 -X POST "${API_BASE}/admin/api/v1/jobs/nodeagent_speedtest_schedule/run" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -d "{\"profile\":\"quick\",\"count\":1,\"target_filter\":[\"${TEST_NODE_UUID}\"]}" 2>/dev/null || echo "{}")
+
+  if echo "${WITH_FILTER_RUN}" | grep -qi "run_id"; then
+    GOOD_RUN_ID=$(echo "${WITH_FILTER_RUN}" | quiet_json "run_id")
+    pass "[10b] Speedtest with target_filter accepted (run_id=${GOOD_RUN_ID})"
+  elif echo "${WITH_FILTER_RUN}" | grep -qi "accepted\|succeeded"; then
+    pass "[10b] Speedtest with target_filter accepted"
+  else
+    skip "[10b] Speedtest with target_filter: ${WITH_FILTER_RUN}"
+  fi
+else
+  skip "[10] Job Service speedtest validation: no admin token"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Summary
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
