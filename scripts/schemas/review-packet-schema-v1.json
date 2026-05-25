@@ -1,0 +1,165 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/MyAiDevs/livemask-ci-cd/scripts/schemas/review-packet-schema-v1.json",
+  "title": "Cursor Worker Review Packet Schema v1",
+  "description": "JSON Schema for Cursor SDK Worker Harness review packets. TASK-CICD-REVIEW-PACKET-SCHEMA-001",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "review_packet_version",
+    "schema",
+    "generated_at",
+    "mode",
+    "task_id",
+    "repo",
+    "branch",
+    "diff_summary",
+    "changed_files",
+    "validation",
+    "secret_scan",
+    "boundary_check",
+    "risks_and_todos",
+    "committed",
+    "merged",
+    "report_dispatched"
+  ],
+  "properties": {
+    "review_packet_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for forward compatibility."
+    },
+    "schema": {
+      "type": "string",
+      "pattern": "^https://github.com/MyAiDevs/livemask-ci-cd/scripts/schemas/review-packet-schema-v1\\.json$",
+      "description": "URI of the JSON Schema this packet conforms to."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the packet was produced."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["implement-for-review", "revise-after-review"],
+      "description": "Worker mode that produced this packet."
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^TASK-",
+      "description": "TASK ID of the completed implementation."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Repository name, e.g. livemask-backend."
+    },
+    "branch": {
+      "type": "object",
+      "required": ["current", "expected", "match", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "current": { "type": "string" },
+        "expected": { "type": "string" },
+        "match": { "type": "boolean", "const": true },
+        "note": { "type": "string" }
+      },
+      "description": "Branch context: current vs expected branch, and whether they match."
+    },
+    "diff_summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable diff summary, e.g. '3 files changed, +42/-7'."
+    },
+    "diff": {
+      "type": "object",
+      "required": ["summary", "captured_at", "file_count", "insertions", "deletions"],
+      "additionalProperties": false,
+      "properties": {
+        "summary": { "type": "string" },
+        "captured_at": { "type": "string" },
+        "file_count": { "type": "integer", "minimum": 0 },
+        "insertions": { "type": "integer", "minimum": 0 },
+        "deletions": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Structured diff statistics."
+    },
+    "changed_files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 0,
+      "uniqueItems": true,
+      "description": "List of files changed in this task (staged-only canonical diff)."
+    },
+    "validation": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["cmd", "exit_code"],
+        "additionalProperties": true,
+        "properties": {
+          "cmd": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "stdout_summary": { "type": "string" }
+        }
+      },
+      "minItems": 1,
+      "description": "Array of validation command results. At least one entry required."
+    },
+    "secret_scan": {
+      "type": "object",
+      "required": ["result", "suspicious_count"],
+      "additionalProperties": false,
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": ["pass", "suspicious_patterns_found"]
+        },
+        "suspicious_count": { "type": "integer", "minimum": 0 }
+      },
+      "description": "Secret scan outcome."
+    },
+    "boundary_check": {
+      "type": "object",
+      "required": ["result", "docs_repo_edits_found"],
+      "additionalProperties": false,
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": ["pass", "violation"]
+        },
+        "docs_repo_edits_found": { "type": "boolean" }
+      },
+      "description": "Multi-repo boundary check outcome."
+    },
+    "risks_and_todos": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of risks, TODOs, or known issues."
+    },
+    "sdk_agent_summary": {
+      "type": "string",
+      "description": "Optional summary from the SDK agent run."
+    },
+    "codex_approval_required_for_next_stage": {
+      "type": "boolean",
+      "const": true,
+      "description": "Gate flag: must be true before approval is required."
+    },
+    "committed": {
+      "type": "boolean",
+      "const": false,
+      "description": "Must be false. No commits are made before Codex approval."
+    },
+    "merged": {
+      "type": "boolean",
+      "const": false,
+      "description": "Must be false. No merges are made before Codex approval."
+    },
+    "report_dispatched": {
+      "type": "boolean",
+      "const": false,
+      "description": "Must be false. No report is dispatched before Codex approval."
+    }
+  }
+}

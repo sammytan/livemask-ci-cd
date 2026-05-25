@@ -44,6 +44,14 @@
 #          is JSON object (not string), and contains required fields
 #   SC-26  ACK commit scan: recent commits contain task in message but not
 #          latest; fake gh confirms ACK via Strategy B
+#   SC-27  review packet schema: valid minimal passes
+#   SC-28  negative fixture — missing validation array
+#   SC-29  negative fixture — wrong branch (now fails with match.const=true)
+#   SC-30  negative fixture — committed=true (forbidden before approval)
+#   SC-31  negative fixture — extra/unexpected field
+#   SC-32  negative fixture — missing task_id (empty string, fails pattern)
+#   SC-33  negative fixture — validation wrong type (string instead of array)
+#   SC-34  negative fixture — branch.match false (const true fails)
 #
 
 set -euo pipefail
@@ -1548,6 +1556,142 @@ DISPATCH
 }
 
 # ============================================================================
+# SC-27 through SC-31: Review Packet Schema Validation Tests
+# ============================================================================
+
+# Resolve VALIDATOR and FIXTURES_DIR for the review packet schema tests
+VALIDATOR="${SCRIPT_DIR}/validate-review-packet.sh"
+FIXTURES_DIR="${SCRIPT_DIR}/schemas/fixtures"
+
+# SC-27: Valid minimal review packet passes schema validation
+test_rp_schema_valid_minimal() {
+  echo ""
+  echo "=== SC-27: valid minimal review packet passes schema validation ==="
+  if [[ ! -f "${VALIDATOR}" ]]; then
+    echo "  FAIL: validator script not found at ${VALIDATOR}"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-27 (validator not found)\n"
+    return
+  fi
+  if [[ ! -f "${FIXTURES_DIR}/positive-valid-minimal.json" ]]; then
+    echo "  FAIL: positive fixture not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-27 (fixture not found)\n"
+    return
+  fi
+
+  local output rc
+  output="$(bash "${VALIDATOR}" "${FIXTURES_DIR}/positive-valid-minimal.json" 2>&1)" && rc=0 || rc=$?
+  assert_eq "SC-27: exit 0" "0" "${rc}"
+  assert_contains "SC-27: validation PASS message" "${output}" "PASS"
+}
+
+# SC-28: Negative fixture — missing validation array
+test_rp_schema_missing_validation() {
+  echo ""
+  echo "=== SC-28: negative fixture — missing validation array ==="
+  if [[ ! -f "${FIXTURES_DIR}/negative-missing-validation.json" ]]; then
+    echo "  FAIL: negative fixture not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-28 (fixture not found)\n"
+    return
+  fi
+  local output rc
+  output="$(bash "${VALIDATOR}" "${FIXTURES_DIR}/negative-missing-validation.json" 2>&1)" && rc=0 || rc=$?
+  assert_eq "SC-28: exit non-zero (missing validation)" "1" "$( (( rc > 0 )) && echo 1 || echo 0)"
+}
+
+# SC-29: Negative fixture — wrong branch (dev instead of task/*)
+test_rp_schema_wrong_branch() {
+  echo ""
+  echo "=== SC-29: negative fixture — wrong branch ==="
+  if [[ ! -f "${FIXTURES_DIR}/negative-wrong-branch.json" ]]; then
+    echo "  FAIL: negative fixture not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-29 (fixture not found)\n"
+    return
+  fi
+  local output rc
+  output="$(bash "${VALIDATOR}" "${FIXTURES_DIR}/negative-wrong-branch.json" 2>&1)" && rc=0 || rc=$?
+  assert_eq "SC-29: exit non-zero (wrong branch is now schema-invalid)" "1" "$( (( rc > 0 )) && echo 1 || echo 0)"
+}
+
+# SC-30: Negative fixture — committed=true (forbidden before approval)
+test_rp_schema_committed_true() {
+  echo ""
+  echo "=== SC-30: negative fixture — committed=true ==="
+  if [[ ! -f "${FIXTURES_DIR}/negative-committed-true.json" ]]; then
+    echo "  FAIL: negative fixture not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-30 (fixture not found)\n"
+    return
+  fi
+  local output rc
+  output="$(bash "${VALIDATOR}" "${FIXTURES_DIR}/negative-committed-true.json" 2>&1)" && rc=0 || rc=$?
+  assert_eq "SC-30: exit non-zero (committed must be false)" "1" "$( (( rc > 0 )) && echo 1 || echo 0)"
+}
+
+# SC-31: Negative fixture — extra/unexpected field
+test_rp_schema_extra_field() {
+  echo ""
+  echo "=== SC-31: negative fixture — extra field ==="
+  if [[ ! -f "${FIXTURES_DIR}/negative-extra-field.json" ]]; then
+    echo "  FAIL: negative fixture not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-31 (fixture not found)\n"
+    return
+  fi
+  local output rc
+  output="$(bash "${VALIDATOR}" "${FIXTURES_DIR}/negative-extra-field.json" 2>&1)" && rc=0 || rc=$?
+  assert_eq "SC-31: exit non-zero (extra field rejected)" "1" "$( (( rc > 0 )) && echo 1 || echo 0)"
+}
+
+# SC-32: Negative fixture — missing task_id (empty string)
+test_rp_schema_missing_task_id() {
+  echo ""
+  echo "=== SC-32: negative fixture — missing task_id ==="
+  if [[ ! -f "${FIXTURES_DIR}/negative-missing-task-id.json" ]]; then
+    echo "  FAIL: negative fixture not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-32 (fixture not found)\n"
+    return
+  fi
+  local output rc
+  output="$(bash "${VALIDATOR}" "${FIXTURES_DIR}/negative-missing-task-id.json" 2>&1)" && rc=0 || rc=$?
+  assert_eq "SC-32: exit non-zero (task_id empty, fails pattern)" "1" "$( (( rc > 0 )) && echo 1 || echo 0)"
+}
+
+# SC-33: Negative fixture — validation wrong type (string instead of array)
+test_rp_schema_validation_wrong_type() {
+  echo ""
+  echo "=== SC-33: negative fixture — validation wrong type (string) ==="
+  if [[ ! -f "${FIXTURES_DIR}/validation-wrong-type-string.json" ]]; then
+    echo "  FAIL: negative fixture not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-33 (fixture not found)\n"
+    return
+  fi
+  local output rc
+  output="$(bash "${VALIDATOR}" "${FIXTURES_DIR}/validation-wrong-type-string.json" 2>&1)" && rc=0 || rc=$?
+  assert_eq "SC-33: exit non-zero (validation is string not array)" "1" "$( (( rc > 0 )) && echo 1 || echo 0)"
+}
+
+# SC-34: Negative fixture — branch.match false (const true fails)
+test_rp_schema_branch_match_false() {
+  echo ""
+  echo "=== SC-34: negative fixture — branch.match false ==="
+  if [[ ! -f "${FIXTURES_DIR}/branch-match-false.json" ]]; then
+    echo "  FAIL: negative fixture not found"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    FAILURES="${FAILURES}  SC-34 (fixture not found)\n"
+    return
+  fi
+  local output rc
+  output="$(bash "${VALIDATOR}" "${FIXTURES_DIR}/branch-match-false.json" 2>&1)" && rc=0 || rc=$?
+  assert_eq "SC-34: exit non-zero (branch.match must be const true)" "1" "$( (( rc > 0 )) && echo 1 || echo 0)"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1584,6 +1728,16 @@ test_dispatch_ack_timeout
 test_completion_evidence_content
 test_dispatch_body_validation
 test_ack_recent_commits_scan
+
+# Review Packet Schema Validation Tests (TASK-CICD-REVIEW-PACKET-SCHEMA-001)
+test_rp_schema_valid_minimal
+test_rp_schema_missing_validation
+test_rp_schema_wrong_branch
+test_rp_schema_committed_true
+test_rp_schema_extra_field
+test_rp_schema_missing_task_id
+test_rp_schema_validation_wrong_type
+test_rp_schema_branch_match_false
 
 echo ""
 echo "================================================================"

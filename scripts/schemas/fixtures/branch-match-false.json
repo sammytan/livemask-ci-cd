@@ -1,0 +1,38 @@
+{
+  "review_packet_version": 1,
+  "schema": "https://github.com/MyAiDevs/livemask-ci-cd/scripts/schemas/review-packet-schema-v1.json",
+  "generated_at": "2026-05-25T09:00:00Z",
+  "mode": "implement-for-review",
+  "task_id": "TASK-NEGATIVE-007",
+  "repo": "livemask-ci-cd",
+  "branch": {
+    "current": "dev",
+    "expected": "task/TASK-NEGATIVE-007",
+    "match": false,
+    "note": "Current branch 'dev' does not match expected 'task/TASK-NEGATIVE-007'"
+  },
+  "diff_summary": "1 files changed, +1/-0",
+  "diff": {
+    "summary": "1 files changed, +1/-0",
+    "captured_at": ".cursor-worker/latest.diff",
+    "file_count": 1,
+    "insertions": 1,
+    "deletions": 0
+  },
+  "changed_files": ["README.md"],
+  "boundary_check": {
+    "result": "pass",
+    "docs_repo_edits_found": false
+  },
+  "secret_scan": {
+    "result": "pass",
+    "suspicious_count": 0
+  },
+  "validation": [{"cmd": "true", "exit_code": 0}],
+  "sdk_agent_summary": "test",
+  "risks_and_todos": [],
+  "codex_approval_required_for_next_stage": true,
+  "committed": false,
+  "merged": false,
+  "report_dispatched": false
+}
