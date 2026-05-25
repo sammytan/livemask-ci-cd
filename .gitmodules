@@ -1,0 +1,3 @@
+[submodule ".livemask-docs"]
+	path = .livemask-docs
+	url = git@github.com:MyAiDevs/livemask-docs.git
