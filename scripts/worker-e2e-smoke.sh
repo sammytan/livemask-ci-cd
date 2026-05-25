@@ -58,6 +58,9 @@ HARNESS_LIB="${SCRIPT_DIR}/lib/worker-harness.sh"
 HELPER_PY="${SCRIPT_DIR}/lib/worker-harness-helper.py"
 DISPATCH_SCRIPT="${SCRIPT_DIR}/cursor-report-dispatch.sh"
 
+# Source harness at script scope so functions and _wh_helper are always available
+source "${HARNESS_LIB}"
+
 # ============================================================================
 # Config
 # ============================================================================
@@ -191,6 +194,7 @@ setup_sandbox() {
   export WORKER_HARNESS_VALIDATION_CMDS="true"
   export WORKER_HARNESS_SECRET_PATTERNS="NONE_USED_IN_SMOKE"
   export WORKER_HARNESS_HELPER_PATH="${HELPER_PY}"
+  export WORKER_HARNESS_CAPTURE_DIR="${SANDBOX}/.cursor-worker/review-packets"
 }
 
 teardown_sandbox() {
@@ -512,21 +516,22 @@ scenario_docs_ack_listener() {
   export CURSOR_WORKER_MODE="approved-submit"
 
   cd "${SANDBOX}"
-  mkdir -p .cursor-worker/review-packets
 
-  # Create the receiver-produced listener state artifact
-  cat > .cursor-worker/review-packets/docs-listener-state.json <<ARTIFACT
+  # worker_harness_init correctly sets WORKER_HARNESS_CAPTURE_DIR to
+  # "${SANDBOX}/.cursor-worker/review-packets" from setup_sandbox.
+  # Create the receiver-produced listener state artifact exactly where
+  # worker_harness_check_docs_ack expects it.
+  local listener_dir="${WORKER_HARNESS_CAPTURE_DIR}"
+  mkdir -p "${listener_dir}"
+  cat > "${listener_dir}/docs-listener-state.json" <<ARTIFACT
 {
   "reported_task_ids": ["${SYNTHETIC_TASK_ID}"]
 }
 ARTIFACT
 
+  # Harness is already sourced at script scope — no subshell source needed.
   local ack_result
-  ack_result="$(
-    cd "${SANDBOX}"
-    source "${HARNESS_LIB}" > /dev/null 2>&1
-    worker_harness_check_docs_ack "${SYNTHETIC_TASK_ID}" 2>/dev/null
-  )"
+  ack_result="$(worker_harness_check_docs_ack "${SYNTHETIC_TASK_ID}" 2>/dev/null || echo "error")"
 
   assert_eq "E2E-05: ACK confirmed via listener" "confirmed" "${ack_result}"
 
