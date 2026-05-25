@@ -1455,13 +1455,15 @@ except Exception:
   assert_eq "SC-25: client_payload is JSON object" "object" "${cp_type}"
 
   # client_payload required fields
+  # NOTE: avoid f-strings with nested quotes for Python < 3.12 compatibility
   local cp_fields
   cp_fields="$(echo "${captured_body}" | python3 -c '
 import json, sys
 body = json.load(sys.stdin)
 cp = body.get("client_payload", {})
 for k in ("task_id","repo","commit","task_commit","dev_merge_commit","validation"):
-    print(f"field_{k}={cp.get(k,"")!r}")
+    val = cp.get(k, "")
+    print("field_{}={}".format(k, val))
 ' 2>/dev/null || true)"
   assert_contains "SC-25: client_payload has task_id" "${cp_fields}" "TASK-SMOKE-SC25-001"
   assert_contains "SC-25: client_payload has repo" "${cp_fields}" "smoke-repo"
