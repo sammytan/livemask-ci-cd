@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-05-25T10:00:00+08:00",
+  "purpose": "Per-repo validation commands and worker defaults for the Cursor SDK Worker Harness.",
+  "repos": {
+    "livemask-backend": {
+      "validation_cmds": [
+        "go test ./... -count=1",
+        "go vet ./...",
+        "go build ./..."
+      ],
+      "default_worker_id": "cursor-worker",
+      "cwd": "."
+    },
+    "livemask-nodeagent": {
+      "validation_cmds": [
+        "go test ./... -count=1",
+        "go build ./cmd/nodeagent"
+      ],
+      "default_worker_id": "cursor-worker",
+      "cwd": "."
+    },
+    "livemask-job-service": {
+      "validation_cmds": [
+        "go test ./... -count=1",
+        "go vet ./...",
+        "go build ./cmd/job-service"
+      ],
+      "default_worker_id": "cursor-worker",
+      "cwd": "."
+    },
+    "livemask-admin": {
+      "validation_cmds": [
+        "npx vitest run",
+        "npx next build"
+      ],
+      "default_worker_id": "cursor-worker",
+      "cwd": "."
+    },
+    "livemask-app": {
+      "validation_cmds": [
+        "flutter analyze",
+        "flutter test"
+      ],
+      "default_worker_id": "cursor-worker",
+      "cwd": "."
+    },
+    "livemask-website": {
+      "validation_cmds": [
+        "npm run build"
+      ],
+      "default_worker_id": "cursor-worker",
+      "cwd": "."
+    },
+    "livemask-ci-cd": {
+      "validation_cmds": [
+        "bash -n scripts/*.sh",
+        "python3 -m py_compile scripts/*.py",
+        "git diff --check"
+      ],
+      "default_worker_id": "cursor-worker",
+      "cwd": "."
+    },
+    "livemask-docs": {
+      "validation_cmds": [
+        "bash scripts/check-docs.sh"
+      ],
+      "default_worker_id": "cursor-worker",
+      "cwd": "."
+    }
+  },
+  "worker_defaults": {
+    "max_chain": 3,
+    "max_runtime_minutes": 90,
+    "sleep_minutes": 10,
+    "default_mode": "implement-for-review"
+  }
+}
