@@ -125,7 +125,7 @@ jobs:
         run: bash scripts/geoip-smoke.sh
       - name: GeoIP Credentials smoke (TASK-CICD-GEOIP-CREDENTIALS-001)
         run: bash scripts/geoip-credentials-smoke.sh
-      - name: Growth Revenue & Reward Notification smoke (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001)
+      - name: Growth Revenue & Reward Notification & User Profile Growth Fields smoke (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001 / TASK-CICD-USER-PROFILE-GROWTH-FIELDS-SMOKE-001)
         run: bash scripts/growth-revenue-smoke.sh
       - name: Release Control smoke (TASK-CICD-RELEASE-CONTROL-SMOKE-001)
         run: bash scripts/release-control-smoke.sh
