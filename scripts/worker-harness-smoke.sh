@@ -44,6 +44,13 @@
 #          is JSON object (not string), and contains required fields
 #   SC-26  ACK commit scan: recent commits contain task in message but not
 #          latest; fake gh confirms ACK via Strategy B
+#   SC-35  dispatch with module_id via JSON input: validates module_id field,
+#          property count <=10, branch omitted when module_id present
+#   SC-36  dispatch without module_id (backward compat): branch included,
+#          module_id absent, property count <=10
+#   SC-37  all runtime repo examples with module_id via JSON input:
+#          validates module_id, property count <=10, branch omitted,
+#          tests APP/ADMIN/WEBSITE/BACKEND/NODEAGENT/JOB-SERVICE
 #   SC-27  review packet schema: valid minimal passes
 #   SC-28  negative fixture — missing validation array
 #   SC-29  negative fixture — wrong branch (now fails with match.const=true)
@@ -1556,6 +1563,308 @@ DISPATCH
 }
 
 # ============================================================================
+# SC-35: Dispatch with --module-id via JSON input — validates module_id field,
+#        property count <=10, and branch is omitted when module_id is present.
+# ============================================================================
+
+test_dispatch_with_module_id() {
+  echo ""
+  echo "=== SC-35: dispatch with module_id via JSON input ==="
+  setup_sandbox
+  cd "${SANDBOX}"
+
+  local body_captured="${SANDBOX}/captured-body.json"
+  local gh_path="${SANDBOX}/gh"
+
+  # Install a fake gh that captures stdin
+  cat > "${gh_path}" <<FAKEGH
+#!/usr/bin/env bash
+cat > ${body_captured}
+echo "gh-stub: captured body" >&2
+exit 0
+FAKEGH
+  chmod +x "${gh_path}"
+  export PATH="${SANDBOX}:${PATH}"
+  export LIVEMASK_BOT_TOKEN="fake-token-for-test"
+
+  local input_json
+  input_json='{"task_id":"TASK-APP-WORKER-HARNESS-ADOPTION-001","result":"completed","repo":"livemask-app","branch":"dev","commit":"aabbccddeeff00112233445566778899aabbccdd","task_branch":"task/TASK-APP-WORKER-HARNESS-ADOPTION-001","task_commit":"11223344556677889900aabbccddeeff11223344","dev_merge_commit":"aabbccddeeff00112233445566778899aabbccdd","validation":"{\"ok\":true}","module_id":"governance-control-plane"}'
+
+  local dispatch_script="${SCRIPT_DIR}/cursor-report-dispatch.sh"
+  echo "${input_json}" | bash "${dispatch_script}" --input -
+  local dispatch_rc=$?
+  assert_eq "SC-35: dispatch exits 0" "0" "${dispatch_rc}"
+
+  local captured_body=""
+  if [[ -f "${body_captured}" ]]; then
+    captured_body="$(cat "${body_captured}")"
+  fi
+
+  # event_type
+  assert_contains "SC-35: body has event_type" "${captured_body}" "cursor-report-received"
+
+  # client_payload is a JSON object
+  local cp_type
+  cp_type="$(echo "${captured_body}" | python3 -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+    cp = body.get("client_payload")
+    if isinstance(cp, dict):
+        print("object")
+    elif isinstance(cp, str):
+        print("string")
+    else:
+        print("none")
+except Exception:
+    print("error")
+' 2>/dev/null || echo 'error')"
+  assert_eq "SC-35: client_payload is JSON object" "object" "${cp_type}"
+
+  # module_id is present
+  local module_id_val
+  module_id_val="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+print(body.get("client_payload", {}).get("module_id", "__MISSING__"))
+' 2>/dev/null || echo 'error')"
+  assert_eq "SC-35: module_id = governance-control-plane" "governance-control-plane" "${module_id_val}"
+
+  # branch is absent when module_id is present
+  local branch_val
+  branch_val="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+print("PRESENT" if "branch" in body.get("client_payload", {}) else "ABSENT")
+' 2>/dev/null || echo 'error')"
+  assert_eq "SC-35: branch omitted when module_id present" "ABSENT" "${branch_val}"
+
+  # Property count <= 10
+  local prop_count
+  prop_count="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+cp = body.get("client_payload", {})
+print(len(cp))
+' 2>/dev/null || echo 'error')"
+  # With module_id: 9 non-completion_time + completion_time + module_id = 10? No: let's count:
+  # task_id, result, repo, commit, task_branch, task_commit, dev_merge_commit, validation, completion_time, module_id = 10
+  # So it should be <= 10
+  assert_eq "SC-35: property count <= 10" "10" "${prop_count}"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-36: Dispatch without --module-id (backward compatible) — branch field
+#        is included, property count <=10, event_type unchanged.
+# ============================================================================
+
+test_dispatch_without_module_id() {
+  echo ""
+  echo "=== SC-36: dispatch without module_id (backward compat) ==="
+  setup_sandbox
+  cd "${SANDBOX}"
+
+  local body_captured="${SANDBOX}/captured-body.json"
+  local gh_path="${SANDBOX}/gh"
+
+  cat > "${gh_path}" <<FAKEGH
+#!/usr/bin/env bash
+cat > ${body_captured}
+echo "gh-stub: captured body" >&2
+exit 0
+FAKEGH
+  chmod +x "${gh_path}"
+  export PATH="${SANDBOX}:${PATH}"
+  export LIVEMASK_BOT_TOKEN="fake-token-for-test"
+
+  local input_json
+  input_json='{"task_id":"TASK-SMOKE-SC36-001","result":"completed","repo":"smoke-repo","branch":"dev","commit":"abcdef1234567890abcdef1234567890abcdef12","task_branch":"task/TASK-SMOKE-SC36-001","task_commit":"1234567890abcdef1234567890abcdef12345678","dev_merge_commit":"90abcdef1234567890abcdef1234567890abcdef","validation":"{\"ok\":true}"}'
+
+  local dispatch_script="${SCRIPT_DIR}/cursor-report-dispatch.sh"
+  echo "${input_json}" | bash "${dispatch_script}" --input -
+  local dispatch_rc=$?
+  assert_eq "SC-36: dispatch exits 0" "0" "${dispatch_rc}"
+
+  local captured_body=""
+  if [[ -f "${body_captured}" ]]; then
+    captured_body="$(cat "${body_captured}")"
+  fi
+
+  # event_type
+  assert_contains "SC-36: body has event_type" "${captured_body}" "cursor-report-received"
+
+  # client_payload is a JSON object
+  local cp_type
+  cp_type="$(echo "${captured_body}" | python3 -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+    cp = body.get("client_payload")
+    if isinstance(cp, dict):
+        print("object")
+    elif isinstance(cp, str):
+        print("string")
+    else:
+        print("none")
+except Exception:
+    print("error")
+' 2>/dev/null || echo 'error')"
+  assert_eq "SC-36: client_payload is JSON object" "object" "${cp_type}"
+
+  # branch is present
+  local branch_val
+  branch_val="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+print(body.get("client_payload", {}).get("branch", "__MISSING__"))
+' 2>/dev/null || echo 'error')"
+  assert_eq "SC-36: branch = dev" "dev" "${branch_val}"
+
+  # module_id is absent
+  local module_absent
+  module_absent="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+print("ABSENT" if "module_id" not in body.get("client_payload", {}) else "PRESENT")
+' 2>/dev/null || echo 'error')"
+  assert_eq "SC-36: module_id absent when not provided" "ABSENT" "${module_absent}"
+
+  # Property count <= 10 (10 properties: task_id, result, repo, branch, commit,
+  # task_branch, task_commit, dev_merge_commit, validation, completion_time)
+  local prop_count
+  prop_count="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+cp = body.get("client_payload", {})
+print(len(cp))
+' 2>/dev/null || echo 'error')"
+  assert_eq "SC-36: property count = 10" "10" "${prop_count}"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-37: All runtime repo examples with module_id — validates each repo
+#        produces a valid payload with module_id=governance-control-plane
+#        and property count <=10. Tests via --input - JSON (the portable path
+#        that works on both macOS and Linux).
+# ============================================================================
+
+test_dispatch_module_id_examples() {
+  echo ""
+  echo "=== SC-37: all runtime repo examples with module_id ==="
+  setup_sandbox
+  cd "${SANDBOX}"
+
+  local body_captured="${SANDBOX}/captured-body.json"
+  local gh_path="${SANDBOX}/gh"
+
+  cat > "${gh_path}" <<FAKEGH
+#!/usr/bin/env bash
+cat > ${body_captured}
+echo "gh-stub: captured body" >&2
+exit 0
+FAKEGH
+  chmod +x "${gh_path}"
+  export PATH="${SANDBOX}:${PATH}"
+  export LIVEMASK_BOT_TOKEN="fake-token-for-test"
+
+  local dispatch_script="${SCRIPT_DIR}/cursor-report-dispatch.sh"
+
+  # All runtime repos that need module_id
+  local examples
+  examples=(
+    '{"task_id":"TASK-APP-WORKER-HARNESS-ADOPTION-001","result":"completed","repo":"livemask-app","branch":"dev","commit":"aabbccddeeff00112233445566778899aabbccdd","task_branch":"task/TASK-APP-WORKER-HARNESS-ADOPTION-001","task_commit":"11223344556677889900aabbccddeeff11223344","dev_merge_commit":"aabbccddeeff00112233445566778899aabbccdd","validation":"{\"ok\":true}","module_id":"governance-control-plane"}'
+    '{"task_id":"TASK-ADMIN-WORKER-HARNESS-ADOPTION-001","result":"completed","repo":"livemask-admin","branch":"dev","commit":"bbccddeeff00112233445566778899aabbccddee","task_branch":"task/TASK-ADMIN-WORKER-HARNESS-ADOPTION-001","task_commit":"223344556677889900aabbccddeeff1122334455","dev_merge_commit":"bbccddeeff00112233445566778899aabbccddee","validation":"{\"ok\":true}","module_id":"governance-control-plane"}'
+    '{"task_id":"TASK-WEBSITE-WORKER-HARNESS-ADOPTION-001","result":"completed","repo":"livemask-website","branch":"dev","commit":"ccddeeff00112233445566778899aabbccddeeff","task_branch":"task/TASK-WEBSITE-WORKER-HARNESS-ADOPTION-001","task_commit":"3344556677889900aabbccddeeff112233445566","dev_merge_commit":"ccddeeff00112233445566778899aabbccddeeff","validation":"{\"ok\":true}","module_id":"governance-control-plane"}'
+    '{"task_id":"TASK-BACKEND-CURSOR-SDK-WORKER-ADOPTION-001","result":"completed","repo":"livemask-backend","branch":"dev","commit":"ddeeff00112233445566778899aabbccddeeff00","task_branch":"task/TASK-BACKEND-CURSOR-SDK-WORKER-ADOPTION-001","task_commit":"44556677889900aabbccddeeff11223344556677","dev_merge_commit":"ddeeff00112233445566778899aabbccddeeff00","validation":"{\"ok\":true}","module_id":"governance-control-plane"}'
+    '{"task_id":"TASK-NODEAGENT-WORKER-HARNESS-ADOPTION-001","result":"completed","repo":"livemask-nodeagent","branch":"dev","commit":"eeff00112233445566778899aabbccddeeff0011","task_branch":"task/TASK-NODEAGENT-WORKER-HARNESS-ADOPTION-001","task_commit":"556677889900aabbccddeeff1122334455667788","dev_merge_commit":"eeff00112233445566778899aabbccddeeff0011","validation":"{\"ok\":true}","module_id":"governance-control-plane"}'
+    '{"task_id":"TASK-JOB-SERVICE-WORKER-HARNESS-ADOPTION-001","result":"completed","repo":"livemask-job-service","branch":"dev","commit":"ff00112233445566778899aabbccddeeff001122","task_branch":"task/TASK-JOB-SERVICE-WORKER-HARNESS-ADOPTION-001","task_commit":"6677889900aabbccddeeff112233445566778899","dev_merge_commit":"ff00112233445566778899aabbccddeeff001122","validation":"{\"ok\":true}","module_id":"governance-control-plane"}'
+  )
+
+  local idx=0
+  for input_json in "${examples[@]}"; do
+    idx=$((idx + 1))
+
+    echo "${input_json}" | bash "${dispatch_script}" --input -
+    local dispatch_rc=$?
+    assert_eq "SC-37.${idx}: dispatch exits 0" "0" "${dispatch_rc}"
+
+    local captured_body=""
+    if [[ -f "${body_captured}" ]]; then
+      captured_body="$(cat "${body_captured}")"
+    fi
+
+    # event_type
+    assert_contains "SC-37.${idx}: body has event_type" "${captured_body}" "cursor-report-received"
+
+    # client_payload is JSON object
+    local cp_type
+    cp_type="$(echo "${captured_body}" | python3 -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+    cp = body.get("client_payload")
+    if isinstance(cp, dict):
+        print("object")
+    elif isinstance(cp, str):
+        print("string")
+    else:
+        print("none")
+except Exception:
+    print("error")
+' 2>/dev/null || echo 'error')"
+    assert_eq "SC-37.${idx}: client_payload is JSON object" "object" "${cp_type}"
+
+    # module_id present
+    local module_id_val
+    module_id_val="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+print(body.get("client_payload", {}).get("module_id", "__MISSING__"))
+' 2>/dev/null || echo 'error')"
+    assert_eq "SC-37.${idx}: module_id = governance-control-plane" "governance-control-plane" "${module_id_val}"
+
+    # branch absent
+    local branch_absent
+    branch_absent="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+print("ABSENT" if "branch" not in body.get("client_payload", {}) else "PRESENT")
+' 2>/dev/null || echo 'error')"
+    assert_eq "SC-37.${idx}: branch omitted" "ABSENT" "${branch_absent}"
+
+    # Property count <= 10
+    local prop_count
+    prop_count="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+cp = body.get("client_payload", {})
+print(len(cp))
+' 2>/dev/null || echo 'error')"
+    assert_eq "SC-37.${idx}: property count <= 10" "10" "${prop_count}"
+
+    # Verify task_id matches
+    local task_id_val
+    task_id_val="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+print(body.get("client_payload", {}).get("task_id", ""))
+' 2>/dev/null || echo 'error')"
+    local expected_task_id
+    expected_task_id="$(echo "${input_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])' 2>/dev/null || echo 'error')"
+    assert_eq "SC-37.${idx}: task_id matches" "${expected_task_id}" "${task_id_val}"
+  done
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
 # SC-27 through SC-31: Review Packet Schema Validation Tests
 # ============================================================================
 
@@ -1728,6 +2037,9 @@ test_dispatch_ack_timeout
 test_completion_evidence_content
 test_dispatch_body_validation
 test_ack_recent_commits_scan
+test_dispatch_with_module_id
+test_dispatch_without_module_id
+test_dispatch_module_id_examples
 
 # Review Packet Schema Validation Tests (TASK-CICD-REVIEW-PACKET-SCHEMA-001)
 test_rp_schema_valid_minimal
