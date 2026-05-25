@@ -196,3 +196,23 @@ The report must explicitly say which other repo windows are unlocked for paralle
 - [ ] Linked to TASK-XXXX
 - [ ] Reusable workflow created/updated where possible
 - [ ] Impact on all dependent repositories evaluated
+
+# LiveMask Shared Docs Submodule
+<!-- livemask-docs-submodule:start -->
+This repository must keep `livemask-docs` mounted as the `.livemask-docs` git submodule.
+
+Before starting any TASK, Cursor must read the repo-local `.cursorrules` and the shared docs entrypoints:
+
+- `.livemask-docs/docs/development/AI_PROJECT_STATUS_ONBOARDING.md`
+- `.livemask-docs/docs/development/CODEX_TASK_DISPATCHER_ROLE.md`
+- `.livemask-docs/docs/development/CURSOR_TASK_BRIEF_TEMPLATE.md`
+- `.livemask-docs/docs/contracts/automation/CURSOR_SDK_WORKER_AUTOMATION_CONTRACT.md`
+
+Default execution mode is `implement-for-review`:
+
+- Cursor may create `task/<TASK_ID>` branches, edit files, run validation, and produce a review packet.
+- Cursor must not commit, merge to `dev`, push `origin/dev`, dispatch a completed report, or close issues/tasks unless a Codex approval artifact is present.
+- Codex owns code review, approval/rejection, final completion classification, docs ledger updates, and issue/task closure.
+
+If local repo rules conflict with `.livemask-docs`, stop and ask Codex for review before continuing.
+<!-- livemask-docs-submodule:end -->
