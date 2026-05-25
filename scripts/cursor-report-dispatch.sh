@@ -35,7 +35,7 @@ if [[ "${1:-}" == "--input" && "${2:-}" == "-" ]]; then
   eval "$(echo "${INPUT_JSON}" | python3 -c '
 import json, sys, shlex
 obj = json.load(sys.stdin)
-for k in ("task_id","result","repo","branch","commit","task_branch","task_commit","dev_merge_commit","validation"):
+for k in ("task_id","result","repo","branch","commit","task_branch","task_commit","dev_merge_commit","validation","module_id"):
     v = obj.get(k, "")
     print(f"FD_{k}={shlex.quote(str(v))}")
 ')"
@@ -48,13 +48,14 @@ for k in ("task_id","result","repo","branch","commit","task_branch","task_commit
   TASK_COMMIT="${FD_task_commit}"
   DEV_MERGE_COMMIT="${FD_dev_merge_commit}"
   VALIDATION="${FD_validation}"
+  MODULE_ID="${FD_module_id}"
 else
   PARSED_ARGS=$(getopt -o '' \
-    --long task-id:,result:,repo:,branch:,commit:,task-branch:,task-commit:,dev-merge-commit:,validation: \
+    --long task-id:,result:,repo:,branch:,commit:,task-branch:,task-commit:,dev-merge-commit:,validation:,module-id: \
     -n 'cursor-report-dispatch' -- "$@")
   eval set -- "${PARSED_ARGS}"
   TASK_ID=""; RESULT=""; REPO=""; BRANCH=""; COMMIT=""
-  TASK_BRANCH=""; TASK_COMMIT=""; DEV_MERGE_COMMIT=""; VALIDATION=""
+  TASK_BRANCH=""; TASK_COMMIT=""; DEV_MERGE_COMMIT=""; VALIDATION=""; MODULE_ID=""
   while true; do
     case "$1" in
       --task-id) TASK_ID="$2"; shift 2 ;;
@@ -66,6 +67,7 @@ else
       --task-commit) TASK_COMMIT="$2"; shift 2 ;;
       --dev-merge-commit) DEV_MERGE_COMMIT="$2"; shift 2 ;;
       --validation) VALIDATION="$2"; shift 2 ;;
+      --module-id) MODULE_ID="$2"; shift 2 ;;
       --) shift; break ;;
       *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -99,15 +101,16 @@ BODY=$(CR_DISPATCH_TASK_ID="${TASK_ID}" \
   CR_DISPATCH_TASK_COMMIT="${TASK_COMMIT}" \
   CR_DISPATCH_DEV_MERGE_COMMIT="${DEV_MERGE_COMMIT}" \
   CR_DISPATCH_VALIDATION="${VALIDATION}" \
+  CR_DISPATCH_MODULE_ID="${MODULE_ID}" \
   python3 -c '
 import json, os, datetime
 
 client_payload = {
     # Keep ≤ 10 properties (GitHub repository_dispatch API limit).
+    # When module_id is provided, omit "branch" to stay within the limit.
     "task_id": os.environ.get("CR_DISPATCH_TASK_ID", ""),
     "result": os.environ.get("CR_DISPATCH_RESULT", "completed"),
     "repo": os.environ.get("CR_DISPATCH_REPO", ""),
-    "branch": os.environ.get("CR_DISPATCH_BRANCH", ""),
     "commit": os.environ.get("CR_DISPATCH_COMMIT", ""),
     "task_branch": os.environ.get("CR_DISPATCH_TASK_BRANCH", ""),
     "task_commit": os.environ.get("CR_DISPATCH_TASK_COMMIT", ""),
@@ -115,6 +118,12 @@ client_payload = {
     "validation": os.environ.get("CR_DISPATCH_VALIDATION", ""),
     "completion_time": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
+module_id = os.environ.get("CR_DISPATCH_MODULE_ID", "")
+if module_id:
+    client_payload["module_id"] = module_id
+else:
+    # When module_id is not provided, include branch for backward compatibility.
+    client_payload["branch"] = os.environ.get("CR_DISPATCH_BRANCH", "")
 body = {
     "event_type": "cursor-report-received",
     "client_payload": client_payload,

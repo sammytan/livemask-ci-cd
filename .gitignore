@@ -8,3 +8,5 @@ infra/_build_deps/
 infra/.next/
 __pycache__/
 *.pyc
+# Worker harness generated artifacts
+.cursor-worker/
