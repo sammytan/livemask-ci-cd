@@ -489,15 +489,15 @@ else
 fi
 
 echo ""
-# ── Growth Revenue & Reward Notification Smoke (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001) ──
+# ── Growth Revenue & Reward Notification & User Profile Growth Fields Smoke (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001 / TASK-CICD-USER-PROFILE-GROWTH-FIELDS-SMOKE-001) ──
 echo ""
-echo "=== Smoke: Growth Revenue & Reward Notification (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001) ==="
+echo "=== Smoke: Growth Revenue & Reward Notification & User Profile Growth Fields (TASK-CICD-USER-GROWTH-REVENUE-001 / TASK-CICD-GROWTH-REWARD-NOTIFICATION-001 / TASK-CICD-USER-PROFILE-GROWTH-FIELDS-SMOKE-001) ==="
 if bash "${SCRIPT_DIR}/growth-revenue-smoke.sh" 2>&1; then
   echo "Growth revenue & reward notification smoke PASSED."
 else
   growth_rc=$?
   echo ""
-  echo "=== Growth Revenue & Reward Notification Smoke FAILED ==="
+  echo "=== Growth Revenue & Reward Notification & User Profile Growth Fields Smoke FAILED ==="
   echo "--- docker compose ps ---"
   docker compose -f "${COMPOSE_FILE}" ps 2>/dev/null || true
   echo "--- docker compose logs backend (last 100) ---"
