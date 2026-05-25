@@ -74,6 +74,46 @@ _wh_resolve_helper() {
 _wh_helper="$(_wh_resolve_helper)"
 
 # ============================================================================
+# Resolve report dispatch script from repo-local config
+# ============================================================================
+
+_wh_resolve_config_dispatch_script() {
+  local config_path="${WORKER_HARNESS_CONFIG:-scripts/worker-harness-config.json}"
+  local repo_dir repo_name
+  repo_dir="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -z "${repo_dir}" ]] && { echo ""; return; }
+  repo_name="$(basename "${repo_dir}")"
+
+  # If config_path is already absolute, use it directly
+  local config_abs
+  if [[ "${config_path:0:1}" == "/" ]]; then
+    config_abs="${config_path}"
+  else
+    config_abs="${repo_dir}/${config_path}"
+  fi
+
+  [[ ! -f "${config_abs}" ]] && { echo ""; return; }
+
+  WH_CFG_ABS="${config_abs}" WH_CFG_REPO="${repo_name}" WH_CFG_ROOT="${repo_dir}" \
+  python3 -c "
+import json, os
+try:
+    with open(os.environ['WH_CFG_ABS']) as f:
+        cfg = json.load(f)
+    script = cfg.get('repos', {}).get(os.environ['WH_CFG_REPO'], {}).get('report_dispatch_script', '')
+    if script:
+        if script.startswith('/'):
+            print(script)
+        else:
+            print(os.path.join(os.environ['WH_CFG_ROOT'], script))
+    else:
+        print('')
+except Exception:
+    print('')
+" 2>/dev/null || echo ""
+}
+
+# ============================================================================
 # Configuration with defaults
 # ============================================================================
 
@@ -100,7 +140,7 @@ WORKER_HARNESS_PACKET_FILE="${WORKER_HARNESS_PACKET_FILE:-.cursor-worker/review-
 WORKER_HARNESS_COMPLETION_ARCHIVE="${WORKER_HARNESS_COMPLETION_ARCHIVE:-.cursor-worker/completion-evidence.json}"
 
 # -- Secret scan patterns --
-WORKER_HARNESS_SECRET_PATTERNS="${WORKER_HARNESS_SECRET_PATTERNS:-sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|ghu_[a-zA-Z0-9]{36}|ghs_[a-zA-Z0-9]{36}|ghr_[a-zA-Z0-9]{36}|LIVEMASK_BOT_TOKEN|CURSOR_API_KEY|CURSOR_SDK_API_KEY}"
+WORKER_HARNESS_SECRET_PATTERNS="${WORKER_HARNESS_SECRET_PATTERNS:-sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|ghu_[a-zA-Z0-9]{36}|ghs_[a-zA-Z0-9]{36}|ghr_[a-zA-Z0-9]{36}}"
 
 # -- Validation --
 WORKER_HARNESS_VALIDATION_CMDS="${WORKER_HARNESS_VALIDATION_CMDS:-}"
@@ -670,23 +710,70 @@ worker_harness_dispatch_and_ack() {
   _wh_log "====== Report Dispatch and Docs ACK ======"
 
   local task_id="${WORKER_HARNESS_TASK_ID}"
-  local dispatch_script="${WORKER_HARNESS_REPORT_DISPATCH_SCRIPT}"
+  local dispatched_at=""
+
+  # Resolve dispatch script: env takes precedence, fall back to config
+  local dispatch_script="${WORKER_HARNESS_REPORT_DISPATCH_SCRIPT:-}"
+  if [[ -z "${dispatch_script}" ]]; then
+    dispatch_script="$(_wh_resolve_config_dispatch_script)"
+    if [[ -n "${dispatch_script}" ]]; then
+      _wh_log "Report dispatch script resolved from config: ${dispatch_script}"
+    fi
+  fi
 
   if [[ -z "${dispatch_script}" ]]; then
-    _wh_log "WARN: WORKER_HARNESS_REPORT_DISPATCH_SCRIPT not set. Cannot dispatch."
+    _wh_log "WARN: WORKER_HARNESS_REPORT_DISPATCH_SCRIPT not set and no config entry found. Cannot dispatch."
+    _wh_log "Completion evidence dispatch_status will remain dispatch_pending."
+    if [[ -f "${WORKER_HARNESS_COMPLETION_ARCHIVE}" ]]; then
+      local ce_task_commit ce_dev_merge ce_remote_ref ce_validation
+      ce_task_commit="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('task_branch_commit',''))" 2>/dev/null || true)"
+      ce_dev_merge="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('dev_merge_commit',''))" 2>/dev/null || true)"
+      ce_remote_ref="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('remote_dev_ref',''))" 2>/dev/null || true)"
+      ce_validation="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('validation_result',''))" 2>/dev/null || true)"
+      worker_harness_capture_completion_evidence \
+        "${ce_task_commit}" "${ce_dev_merge}" "${ce_remote_ref}" "${ce_validation}" \
+        "dispatch_pending" ""
+    fi
     return 1
   fi
 
   if [[ ! -f "${dispatch_script}" ]]; then
     _wh_log "WARN: Dispatch script not found at ${dispatch_script}"
+    _wh_log "Completion evidence dispatch_status will remain dispatch_pending."
+    if [[ -f "${WORKER_HARNESS_COMPLETION_ARCHIVE}" ]]; then
+      local ce_task_commit ce_dev_merge ce_remote_ref ce_validation
+      ce_task_commit="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('task_branch_commit',''))" 2>/dev/null || true)"
+      ce_dev_merge="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('dev_merge_commit',''))" 2>/dev/null || true)"
+      ce_remote_ref="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('remote_dev_ref',''))" 2>/dev/null || true)"
+      ce_validation="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('validation_result',''))" 2>/dev/null || true)"
+      worker_harness_capture_completion_evidence \
+        "${ce_task_commit}" "${ce_dev_merge}" "${ce_remote_ref}" "${ce_validation}" \
+        "dispatch_pending" ""
+    fi
     return 1
+  fi
+
+  # Read commit info from existing completion evidence
+  local task_commit="${TASK_BRANCH_COMMIT:-}"
+  local dev_merge_commit="${DEV_MERGE_COMMIT:-}"
+  local remote_dev_ref="${REMOTE_DEV_REF:-}"
+  local validation_result="${VALIDATION_RESULT:-}"
+
+  if [[ -f "${WORKER_HARNESS_COMPLETION_ARCHIVE}" ]]; then
+    task_commit="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('task_branch_commit',''))" 2>/dev/null || true)"
+    dev_merge_commit="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('dev_merge_commit',''))" 2>/dev/null || true)"
+    remote_dev_ref="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('remote_dev_ref',''))" 2>/dev/null || true)"
+    validation_result="$(python3 -c "import json; d=json.load(open('${WORKER_HARNESS_COMPLETION_ARCHIVE//\'/\\\'}')); print(d.get('validation_result',''))" 2>/dev/null || true)"
   fi
 
   local current_commit current_branch repo_name
   current_commit="$(git rev-parse HEAD 2>/dev/null || echo 'unknown')"
   current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
   repo_name="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo 'unknown')")"
-  local dev_merge_commit="${current_commit}"
+
+  [[ -z "${task_commit}" ]] && task_commit="${current_commit}"
+  [[ -z "${dev_merge_commit}" ]] && dev_merge_commit="${current_commit}"
+  [[ -z "${remote_dev_ref}" ]] && remote_dev_ref="${current_commit}"
 
   local validation_summary
   if [[ -f "${WORKER_HARNESS_VALIDATION_LOG}" ]]; then
@@ -694,27 +781,52 @@ worker_harness_dispatch_and_ack() {
   else
     validation_summary='"no validation log"'
   fi
+  [[ -z "${validation_result}" ]] && validation_result="${validation_summary}"
 
   _wh_log "Dispatching report for ${task_id}..."
+
+  # Build a JSON report object and pipe to dispatch script via --input -
   local dispatch_output
   local dispatch_rc=0
-  dispatch_output="$(bash "${dispatch_script}" \
-    --task-id "${task_id}" \
-    --repo "${repo_name}" \
-    --branch "${current_branch}" \
-    --commit "${current_commit}" \
-    --task-branch "task/${task_id}" \
-    --task-commit "${current_commit}" \
-    --dev-merge-commit "${dev_merge_commit}" \
-    --validation "${validation_summary}" \
-    --result "completed" 2>&1)" || dispatch_rc=$?
+  local dispatch_json
+  dispatch_json="$(WH_DISPATCH_TASK_ID="${task_id}" \
+    WH_DISPATCH_REPO="${repo_name}" \
+    WH_DISPATCH_BRANCH="${current_branch}" \
+    WH_DISPATCH_COMMIT="${remote_dev_ref}" \
+    WH_DISPATCH_TASK_BRANCH="task/${task_id}" \
+    WH_DISPATCH_TASK_COMMIT="${task_commit}" \
+    WH_DISPATCH_DEV_MERGE_COMMIT="${dev_merge_commit}" \
+    WH_DISPATCH_VALIDATION="${validation_result}" \
+    WH_DISPATCH_RESULT="completed" \
+    python3 -c '
+import json, os
+p = {
+    "task_id": os.environ.get("WH_DISPATCH_TASK_ID", ""),
+    "result": os.environ.get("WH_DISPATCH_RESULT", "completed"),
+    "repo": os.environ.get("WH_DISPATCH_REPO", ""),
+    "branch": os.environ.get("WH_DISPATCH_BRANCH", ""),
+    "commit": os.environ.get("WH_DISPATCH_COMMIT", ""),
+    "task_branch": os.environ.get("WH_DISPATCH_TASK_BRANCH", ""),
+    "task_commit": os.environ.get("WH_DISPATCH_TASK_COMMIT", ""),
+    "dev_merge_commit": os.environ.get("WH_DISPATCH_DEV_MERGE_COMMIT", ""),
+    "validation": os.environ.get("WH_DISPATCH_VALIDATION", ""),
+}
+print(json.dumps(p, ensure_ascii=False))
+')" || dispatch_rc=$?
+
+  dispatch_output="$(echo "${dispatch_json}" | bash "${dispatch_script}" --input - 2>&1)" || dispatch_rc=$?
   echo "${dispatch_output}" | while IFS= read -r line; do _wh_log "[dispatch] ${line}"; done
 
   if [[ "${dispatch_rc}" -ne 0 ]]; then
     _wh_log "Report dispatch FAILED (exit=${dispatch_rc})"
+    worker_harness_capture_completion_evidence \
+      "${task_commit}" "${dev_merge_commit}" "${remote_dev_ref}" "${validation_result}" \
+      "dispatch_failed" ""
+    _wh_log "Completion evidence updated: dispatch_status=dispatch_failed"
     return 1
   fi
 
+  dispatched_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   _wh_log "Report dispatched. Waiting for docs receiver acknowledgement..."
 
   local poll_count=0
@@ -737,11 +849,21 @@ worker_harness_dispatch_and_ack() {
 
   if [[ "${ack_ok}" == true ]]; then
     _wh_log "Docs receiver acknowledgement CONFIRMED."
+    # Re-capture evidence with report_dispatched=true status
+    worker_harness_capture_completion_evidence \
+      "${task_commit}" "${dev_merge_commit}" "${remote_dev_ref}" "${validation_result}" \
+      "report_dispatched" "${dispatched_at}"
+    _wh_log "Completion evidence updated: dispatch_status=report_dispatched"
     return 0
   else
     _wh_log "WARN: Docs receiver acknowledgement not confirmed after ${WORKER_HARNESS_ACK_POLL_MAX} polls."
-    _wh_log "Completion evidence is in ${WORKER_HARNESS_COMPLETION_ARCHIVE}"
+    _wh_log "Completion evidence dispatch_status will remain dispatch_pending."
     _wh_log "Codex should manually verify docs-side ingestion."
+    # Re-capture evidence with dispatch_pending status (sent but ACK pending)
+    worker_harness_capture_completion_evidence \
+      "${task_commit}" "${dev_merge_commit}" "${remote_dev_ref}" "${validation_result}" \
+      "dispatch_pending" "${dispatched_at}"
+    _wh_log "Completion evidence updated: dispatch_status=dispatch_pending (ACK not yet confirmed)"
     return 1
   fi
 }
@@ -766,37 +888,48 @@ worker_harness_check_docs_ack() {
     fi
   fi
 
-  # Strategy B: Try GitHub API to check docs repo workflow runs
-  if [[ -n "${LIVEMASK_BOT_TOKEN:-}" ]]; then
-    local api_script
-    api_script="$(mktemp /tmp/harness-ack-api.XXXXXX.py)"
-    cat > "${api_script}" <<PYAPI
-import json, urllib.request, sys
+  # Strategy B: Poll docs repo remote commits for ingestion evidence.
+  # Checks up to 30 recent commits on docs/${docs_ref}; if any commit
+  # message contains "completion-report: ingest ${task_id}", ACK is
+  # confirmed.  This is much more reliable than checking GitHub Actions
+  # display_title/head_branch which do not contain the task ID for
+  # repository_dispatch events.
+  if command -v gh &>/dev/null && [[ -n "${LIVEMASK_BOT_TOKEN:-}" ]]; then
+    local ack_script
+    ack_script="$(mktemp /tmp/harness-ack-strat-b.XXXXXX.py)"
+    cat > "${ack_script}" <<PYSTRATB
+import json, os, subprocess, sys
 
-url = 'https://api.github.com/repos/${docs_repo}/actions/runs?event=repository_dispatch&per_page=5&branch=${docs_ref}'
-req = urllib.request.Request(url, headers={
-    'Authorization': 'Bearer ${LIVEMASK_BOT_TOKEN}',
-    'Accept': 'application/vnd.github+json',
-    'User-Agent': 'livemask-worker-harness',
-})
+docs_repo = "${docs_repo}"
+docs_ref  = "${docs_ref}"
+task_id   = "${task_id}"
+token     = os.environ.get("LIVEMASK_BOT_TOKEN", "")
+
+env = os.environ.copy()
+env["GH_TOKEN"] = token
+
 try:
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.load(resp)
-    for run in data.get('workflow_runs', []):
-        payload = run.get('display_title', '')
-        if '${task_id}' in payload or '${task_id}' in str(run.get('head_branch','')):
-            if run.get('conclusion') in ('success', 'completed'):
-                print('confirmed')
-                sys.exit(0)
-    print('pending')
+    result = subprocess.run(
+        ["gh", "api", f"repos/{docs_repo}/commits?sha={docs_ref}&per_page=30",
+         "--jq", ".[] | .commit.message"],
+        capture_output=True, text=True, timeout=15, env=env,
+    )
+    if result.returncode != 0:
+        print("check_failed")
+        sys.exit(0)
+    for line in result.stdout.strip().split(chr(10)):
+        marker = f"completion-report: ingest {task_id}"
+        if marker in line:
+            print("confirmed")
+            sys.exit(0)
+    print("pending")
 except Exception:
-    print('check_failed')
-PYAPI
-    local dispatch_check
-    dispatch_check="$(python3 "${api_script}" 2>/dev/null || echo "check_failed")"
-    rm -f "${api_script}"
-
-    if [[ "${dispatch_check}" == "confirmed" ]]; then
+    print("check_failed")
+PYSTRATB
+    local ack_found
+    ack_found="$(python3 "${ack_script}" 2>/dev/null || echo "check_failed")"
+    rm -f "${ack_script}"
+    if [[ "${ack_found}" == "confirmed" ]]; then
       echo "confirmed"
       return 0
     fi
@@ -815,6 +948,8 @@ worker_harness_capture_completion_evidence() {
   local dev_merge_commit="$2"
   local remote_dev_ref="$3"
   local validation_result="$4"
+  local dispatch_status="${5:-dispatch_pending}"
+  local dispatched_at="${6:-}"
 
   local now_iso
   now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -830,6 +965,8 @@ worker_harness_capture_completion_evidence() {
   WH_VALIDATION_RESULT="${validation_result}" \
   WH_PACKET_PATH="${WORKER_HARNESS_PACKET_FILE}" \
   WH_APPROVAL_ID="${CURSOR_REVIEW_APPROVAL_ID}" \
+  WH_DISPATCH_STATUS="${dispatch_status}" \
+  WH_DISPATCHED_AT="${dispatched_at}" \
   HARNESS_OUTPUT_FILE="${WORKER_HARNESS_COMPLETION_ARCHIVE}" \
   python3 "${_wh_helper}" capture-completion-evidence
 

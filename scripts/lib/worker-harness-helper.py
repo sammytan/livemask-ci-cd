@@ -229,7 +229,8 @@ def cmd_capture_completion_evidence() -> None:
         "validation_result": os.environ.get("WH_VALIDATION_RESULT", ""),
         "review_packet_path": os.environ.get("WH_PACKET_PATH", ""),
         "completion_time": os.environ.get("WH_NOW_ISO", ""),
-        "docs_receiver_ack": "pending",
+        "dispatch_status": os.environ.get("WH_DISPATCH_STATUS", "dispatch_pending"),
+        "dispatched_at": os.environ.get("WH_DISPATCHED_AT", ""),
         "codex_approval_id": os.environ.get("WH_APPROVAL_ID", ""),
     }
     write_output(evidence)

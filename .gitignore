@@ -6,3 +6,5 @@ infra/env/*.env
 infra/_build_deps/
 # Build artifacts
 infra/.next/
+__pycache__/
+*.pyc

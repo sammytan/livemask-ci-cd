@@ -27,6 +27,23 @@
 #   SC-14  fake ACK via listener state: receiver-produced ack artifact accepted
 #   SC-15  boundary violation: ../livemask-docs edit detected
 #   SC-16  dirty submodule state: stopped before commit
+#   SC-17  positive approval cycle: review -> approve -> gate PASS
+#   SC-18  untracked source file: stopped before commit
+#   SC-19  invalid approval (no commit permission): pre-commit gate reject
+#   SC-20  dirty submodule: stopped before commit
+#   SC-21  dispatch configured (env) + fake dispatch success + ACK via listener
+#   SC-21b dispatch configured (config) without env var + ACK success
+#   SC-22  dispatch not configured: dispatch_and_ack returns 1,
+#          evidence shows dispatch_pending
+#   SC-23  dispatch sent but ACK timeout: dispatch_and_ack returns 1,
+#          evidence shows dispatch_pending (ACK not confirmed)
+#   SC-24  completion evidence content: all required fields present
+#          (task_branch_commit, dev_merge_commit, remote_dev_ref, dispatch_status)
+#   SC-25  dispatch script body validation: fake gh captures full body,
+#          asserts event_type==cursor-report-received, client_payload
+#          is JSON object (not string), and contains required fields
+#   SC-26  ACK commit scan: recent commits contain task in message but not
+#          latest; fake gh confirms ACK via Strategy B
 #
 
 set -euo pipefail
@@ -134,6 +151,7 @@ setup_sandbox() {
   git add -A
   git commit -m "initial commit on dev" --no-gpg-sign
 
+  unset LIVEMASK_BOT_TOKEN
   export WORKER_HARNESS_TASK_ID="TASK-SMOKE-FAKE-001"
   export WORKER_HARNESS_VALIDATION_CMDS="true"
   export WORKER_HARNESS_SECRET_PATTERNS="NONE_USED_IN_SMOKE"
@@ -982,6 +1000,554 @@ test_dirty_submodule_gate() {
 }
 
 # ============================================================================
+# SC-21: Dispatch configured + fake dispatch success + ACK via listener
+# ============================================================================
+
+test_dispatch_configured_and_ack() {
+  echo ""
+  echo "=== SC-21: dispatch configured + fake dispatch success + ACK via listener ==="
+  setup_sandbox
+  export CURSOR_WORKER_MODE="implement-for-review"
+  export WORKER_HARNESS_VALIDATION_CMDS="true"
+
+  cd "${SANDBOX}"
+  git checkout -b "task/TASK-SMOKE-FAKE-001"
+
+  # Create a fake dispatch script that accepts --input - and succeeds
+  cat > "${SANDBOX}/fake-dispatch.sh" <<'DISPATCH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--input" && "${2:-}" == "-" ]]; then
+  cat > /dev/null
+fi
+echo "Fake dispatch: success"
+exit 0
+DISPATCH
+  chmod +x "${SANDBOX}/fake-dispatch.sh"
+  export WORKER_HARNESS_REPORT_DISPATCH_SCRIPT="${SANDBOX}/fake-dispatch.sh"
+
+  # Make a staged change and run review gate
+  echo "# Dispatch test feature" > feature-dispatch.txt
+  git add feature-dispatch.txt
+  source "${HARNESS_LIB}" 2>/dev/null
+  worker_harness_init 2>&1
+  worker_harness_run_review_gate "dispatch feature" "none" "true" 2>&1
+
+  local head rp_sha diff_sha repo_name
+  head="$(git rev-parse HEAD)"
+  rp_sha="$(python3 -c "import hashlib; print(hashlib.sha256(open('.cursor-worker/review-packet.json','rb').read()).hexdigest())" 2>/dev/null || true)"
+  diff_sha="$(python3 -c "import hashlib; print(hashlib.sha256(open('.cursor-worker/latest.diff','rb').read()).hexdigest())" 2>/dev/null || true)"
+  repo_name="$(basename "$(git rev-parse --show-toplevel)")"
+  create_valid_approval "approval-smoke-021" "TASK-SMOKE-FAKE-001" "${repo_name}" "task/TASK-SMOKE-FAKE-001" "${head}" "${rp_sha}" "${diff_sha}"
+  export CURSOR_REVIEW_APPROVAL_ID="approval-smoke-021"
+
+  # Commit and capture completion evidence
+  git add -A
+  git commit -m "TASK-SMOKE-FAKE-001: dispatch test" --no-gpg-sign > /dev/null 2>&1
+  local task_commit
+  task_commit="$(git rev-parse HEAD)"
+
+  # Simulate dev-merge commit and push
+  git checkout dev
+  git merge "task/TASK-SMOKE-FAKE-001" --no-edit --no-gpg-sign > /dev/null 2>&1
+  local dev_merge_commit
+  dev_merge_commit="$(git rev-parse HEAD)"
+  local remote_dev_ref="${dev_merge_commit}"
+
+  # Capture initial completion evidence
+  worker_harness_capture_completion_evidence \
+    "${task_commit}" "${dev_merge_commit}" "${remote_dev_ref}" \
+    '{"ok":true}' "dispatch_pending" ""
+
+  # Create the listener state artifact for ACK
+  mkdir -p .cursor-worker/review-packets
+  cat > .cursor-worker/review-packets/docs-listener-state.json <<'ARTIFACT'
+{
+  "reported_task_ids": ["TASK-SMOKE-FAKE-001"]
+}
+ARTIFACT
+
+  # Now call dispatch_and_ack — it should succeed (dispatch sends, ACK via listener)
+  local exit_code=0
+  local da_output
+  da_output="$(
+    source "${HARNESS_LIB}" 2>/dev/null
+    set +e
+    CURSOR_WORKER_MODE="approved-submit"
+    worker_harness_init 2>&1
+    worker_harness_dispatch_and_ack 2>&1
+  )" || exit_code=$?
+
+  assert_eq "SC-21: dispatch_and_ack exits 0" "0" "${exit_code}"
+  assert_contains "SC-21: dispatch confirmed" "${da_output}" "ACK: confirmed"
+
+  # Verify completion evidence shows report_dispatched
+  local evidence
+  evidence="$(cat "${SANDBOX}/.cursor-worker/completion-evidence.json" 2>/dev/null || true)"
+  assert_contains "SC-21: evidence has task_branch_commit" "${evidence}" "task_branch_commit"
+  assert_contains "SC-21: evidence has dev_merge_commit" "${evidence}" "dev_merge_commit"
+  assert_contains "SC-21: evidence has remote_dev_ref" "${evidence}" "remote_dev_ref"
+  assert_contains "SC-21: evidence dispatch_status=report_dispatched" "${evidence}" "report_dispatched"
+  assert_contains "SC-21: evidence has dispatched_at" "${evidence}" "dispatched_at"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-21b: Dispatch via config (no env var) + ACK via listener
+# ============================================================================
+
+test_dispatch_config_based() {
+  echo ""
+  echo "=== SC-21b: dispatch via config (no env var) + ACK via listener ==="
+  setup_sandbox
+  export CURSOR_WORKER_MODE="implement-for-review"
+  export WORKER_HARNESS_VALIDATION_CMDS="true"
+
+  cd "${SANDBOX}"
+  git checkout -b "task/TASK-SMOKE-FAKE-001"
+
+  # Create a fake dispatch script — rely on worker-harness-config.json
+  cat > "${SANDBOX}/fake-config-dispatch.sh" <<'DISPATCH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--input" && "${2:-}" == "-" ]]; then
+  cat > /dev/null
+fi
+echo "Fake config dispatch: success"
+exit 0
+DISPATCH
+  chmod +x "${SANDBOX}/fake-config-dispatch.sh"
+
+  # Write a worker-harness-config.json for the sandbox repo
+  local repo_name
+  repo_name="$(basename "$(git rev-parse --show-toplevel)")"
+  mkdir -p scripts
+  cat > scripts/worker-harness-config.json <<CONFIG
+{
+  "schema_version": 1,
+  "repos": {
+    "${repo_name}": {
+      "report_dispatch_script": "${SANDBOX}/fake-config-dispatch.sh"
+    }
+  }
+}
+CONFIG
+  export WORKER_HARNESS_CONFIG="${SANDBOX}/scripts/worker-harness-config.json"
+  # Ensure env var is unset so harness falls back to config
+  unset WORKER_HARNESS_REPORT_DISPATCH_SCRIPT
+
+  # Make a staged change and run review gate
+  echo "# Config dispatch test" > feature-config-dispatch.txt
+  git add feature-config-dispatch.txt
+  source "${HARNESS_LIB}" 2>/dev/null
+  worker_harness_init 2>&1
+  worker_harness_run_review_gate "config dispatch feature" "none" "true" 2>&1
+
+  local head rp_sha diff_sha
+  head="$(git rev-parse HEAD)"
+  rp_sha="$(python3 -c "import hashlib; print(hashlib.sha256(open('.cursor-worker/review-packet.json','rb').read()).hexdigest())" 2>/dev/null || true)"
+  diff_sha="$(python3 -c "import hashlib; print(hashlib.sha256(open('.cursor-worker/latest.diff','rb').read()).hexdigest())" 2>/dev/null || true)"
+  create_valid_approval "approval-smoke-021b" "TASK-SMOKE-FAKE-001" "${repo_name}" "task/TASK-SMOKE-FAKE-001" "${head}" "${rp_sha}" "${diff_sha}"
+  export CURSOR_REVIEW_APPROVAL_ID="approval-smoke-021b"
+
+  # Commit and capture completion evidence
+  git add -A
+  git commit -m "TASK-SMOKE-FAKE-001: config dispatch test" --no-gpg-sign > /dev/null 2>&1
+  local task_commit
+  task_commit="$(git rev-parse HEAD)"
+
+  # Simulate dev-merge
+  git checkout dev
+  git merge "task/TASK-SMOKE-FAKE-001" --no-edit --no-gpg-sign > /dev/null 2>&1
+  local dev_merge_commit
+  dev_merge_commit="$(git rev-parse HEAD)"
+  local remote_dev_ref="${dev_merge_commit}"
+
+  worker_harness_capture_completion_evidence \
+    "${task_commit}" "${dev_merge_commit}" "${remote_dev_ref}" \
+    '{"ok":true}' "dispatch_pending" ""
+
+  # Create listener state for ACK
+  mkdir -p .cursor-worker/review-packets
+  cat > .cursor-worker/review-packets/docs-listener-state.json <<'ARTIFACT'
+{
+  "reported_task_ids": ["TASK-SMOKE-FAKE-001"]
+}
+ARTIFACT
+
+  # Call dispatch_and_ack — no env var set, should read from config
+  local exit_code=0
+  local da_output
+  da_output="$(
+    source "${HARNESS_LIB}" 2>/dev/null
+    set +e
+    CURSOR_WORKER_MODE="approved-submit"
+    worker_harness_init 2>&1
+    worker_harness_dispatch_and_ack 2>&1
+  )" || exit_code=$?
+
+  assert_eq "SC-21b: dispatch_and_ack exits 0" "0" "${exit_code}"
+  assert_contains "SC-21b: dispatch script resolved from config" "${da_output}" "config"
+  assert_contains "SC-21b: ACK confirmed" "${da_output}" "ACK: confirmed"
+
+  local evidence
+  evidence="$(cat "${SANDBOX}/.cursor-worker/completion-evidence.json" 2>/dev/null || true)"
+  assert_contains "SC-21b: evidence dispatch_status=report_dispatched" "${evidence}" "report_dispatched"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-22: Dispatch not configured -> dispatch_pending evidence
+# ============================================================================
+
+test_dispatch_not_configured() {
+  echo ""
+  echo "=== SC-22: dispatch not configured -> dispatch_pending evidence ==="
+  setup_sandbox
+  export CURSOR_WORKER_MODE="approved-submit"
+  export CURSOR_REVIEW_APPROVAL_ID="approval-smoke-022"
+
+  cd "${SANDBOX}"
+  git checkout -b "task/TASK-SMOKE-FAKE-001"
+
+  # Unset dispatch script (default blank)
+  unset WORKER_HARNESS_REPORT_DISPATCH_SCRIPT
+
+  # Create a fake completion evidence so dispatch_and_ack can read commit info
+  mkdir -p .cursor-worker
+  local head
+  head="$(git rev-parse HEAD)"
+  cat > .cursor-worker/completion-evidence.json <<EVIDENCE
+{
+  "task_branch_commit": "${head}",
+  "dev_merge_commit": "${head}",
+  "remote_dev_ref": "${head}",
+  "validation_result": "{\"ok\":true}",
+  "dispatch_status": "dispatch_pending"
+}
+EVIDENCE
+
+  local exit_code=0
+  local output
+  output="$(
+    cd "${SANDBOX}"
+    source "${HARNESS_LIB}" > /dev/null 2>&1
+    set +e
+    worker_harness_init 2>&1
+    worker_harness_dispatch_and_ack 2>&1
+  )" || exit_code=$?
+
+  assert_eq "SC-22: dispatch_and_ack returns 1" "1" "${exit_code}"
+  assert_contains "SC-22: dispatch_script not set warning" "${output}" "not set"
+
+  # Verify evidence preserved with dispatch_pending
+  local evidence
+  evidence="$(cat "${SANDBOX}/.cursor-worker/completion-evidence.json" 2>/dev/null || true)"
+  assert_contains "SC-22: evidence dispatch_status=dispatch_pending" "${evidence}" "dispatch_pending"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-23: Dispatch sent but ACK timeout -> dispatch_pending evidence
+# ============================================================================
+
+test_dispatch_ack_timeout() {
+  echo ""
+  echo "=== SC-23: dispatch sent but ACK timeout -> dispatch_pending evidence ==="
+  setup_sandbox
+  export CURSOR_WORKER_MODE="approved-submit"
+  export WORKER_HARNESS_VALIDATION_CMDS="true"
+
+  cd "${SANDBOX}"
+  git checkout -b "task/TASK-SMOKE-FAKE-001"
+
+  # Create a fake dispatch script that accepts --input - and succeeds
+  cat > "${SANDBOX}/fake-dispatch-23.sh" <<'DISPATCH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--input" && "${2:-}" == "-" ]]; then
+  cat > /dev/null
+fi
+echo "Fake dispatch: sent"
+exit 0
+DISPATCH
+  chmod +x "${SANDBOX}/fake-dispatch-23.sh"
+  export WORKER_HARNESS_REPORT_DISPATCH_SCRIPT="${SANDBOX}/fake-dispatch-23.sh"
+
+  # Set very low poll limits for fast timeout
+  export WORKER_HARNESS_ACK_POLL_INTERVAL=1
+  export WORKER_HARNESS_ACK_POLL_MAX=2
+
+  # Create a fake completion evidence
+  mkdir -p .cursor-worker
+  local head
+  head="$(git rev-parse HEAD)"
+  cat > .cursor-worker/completion-evidence.json <<EVIDENCE
+{
+  "task_branch_commit": "${head}",
+  "dev_merge_commit": "${head}",
+  "remote_dev_ref": "${head}",
+  "validation_result": "{\"ok\":true}",
+  "dispatch_status": "dispatch_pending"
+}
+EVIDENCE
+
+  local exit_code=0
+  local output
+  output="$(
+    cd "${SANDBOX}"
+    source "${HARNESS_LIB}" > /dev/null 2>&1
+    set +e
+    worker_harness_init 2>&1
+    worker_harness_dispatch_and_ack 2>&1
+  )" || exit_code=$?
+
+  assert_eq "SC-23: dispatch_and_ack returns 1 on ACK timeout" "1" "${exit_code}"
+  assert_contains "SC-23: ACK not confirmed" "${output}" "not confirmed"
+
+  # Verify evidence preserved with dispatch_pending
+  local evidence
+  evidence="$(cat "${SANDBOX}/.cursor-worker/completion-evidence.json" 2>/dev/null || true)"
+  assert_contains "SC-23: evidence dispatch_status=dispatch_pending" "${evidence}" "dispatch_pending"
+  assert_contains "SC-23: evidence has dispatched_at" "${evidence}" "dispatched_at"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-24: Completion evidence content check
+# ============================================================================
+
+test_completion_evidence_content() {
+  echo ""
+  echo "=== SC-24: completion evidence content check ==="
+  setup_sandbox
+  export CURSOR_WORKER_MODE="implement-for-review"
+  export WORKER_HARNESS_VALIDATION_CMDS="true"
+
+  cd "${SANDBOX}"
+  git checkout -b "task/TASK-SMOKE-FAKE-001"
+
+  # Make staged changes, commit, dev-merge to simulate approved-submit
+  echo "# Evidence test" > evidence-feature.txt
+  git add evidence-feature.txt
+  source "${HARNESS_LIB}" 2>/dev/null
+  worker_harness_init 2>&1
+  worker_harness_run_review_gate "evidence test" "none" "true" 2>&1
+
+  local head rp_sha diff_sha repo_name
+  head="$(git rev-parse HEAD)"
+  rp_sha="$(python3 -c "import hashlib; print(hashlib.sha256(open('.cursor-worker/review-packet.json','rb').read()).hexdigest())" 2>/dev/null || true)"
+  diff_sha="$(python3 -c "import hashlib; print(hashlib.sha256(open('.cursor-worker/latest.diff','rb').read()).hexdigest())" 2>/dev/null || true)"
+  repo_name="$(basename "$(git rev-parse --show-toplevel)")"
+  create_valid_approval "approval-smoke-024" "TASK-SMOKE-FAKE-001" "${repo_name}" "task/TASK-SMOKE-FAKE-001" "${head}" "${rp_sha}" "${diff_sha}"
+
+  # Commit and merge dev
+  git add -A
+  git commit -m "TASK-SMOKE-FAKE-001: evidence test" --no-gpg-sign > /dev/null 2>&1
+  local task_commit
+  task_commit="$(git rev-parse HEAD)"
+  git checkout dev
+  git merge "task/TASK-SMOKE-FAKE-001" --no-edit --no-gpg-sign > /dev/null 2>&1
+  local dev_merge_commit
+  dev_merge_commit="$(git rev-parse HEAD)"
+  local remote_dev_ref="${dev_merge_commit}"
+
+  # Capture completion evidence
+  worker_harness_capture_completion_evidence \
+    "${task_commit}" "${dev_merge_commit}" "${remote_dev_ref}" \
+    '[{"cmd":"true","exit_code":0}]' "dispatch_pending" ""
+
+  local evidence
+  evidence="$(cat "${SANDBOX}/.cursor-worker/completion-evidence.json" 2>/dev/null || true)"
+
+  assert_contains "SC-24: evidence has task_branch_commit" "${evidence}" "${task_commit}"
+  assert_contains "SC-24: evidence has dev_merge_commit" "${evidence}" "${dev_merge_commit}"
+  assert_contains "SC-24: evidence has remote_dev_ref" "${evidence}" "${remote_dev_ref}"
+  assert_contains "SC-24: evidence has dispatch_status" "${evidence}" "dispatch_pending"
+  assert_contains "SC-24: evidence has task_id" "${evidence}" "TASK-SMOKE-FAKE-001"
+  assert_contains "SC-24: evidence has validation_result" "${evidence}" "exit_code"
+  assert_contains "SC-24: evidence has evidence_version" "${evidence}" "evidence_version"
+  assert_contains "SC-24: evidence has completion_time" "${evidence}" "completion_time"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-25: Dispatch script body validation — fake gh captures full body
+# ============================================================================
+
+test_dispatch_body_validation() {
+  echo ""
+  echo "=== SC-25: dispatch script body validation ==="
+  setup_sandbox
+  cd "${SANDBOX}"
+
+  local body_captured="${SANDBOX}/captured-body.json"
+  local gh_path="${SANDBOX}/gh"
+
+  # Install a fake gh on PATH that captures stdin to ${body_captured}
+  # (unquoted FAKEGH so that the shell variable expands at heredoc creation time)
+  cat > "${gh_path}" <<FAKEGH
+#!/usr/bin/env bash
+cat > ${body_captured}
+echo "gh-stub: captured body" >&2
+exit 0
+FAKEGH
+  chmod +x "${gh_path}"
+  export PATH="${SANDBOX}:${PATH}"
+  export LIVEMASK_BOT_TOKEN="fake-token-for-test"
+
+  local input_json
+  input_json='{"task_id":"TASK-SMOKE-SC25-001","result":"completed","repo":"smoke-repo","branch":"dev","commit":"abc123def456abc123def456abc123def456abc123","task_branch":"task/TASK-SMOKE-SC25-001","task_commit":"def456abc123def456abc123def456abc123def456","dev_merge_commit":"789012ef789012ef789012ef789012ef789012ef","validation":"{\"ok\":true}"}'
+
+  local dispatch_script="${SCRIPT_DIR}/cursor-report-dispatch.sh"
+
+  echo "${input_json}" | bash "${dispatch_script}" --input -
+  local dispatch_rc=$?
+  assert_eq "SC-25: dispatch exits 0" "0" "${dispatch_rc}"
+
+  # Read the captured body and validate
+  local captured_body=""
+  if [[ -f "${body_captured}" ]]; then
+    captured_body="$(cat "${body_captured}")"
+  fi
+
+  # event_type
+  assert_contains "SC-25: body has event_type" "${captured_body}" "cursor-report-received"
+
+  # client_payload is a JSON object (not a string)
+  local cp_type
+  cp_type="$(echo "${captured_body}" | python3 -c '
+import json, sys
+try:
+    body = json.load(sys.stdin)
+    cp = body.get("client_payload")
+    if isinstance(cp, dict):
+        print("object")
+    elif isinstance(cp, str):
+        print("string")
+    else:
+        print("none")
+except Exception:
+    print("error")
+' 2>/dev/null || echo 'error')"
+  assert_eq "SC-25: client_payload is JSON object" "object" "${cp_type}"
+
+  # client_payload required fields
+  local cp_fields
+  cp_fields="$(echo "${captured_body}" | python3 -c '
+import json, sys
+body = json.load(sys.stdin)
+cp = body.get("client_payload", {})
+for k in ("task_id","repo","commit","task_commit","dev_merge_commit","validation"):
+    print(f"field_{k}={cp.get(k,"")!r}")
+' 2>/dev/null || true)"
+  assert_contains "SC-25: client_payload has task_id" "${cp_fields}" "TASK-SMOKE-SC25-001"
+  assert_contains "SC-25: client_payload has repo" "${cp_fields}" "smoke-repo"
+  assert_contains "SC-25: client_payload has commit" "${cp_fields}" "abc123def456abc123def456abc123def456abc123"
+  assert_contains "SC-25: client_payload has task_commit" "${cp_fields}" "def456abc123def456abc123def456abc123def456"
+  assert_contains "SC-25: client_payload has dev_merge_commit" "${cp_fields}" "789012ef789012ef789012ef789012ef789012ef"
+  assert_contains "SC-25: client_payload has validation" "${cp_fields}" "ok"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-26: ACK commit scan — recent commits contain task but not latest;
+#        fake gh confirms ACK via Strategy B
+# ============================================================================
+
+test_ack_recent_commits_scan() {
+  echo ""
+  echo "=== SC-26: ACK commit scan — task found in recent commits (not latest) ==="
+  setup_sandbox
+  cd "${SANDBOX}"
+
+  # Create a fake gh that always returns commits where the latest commit is
+  # for a *different* task, but an earlier commit contains the current task.
+  local gh_path="${SANDBOX}/gh"
+  cat > "${gh_path}" <<'FAKEGH'
+#!/usr/bin/env bash
+cat <<COMMITS
+fix: unrelated change
+
+chore: bump dep
+
+completion-report: ingest TASK-SMOKE-FAKE-001
+
+docs: update README
+
+feat: add new endpoint
+COMMITS
+exit 0
+FAKEGH
+  chmod +x "${gh_path}"
+  export PATH="${SANDBOX}:${PATH}"
+  export LIVEMASK_BOT_TOKEN="fake-token-for-ack"
+
+  # Set low poll limits for fast test
+  export WORKER_HARNESS_ACK_POLL_INTERVAL=1
+  export WORKER_HARNESS_ACK_POLL_MAX=2
+
+  git checkout -b "task/TASK-SMOKE-FAKE-001"
+  echo "# ack scan" > ack-scan.txt
+  git add ack-scan.txt
+
+  mkdir -p .cursor-worker
+  local head
+  head="$(git rev-parse HEAD)"
+  cat > .cursor-worker/completion-evidence.json <<EVIDENCE
+{
+  "task_branch_commit": "${head}",
+  "dev_merge_commit": "${head}",
+  "remote_dev_ref": "${head}",
+  "validation_result": "{\"ok\":true}",
+  "dispatch_status": "dispatch_pending"
+}
+EVIDENCE
+
+  # Create a fake dispatch script that succeeds
+  cat > "${SANDBOX}/fake-dispatch-26.sh" <<'DISPATCH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--input" && "${2:-}" == "-" ]]; then
+  cat > /dev/null
+fi
+echo "Fake dispatch: sent"
+exit 0
+DISPATCH
+  chmod +x "${SANDBOX}/fake-dispatch-26.sh"
+  export WORKER_HARNESS_REPORT_DISPATCH_SCRIPT="${SANDBOX}/fake-dispatch-26.sh"
+
+  local exit_code=0
+  local output
+  output="$(
+    source "${HARNESS_LIB}" > /dev/null 2>&1
+    set +e
+    worker_harness_init 2>&1
+    worker_harness_dispatch_and_ack 2>&1
+  )" || exit_code=$?
+
+  # dispatch_and_ack should succeed (ACK confirmed via Strategy B commit scan)
+  assert_eq "SC-26: dispatch_and_ack exits 0" "0" "${exit_code}"
+  assert_contains "SC-26: ACK confirmed" "${output}" "ACK: confirmed"
+
+  # Verify evidence shows report_dispatched
+  local evidence
+  evidence="$(cat "${SANDBOX}/.cursor-worker/completion-evidence.json" 2>/dev/null || true)"
+  assert_contains "SC-26: dispatch_status=report_dispatched" "${evidence}" "report_dispatched"
+
+  cd "${SANDBOX_ORIG_DIR}"
+  teardown_sandbox
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1011,6 +1577,13 @@ test_positive_approval_cycle
 test_untracked_source_rejected
 test_invalid_approval_precommit
 test_dirty_submodule_gate
+test_dispatch_configured_and_ack
+test_dispatch_config_based
+test_dispatch_not_configured
+test_dispatch_ack_timeout
+test_completion_evidence_content
+test_dispatch_body_validation
+test_ack_recent_commits_scan
 
 echo ""
 echo "================================================================"

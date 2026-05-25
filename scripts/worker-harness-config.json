@@ -59,7 +59,8 @@
         "git diff --check"
       ],
       "default_worker_id": "cursor-worker",
-      "cwd": "."
+      "cwd": ".",
+      "report_dispatch_script": "scripts/cursor-report-dispatch.sh"
     },
     "livemask-docs": {
       "validation_cmds": [
