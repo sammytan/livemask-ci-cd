@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/MyAiDevs/livemask-ci-cd/scripts/schemas/completion-evidence-schema-v1.json",
+  "title": "Cursor Worker Completion Evidence Schema v1",
+  "description": "JSON Schema for Cursor SDK Worker Harness completion evidence. TASK-CICD-REVIEW-PACKET-SCHEMA-001",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "evidence_version",
+    "generated_at",
+    "task_id",
+    "mode",
+    "task_branch_commit",
+    "dev_merge_commit",
+    "remote_dev_ref",
+    "validation_result",
+    "completion_time",
+    "dispatch_status"
+  ],
+  "properties": {
+    "evidence_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for forward compatibility."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when evidence was produced."
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^TASK-",
+      "description": "TASK ID of the completed task."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["implement-for-review", "revise-after-review", "approved-submit"],
+      "description": "Worker mode."
+    },
+    "task_branch_commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,40}$",
+      "description": "Commit SHA on the task branch."
+    },
+    "dev_merge_commit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,40}$",
+      "description": "Commit SHA after merging to dev."
+    },
+    "remote_dev_ref": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{7,40}$",
+      "description": "Remote origin/dev ref SHA."
+    },
+    "validation_result": {
+      "type": "string",
+      "description": "Validation result JSON string or summary."
+    },
+    "review_packet_path": {
+      "type": "string",
+      "description": "Relative path to the review packet that was approved."
+    },
+    "completion_time": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp of completion."
+    },
+    "dispatch_status": {
+      "type": "string",
+      "enum": ["dispatch_pending", "report_dispatched", "dispatch_failed"],
+      "description": "Report dispatch status."
+    },
+    "dispatched_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when dispatch was sent (empty if not dispatched)."
+    },
+    "codex_approval_id": {
+      "type": "string",
+      "description": "Approval ID from the Codex approval artifact."
+    }
+  }
+}

@@ -28,6 +28,7 @@ def cmd_build_review_packet() -> None:
         "now_iso": os.environ.get("PKT_NOW_ISO", ""),
         "mode": os.environ.get("PKT_MODE", ""),
         "task_id": os.environ.get("PKT_TASK_ID", ""),
+        "repo": os.environ.get("PKT_REPO", ""),
         "current_branch": os.environ.get("PKT_CURRENT_BRANCH", ""),
         "expected_branch": os.environ.get("PKT_EXPECTED_BRANCH", ""),
         "branch_match": os.environ.get("PKT_BRANCH_MATCH", "false"),
@@ -60,15 +61,18 @@ def cmd_build_review_packet() -> None:
 
     packet = {
         "review_packet_version": 1,
+        "schema": "https://github.com/MyAiDevs/livemask-ci-cd/scripts/schemas/review-packet-schema-v1.json",
         "generated_at": data["now_iso"],
         "mode": data["mode"],
         "task_id": data["task_id"],
+        "repo": data["repo"],
         "branch": {
             "current": data["current_branch"],
             "expected": data["expected_branch"],
             "match": data["branch_match"] == "true",
             "note": data["branch_note"],
         },
+        "diff_summary": data["diff_summary"],
         "diff": {
             "summary": data["diff_summary"],
             "captured_at": data["diff_captured_path"],

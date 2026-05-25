@@ -1,0 +1,36 @@
+{
+  "review_packet_version": 1,
+  "schema": "https://github.com/MyAiDevs/livemask-ci-cd/scripts/schemas/review-packet-schema-v1.json",
+  "generated_at": "2026-05-25T09:00:00Z",
+  "mode": "implement-for-review",
+  "task_id": "TASK-SMOKE-POSITIVE-001",
+  "repo": "livemask-ci-cd",
+  "branch": {
+    "current": "task/TASK-SMOKE-POSITIVE-001",
+    "expected": "task/TASK-SMOKE-POSITIVE-001",
+    "match": true,
+    "note": ""
+  },
+  "diff_summary": "1 files changed, +1/-0",
+  "diff": {
+    "summary": "1 files changed, +1/-0",
+    "captured_at": ".cursor-worker/latest.diff",
+    "file_count": 1,
+    "insertions": 1,
+    "deletions": 0
+  },
+  "changed_files": ["README.md"],
+  "validation": [{"cmd": "true", "exit_code": 0}],
+  "secret_scan": {
+    "result": "pass",
+    "suspicious_count": 0
+  },
+  "boundary_check": {
+    "result": "pass",
+    "docs_repo_edits_found": false
+  },
+  "risks_and_todos": [],
+  "committed": false,
+  "merged": false,
+  "report_dispatched": false
+}

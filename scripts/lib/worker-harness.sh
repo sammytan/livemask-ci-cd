@@ -437,11 +437,16 @@ worker_harness_build_review_packet() {
     secret_count="1"
   fi
 
+  # Resolve repo name
+  local repo_name
+  repo_name="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo 'unknown')")"
+
   # Call the helper Python script via env vars
   mkdir -p "$(dirname "${WORKER_HARNESS_PACKET_FILE}")"
   PKT_NOW_ISO="${now_iso}" \
   PKT_MODE="${CURSOR_WORKER_MODE}" \
   PKT_TASK_ID="${WORKER_HARNESS_TASK_ID}" \
+  PKT_REPO="${repo_name}" \
   PKT_CURRENT_BRANCH="${current_branch}" \
   PKT_EXPECTED_BRANCH="${expected_branch}" \
   PKT_BRANCH_MATCH="${branch_match}" \
