@@ -108,50 +108,161 @@ cleanup_pg() {
 }
 
 # ── Expanded security check with all keys from TASK ──────────────────────────
+security_check_raw() {
+  local json="$1"
+  echo "${json}" | python3 -c "
+import sys,json
+
+# Field names that are always unsafe in public/admin smoke responses.
+# Keep this list value-bearing and precise. Schema/container names such as
+# connect_config, protocol_config, and secret_ref are valid contract fields and
+# are checked separately by their values.
+SENSITIVE_KEYS = [
+    'node_secret','node_secret_hash',
+    'access_token','refresh_token','raw_token','bearer_token','auth_token',
+    'private_key','private_key_pem','secret_key','hmac_key','hmac_secret',
+    'auth_payload','raw_auth','obfs_password','password','password_hash',
+    'api_key','api_secret','license_key','signed_url',
+    'storage_path','encryption_key',
+    'endpoint_secret','certificate_key','vault_key','master_key','service_key',
+    'jwt_secret','tls_key','tls_private_key','ssh_key','ssh_private_key',
+    'vless_uuid','raw_uuid','uuid_plain',
+]
+
+SENSITIVE_VALUE_PATTERNS = [
+    '-----BEGIN RSA PRIVATE KEY-----',
+    '-----BEGIN EC PRIVATE KEY-----',
+    '-----BEGIN PRIVATE KEY-----',
+    '-----BEGIN OPENSSH PRIVATE KEY-----',
+    'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_',
+    'sk_live_', 'sk_test_',
+    'xoxb-', 'xoxp-',
+]
+
+SAFE_SECRET_REF_PREFIXES = (
+    'node.', 'template.', 'protocol.', 'vault:', 'ref:', 'secret://',
+)
+
+def path_join(path, key):
+    return f'{path}.{key}' if path else str(key)
+
+def looks_like_raw_secret(value):
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if any(pattern in stripped for pattern in SENSITIVE_VALUE_PATTERNS):
+        return True
+    if len(stripped) >= 48 and not any(ch.isspace() for ch in stripped):
+        # Long opaque strings in a secret_ref field are suspicious unless they
+        # are explicit references handled by the backend resolver.
+        return not stripped.startswith(SAFE_SECRET_REF_PREFIXES)
+    return False
+
+def scan(obj, path=''):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            key_l = str(key).lower()
+            current_path = path_join(path, key)
+            if key_l == 'secret_ref':
+                if looks_like_raw_secret(value):
+                    return f'secret_ref raw value: {current_path}'
+                continue
+            for sensitive_key in SENSITIVE_KEYS:
+                if sensitive_key in key_l:
+                    return f'key match: {current_path}'
+            found = scan(value, current_path)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for index, item in enumerate(obj):
+            found = scan(item, f'{path}[{index}]')
+            if found:
+                return found
+    elif isinstance(obj, str):
+        if looks_like_raw_secret(obj):
+            return f'value pattern: {path or \"<root>\"}'
+    return None
+
+try:
+    data=json.load(sys.stdin)
+except json.JSONDecodeError:
+    print('OK')
+    sys.exit(0)
+
+leak = scan(data)
+if leak:
+    print('LEAK: ' + leak)
+else:
+    print('OK')
+" 2>/dev/null || echo "CHECK_ERROR"
+}
+
 security_check() {
   local label="$1"
   local json="$2"
   local leaked
-  leaked=$(echo "${json}" | python3 -c "
-import sys,json
-SENSITIVE_WORDS = [
-    'node_secret','token','access_token','refresh_token',
-    'private_key','secret_key','hmac','auth','auth_payload',
-    'obfs_password','password','api_key','license_key','signed_url',
-    'storage_path','encryption_key','password_hash',
-    'endpoint_secret','connect_config','private_key_pem','certificate_key',
-    'secret_ref','vault_key','master_key','service_key','jwt_secret',
-    'protocol_config','tls_key','tls_private_key','ssh_key','ssh_private_key',
-    'vless_uuid','raw_uuid','uuid_plain',
-]
-def check_keys(d, target_words):
-    if isinstance(d, dict):
-        for k, v in d.items():
-            kl = k.lower()
-            for w in target_words:
-                if w in kl:
-                    return True
-            if check_keys(v, target_words):
-                return True
-    elif isinstance(d, list):
-        for item in d:
-            if check_keys(item, target_words):
-                return True
-    return False
-
-data=json.load(sys.stdin)
-found = [w for w in SENSITIVE_WORDS if check_keys(data, [w])]
-if found:
-    print('LEAK: ' + ', '.join(found))
-else:
-    print('OK')
-" 2>/dev/null || echo "OK")
+  leaked=$(security_check_raw "${json}")
+  if [[ "${leaked}" == "CHECK_ERROR" ]]; then
+    fail "[SECURITY] ${label}: checker encountered an error"
+    return 1
+  fi
   if [[ "${leaked}" != "OK" ]]; then
     fail "[SECURITY] ${label}: ${leaked}"
     return 1
   fi
   return 0
 }
+
+security_check_self_test() {
+  local failed=0
+  local result
+
+  result=$(security_check_raw '{"connect_config":{"server":{"endpoint":"127.0.0.1"},"client":{"protocol":"hysteria2"}}}')
+  if [[ "${result}" != "OK" ]]; then
+    echo "FAIL: connect_config container field should be allowed (${result})"
+    failed=1
+  fi
+
+  result=$(security_check_raw '{"secret_ref":"node.default.hysteria2","supports_secret_refs":true}')
+  if [[ "${result}" != "OK" ]]; then
+    echo "FAIL: safe secret_ref reference should be allowed (${result})"
+    failed=1
+  fi
+
+  result=$(security_check_raw '{"protocol_config":{"supports_client_config":true}}')
+  if [[ "${result}" != "OK" ]]; then
+    echo "FAIL: protocol_config schema container should be allowed (${result})"
+    failed=1
+  fi
+
+  result=$(security_check_raw '{"node_secret":"plaintext-secret"}')
+  if [[ "${result}" != LEAK:* ]]; then
+    echo "FAIL: node_secret key should be blocked (${result})"
+    failed=1
+  fi
+
+  result=$(security_check_raw '{"connect_config":{"client":{"private_key":"-----BEGIN PRIVATE KEY----- abc"}}}')
+  if [[ "${result}" != LEAK:* ]]; then
+    echo "FAIL: private key value should be blocked (${result})"
+    failed=1
+  fi
+
+  result=$(security_check_raw '{"secret_ref":"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}')
+  if [[ "${result}" != LEAK:* ]]; then
+    echo "FAIL: raw opaque secret_ref value should be blocked (${result})"
+    failed=1
+  fi
+
+  if [[ "${failed}" -eq 0 ]]; then
+    echo "protocol capability security_check self-test PASS"
+  fi
+  return "${failed}"
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  security_check_self_test
+  exit $?
+fi
 
 compute_hmac_signature() {
   local node_id="$1"

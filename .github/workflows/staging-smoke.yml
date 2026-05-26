@@ -21,7 +21,7 @@ on:
 permissions:
   actions: read
   contents: read
-  issues: read
+  issues: write
 
 jobs:
   smoke:
@@ -202,6 +202,13 @@ jobs:
           name: runtime-status
           path: /tmp/livemask-runtime/status.json
           retention-days: 1
+      - name: Create or update Cursor triage issue on smoke failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+          AUTO_CREATE_STAGING_SMOKE_ISSUE: "true"
+          RUNTIME_STATUS_FILE: /tmp/livemask-runtime/status.json
+        run: bash scripts/create-staging-smoke-failure-issue.sh
       - name: Issue Close Guard — dry-run evaluation (TASK-CICD-ISSUE-CLOSE-GUARD-001)
         id: issue-close-guard
         if: always()
