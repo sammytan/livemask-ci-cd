@@ -42,6 +42,8 @@ jobs:
       labels: [self-hosted, Linux, livemask, docker, staging]
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
       - name: Enforce dev-only smoke refs
         run: bash scripts/validate-dev-ref.sh
       - name: Strict cross-repo Issue sync check (TASK-CICD-ISSUE-SYNC-STRICT-001)
@@ -267,6 +269,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
       - name: Download runtime status artifact
         uses: actions/download-artifact@v4
         with:
