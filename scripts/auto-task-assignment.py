@@ -58,6 +58,7 @@ DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".cursor-worker/auto-task-assignment"
 DEFAULT_LEASE_OWNER = "ci-cd-auto-task-assignment"
 DEFAULT_PLANNER_LOOKAHEAD = 50
 DEFAULT_CURSOR_SDK_MODEL = "default"
+DEFAULT_WORKER_TIMEOUT_SECONDS = 1800
 
 ACTIVE_LEASE_STATUSES = {"active"}
 
@@ -450,6 +451,7 @@ def dispatch(
     evidence_dir: pathlib.Path,
     confirm_implement: bool,
     json_output: bool,
+    worker_timeout_seconds: int,
     skip_worker_invoke: bool = False,
 ) -> int:
     planner_path = docs_dir / "scripts/plan-next-tasks.py"
@@ -639,7 +641,7 @@ def dispatch(
                         cwd=str(worker_path.parent.parent),
                         capture_output=True,
                         text=True,
-                        timeout=60,
+                        timeout=worker_timeout_seconds,
                         env=env,
                     )
                     evidence_data["worker_exit_code"] = proc.returncode
@@ -814,6 +816,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Skip actual worker invocation (for testing).",
     )
     parser.add_argument(
+        "--worker-timeout-seconds",
+        type=int,
+        default=DEFAULT_WORKER_TIMEOUT_SECONDS,
+        help=f"Timeout for worker subprocesses (default: {DEFAULT_WORKER_TIMEOUT_SECONDS}).",
+    )
+    parser.add_argument(
         "--confirm-implement",
         action="store_true",
         help="Required to confirm implement-for-review mode.",
@@ -874,6 +882,7 @@ def main(argv: list[str]) -> int:
         evidence_dir=args.evidence_dir,
         confirm_implement=args.confirm_implement,
         json_output=args.json,
+        worker_timeout_seconds=args.worker_timeout_seconds,
         skip_worker_invoke=args.skip_worker_invoke,
     )
 

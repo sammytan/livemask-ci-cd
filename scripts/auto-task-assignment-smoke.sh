@@ -22,6 +22,7 @@
 #   SC-11  same repo different expected_files can run in parallel
 #   SC-12  unknown expected_files on same repo blocks conservatively
 #   SC-13  worker invocation receives a supported default Cursor SDK model
+#   SC-14  worker timeout is configurable and long enough for SDK agents
 
 set -euo pipefail
 
@@ -58,7 +59,7 @@ assert_eq() {
 
 assert_contains() {
   local label="$1" haystack="$2" needle="$3"
-  if echo "${haystack}" | grep -qF "${needle}"; then
+  if echo "${haystack}" | grep -qF -- "${needle}"; then
     echo "  PASS: ${label}"
     PASS_COUNT=$((PASS_COUNT + 1))
   else
@@ -72,7 +73,7 @@ assert_contains() {
 
 assert_not_contains() {
   local label="$1" haystack="$2" needle="$3"
-  if ! echo "${haystack}" | grep -qF "${needle}"; then
+  if ! echo "${haystack}" | grep -qF -- "${needle}"; then
     echo "  PASS: ${label}"
     PASS_COUNT=$((PASS_COUNT + 1))
   else
@@ -455,6 +456,17 @@ test_worker_invocation_uses_supported_default_model() {
 
 }
 
+test_worker_timeout_is_configurable() {
+  echo ""
+  echo "=== SC-14: worker timeout is configurable ==="
+
+  local source
+  source="$(cat "${AUTO_ASSIGN}")"
+  assert_contains "SC-14: default timeout supports real SDK agents" "${source}" 'DEFAULT_WORKER_TIMEOUT_SECONDS = 1800'
+  assert_contains "SC-14: CLI exposes worker timeout" "${source}" '--worker-timeout-seconds'
+  assert_contains "SC-14: subprocess uses configured timeout" "${source}" 'timeout=worker_timeout_seconds'
+}
+
 # ============================================================================
 # SC-05: Worker command mapping resolves expected script paths for all 6 runtime repos
 # ============================================================================
@@ -761,6 +773,7 @@ test_active_work_overlap_blocks_selection
 test_active_work_different_files_allows_selection
 test_active_work_unknown_files_blocks_selection
 test_worker_invocation_uses_supported_default_model
+test_worker_timeout_is_configurable
 
 echo ""
 echo "================================================================"
