@@ -57,6 +57,7 @@ DEFAULT_STATE_DIR = REPO_ROOT / ".local-dev/auto-task-assignment"
 DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".cursor-worker/auto-task-assignment"
 DEFAULT_LEASE_OWNER = "ci-cd-auto-task-assignment"
 DEFAULT_PLANNER_LOOKAHEAD = 50
+DEFAULT_CURSOR_SDK_MODEL = "default"
 
 ACTIVE_LEASE_STATUSES = {"active"}
 
@@ -294,11 +295,39 @@ def acquire_lease(
         leases = []
 
     expires_at = now() + dt.timedelta(hours=expires_in_hours)
+    existing_entry: dict[str, Any] | None = None
+    for lease in leases:
+        if not isinstance(lease, dict):
+            continue
+        if (
+            lease.get("task_id") == task_id
+            and lease.get("repo") == repo
+            and lease.get("lease_owner") == lease_owner
+            and str(lease.get("status", "")).lower() in ACTIVE_LEASE_STATUSES
+        ):
+            existing_entry = lease
+            break
+
+    if existing_entry is not None:
+        existing_entry.update({
+            "branch": branch,
+            "expected_files": expected_files or ["*"],
+            "expires_at": iso(expires_at),
+            "ended_at": "",
+            "depends_on": existing_entry.get("depends_on", []),
+            "blocked_by": existing_entry.get("blocked_by", []),
+            "status": "active",
+        })
+        data["leases"] = leases
+        data["updated_at"] = iso()
+        write_json(lease_file, data)
+        return existing_entry
+
     entry = {
         "task_id": task_id,
         "repo": repo,
         "branch": branch,
-        "expected_files": expected_files or [],
+        "expected_files": expected_files or ["*"],
         "lease_owner": lease_owner,
         "started_at": iso(),
         "expires_at": iso(expires_at),
@@ -602,6 +631,7 @@ def dispatch(
                 try:
                     env = os.environ.copy()
                     env.setdefault("CURSOR_WORKER_MODE", mode)
+                    env.setdefault("CURSOR_SDK_MODEL", DEFAULT_CURSOR_SDK_MODEL)
                     env["WORKER_HARNESS_TASK_ID"] = tid
 
                     proc = subprocess.run(
