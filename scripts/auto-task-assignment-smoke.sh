@@ -16,6 +16,9 @@
 #   SC-07  no commits/merges/pushes/dispatches in any mode
 #   SC-08  real docs files unchanged (SHA256 check)
 #   SC-09  unmapped repos are filtered before selection and reported
+#   SC-10  active work expected_files overlap blocks selection
+#   SC-11  same repo different expected_files can run in parallel
+#   SC-12  unknown expected_files on same repo blocks conservatively
 
 set -euo pipefail
 
@@ -149,7 +152,8 @@ setup_sandbox() {
           "unlocks": [],
           "task_doc": "",
           "validation": "",
-          "notes": "Smoke test task for unmapped ci-cd repo"
+          "notes": "Smoke test task for unmapped ci-cd repo",
+          "expected_files": ["scripts/protocol-smoke.sh"]
         },
         {
           "task_id": "TASK-SMOKE-FAKE-001",
@@ -161,7 +165,8 @@ setup_sandbox() {
           "unlocks": ["TASK-SMOKE-FAKE-002"],
           "task_doc": "docs/development/tasks/TASK-SMOKE-FAKE-001.md",
           "validation": "",
-          "notes": "Smoke test task"
+          "notes": "Smoke test task",
+          "expected_files": ["internal/protocol/types.go"]
         },
         {
           "task_id": "TASK-SMOKE-FAKE-002",
@@ -173,7 +178,8 @@ setup_sandbox() {
           "unlocks": [],
           "task_doc": "",
           "validation": "",
-          "notes": "Smoke test task blocked by 001"
+          "notes": "Smoke test task blocked by 001",
+          "expected_files": ["internal/protocol/service.go"]
         },
         {
           "task_id": "TASK-SMOKE-FAKE-003",
@@ -185,7 +191,8 @@ setup_sandbox() {
           "unlocks": [],
           "task_doc": "",
           "validation": "",
-          "notes": "Smoke test task for nodeagent"
+          "notes": "Smoke test task for nodeagent",
+          "expected_files": ["internal/agent/runner.go"]
         },
         {
           "task_id": "TASK-SMOKE-FAKE-004",
@@ -197,7 +204,8 @@ setup_sandbox() {
           "unlocks": [],
           "task_doc": "",
           "validation": "",
-          "notes": "Smoke test task for admin"
+          "notes": "Smoke test task for admin",
+          "expected_files": ["src/pages/nodes/NodesPage.tsx"]
         }
       ]
     }
@@ -527,6 +535,129 @@ test_worker_coverage_filters_unmapped_repo() {
   teardown_sandbox
 }
 
+
+# ============================================================================
+# SC-10: Active work expected_files overlap blocks selection
+# ============================================================================
+
+test_active_work_overlap_blocks_selection() {
+  echo ""
+  echo "=== SC-10: active work overlap blocks selection ==="
+  setup_sandbox
+
+  python3 -c "
+import json
+path = '${SANDBOX}/task-leases.json'
+with open(path, 'r') as f:
+    data = json.load(f)
+data['leases'].append({
+    'task_id': 'TASK-SMOKE-ACTIVE-OVERLAP',
+    'repo': 'livemask-backend',
+    'branch': 'task/TASK-SMOKE-ACTIVE-OVERLAP',
+    'lease_owner': 'cursor-backend-window',
+    'expected_files': ['internal/protocol/types.go'],
+    'started_at': '2026-05-26T00:00:00+08:00',
+    'expires_at': '2099-12-31T23:59:59+08:00',
+    'status': 'active'
+})
+with open(path, 'w') as f:
+    json.dump(data, f, indent=2)
+"
+
+  local output
+  output="$(run_assign "--dry-run --task-id TASK-SMOKE-FAKE-001 --json")"
+
+  assert_contains "SC-10: selected count is zero" "${output}" '"selected_count": 0'
+  assert_contains "SC-10: active work filtered" "${output}" '"filtered_by_active_work": 1'
+  assert_contains "SC-10: overlap reason" "${output}" '"reason": "expected file overlap"'
+  assert_contains "SC-10: overlap file listed" "${output}" 'internal/protocol/types.go'
+  assert_contains "SC-10: active task id listed" "${output}" 'TASK-SMOKE-ACTIVE-OVERLAP'
+
+  verify_real_files_unchanged "SC-10"
+
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-11: Same repo different expected_files can run in parallel
+# ============================================================================
+
+test_active_work_different_files_allows_selection() {
+  echo ""
+  echo "=== SC-11: active work different files allows selection ==="
+  setup_sandbox
+
+  python3 -c "
+import json
+path = '${SANDBOX}/task-leases.json'
+with open(path, 'r') as f:
+    data = json.load(f)
+data['leases'].append({
+    'task_id': 'TASK-SMOKE-ACTIVE-DIFFERENT',
+    'repo': 'livemask-backend',
+    'branch': 'task/TASK-SMOKE-ACTIVE-DIFFERENT',
+    'lease_owner': 'cursor-backend-window',
+    'expected_files': ['internal/other/file.go'],
+    'started_at': '2026-05-26T00:00:00+08:00',
+    'expires_at': '2099-12-31T23:59:59+08:00',
+    'status': 'active'
+})
+with open(path, 'w') as f:
+    json.dump(data, f, indent=2)
+"
+
+  local output
+  output="$(run_assign "--dry-run --task-id TASK-SMOKE-FAKE-001 --json")"
+
+  assert_contains "SC-11: selected one task" "${output}" '"selected": 1'
+  assert_contains "SC-11: no active work filtered" "${output}" '"filtered_by_active_work": 0'
+  assert_contains "SC-11: selected task remains" "${output}" 'TASK-SMOKE-FAKE-001'
+
+  verify_real_files_unchanged "SC-11"
+
+  teardown_sandbox
+}
+
+# ============================================================================
+# SC-12: Unknown expected_files on same repo blocks conservatively
+# ============================================================================
+
+test_active_work_unknown_files_blocks_selection() {
+  echo ""
+  echo "=== SC-12: active work unknown expected_files blocks selection ==="
+  setup_sandbox
+
+  python3 -c "
+import json
+path = '${SANDBOX}/task-leases.json'
+with open(path, 'r') as f:
+    data = json.load(f)
+data['leases'].append({
+    'task_id': 'TASK-SMOKE-ACTIVE-UNKNOWN',
+    'repo': 'livemask-backend',
+    'branch': 'task/TASK-SMOKE-ACTIVE-UNKNOWN',
+    'lease_owner': 'cursor-backend-window',
+    'expected_files': [],
+    'started_at': '2026-05-26T00:00:00+08:00',
+    'expires_at': '2099-12-31T23:59:59+08:00',
+    'status': 'active'
+})
+with open(path, 'w') as f:
+    json.dump(data, f, indent=2)
+"
+
+  local output
+  output="$(run_assign "--dry-run --task-id TASK-SMOKE-FAKE-001 --json")"
+
+  assert_contains "SC-12: selected count is zero" "${output}" '"selected_count": 0'
+  assert_contains "SC-12: active work filtered" "${output}" '"filtered_by_active_work": 1'
+  assert_contains "SC-12: unknown expected files reason" "${output}" 'unknown expected_files for same repo active lease'
+
+  verify_real_files_unchanged "SC-12"
+
+  teardown_sandbox
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -547,6 +678,9 @@ test_implement_requires_opt_in
 test_no_side_effects
 test_real_docs_files_unchanged
 test_worker_coverage_filters_unmapped_repo
+test_active_work_overlap_blocks_selection
+test_active_work_different_files_allows_selection
+test_active_work_unknown_files_blocks_selection
 
 echo ""
 echo "================================================================"

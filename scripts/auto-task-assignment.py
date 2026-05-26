@@ -126,6 +126,45 @@ def load_leases(lease_file: pathlib.Path) -> list[dict[str, Any]]:
     return leases
 
 
+def load_ledger_task_index(ledger_path: pathlib.Path) -> dict[str, dict[str, Any]]:
+    data = read_json(ledger_path, default={"modules": []})
+    if not isinstance(data, dict):
+        return {}
+    index: dict[str, dict[str, Any]] = {}
+    modules = data.get("modules", [])
+    if not isinstance(modules, list):
+        return index
+    for module in modules:
+        if not isinstance(module, dict):
+            continue
+        tasks = module.get("tasks", [])
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = str(task.get("task_id", ""))
+            if task_id:
+                index[task_id] = task
+    return index
+
+
+def enrich_candidates_from_ledger(
+    candidates: list[dict[str, Any]], task_index: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    passthrough_keys = ("expected_files", "parallel_safety", "branch")
+    for candidate in candidates:
+        task_id = str(candidate.get("task_id", ""))
+        ledger_task = task_index.get(task_id, {})
+        merged = dict(candidate)
+        for key in passthrough_keys:
+            if key not in merged and key in ledger_task:
+                merged[key] = ledger_task[key]
+        enriched.append(merged)
+    return enriched
+
+
 def active_lease_for_repo(
     leases: list[dict[str, Any]], repo: str, exclude_owner: str = ""
 ) -> dict[str, Any] | None:
@@ -149,6 +188,76 @@ def active_lease_for_task(
             if exclude_owner and owner == exclude_owner:
                 continue
             return lease
+    return None
+
+
+def active_leases_for_repo(
+    leases: list[dict[str, Any]], repo: str, exclude_owner: str = ""
+) -> list[dict[str, Any]]:
+    active: list[dict[str, Any]] = []
+    for lease in leases:
+        status = str(lease.get("status", "")).lower()
+        owner = str(lease.get("lease_owner", ""))
+        if status not in ACTIVE_LEASE_STATUSES or lease.get("repo") != repo:
+            continue
+        if exclude_owner and owner == exclude_owner:
+            continue
+        if is_lease_expired(lease):
+            continue
+        active.append(lease)
+    return active
+
+
+def normalize_expected_files(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    files: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        normalized = item.strip().lstrip("./")
+        if normalized:
+            files.append(normalized)
+    return sorted(set(files))
+
+
+def active_work_conflict_for_task(
+    task: dict[str, Any],
+    leases: list[dict[str, Any]],
+    *,
+    lease_owner: str,
+) -> dict[str, Any] | None:
+    tid = str(task.get("task_id", ""))
+    repo = str(task.get("repo", ""))
+    candidate_files = normalize_expected_files(task.get("expected_files", []))
+
+    for lease in active_leases_for_repo(leases, repo, exclude_owner=lease_owner):
+        active_task_id = str(lease.get("task_id", ""))
+        if active_task_id == tid:
+            continue
+
+        active_files = normalize_expected_files(lease.get("expected_files", []))
+        if not candidate_files or not active_files:
+            return {
+                "task_id": tid,
+                "repo": repo,
+                "active_task_id": active_task_id,
+                "active_lease_owner": str(lease.get("lease_owner", "")),
+                "overlap": [],
+                "reason": "unknown expected_files for same repo active lease",
+            }
+
+        overlap = sorted(set(candidate_files).intersection(active_files))
+        if overlap:
+            return {
+                "task_id": tid,
+                "repo": repo,
+                "active_task_id": active_task_id,
+                "active_lease_owner": str(lease.get("lease_owner", "")),
+                "overlap": overlap,
+                "reason": "expected file overlap",
+            }
+
     return None
 
 
@@ -321,6 +430,9 @@ def dispatch(
     candidates = run_planner(
         planner_path, ledger, limit=planner_limit, repo_filter=repo_filter,
     )
+    candidates = enrich_candidates_from_ledger(
+        candidates, load_ledger_task_index(ledger)
+    )
 
     requested_candidates = candidates
     if task_ids:
@@ -341,20 +453,18 @@ def dispatch(
         tid = task.get("task_id", "")
         trepo = task.get("repo", "")
 
-        repo_lease = active_lease_for_repo(leases, trepo, exclude_owner=lease_owner)
         task_lease = active_lease_for_task(leases, tid, exclude_owner=lease_owner)
 
-        collision = repo_lease or task_lease
-        if collision:
-            if is_lease_expired(collision):
+        if task_lease:
+            if is_lease_expired(task_lease):
                 lease_filtered.append(task)
                 continue
             lease_blocked.append({
                 "task_id": tid,
                 "repo": trepo,
                 "reason": (
-                    f"active lease by {collision.get('lease_owner', 'unknown')} "
-                    f"(expires {collision.get('expires_at', '')})"
+                    f"active task lease by {task_lease.get('lease_owner', 'unknown')} "
+                    f"(expires {task_lease.get('expires_at', '')})"
                 ),
             })
             continue
@@ -383,10 +493,21 @@ def dispatch(
             continue
         assignable.append(task)
 
+    conflict_filtered: list[dict[str, Any]] = []
+    active_work_blocked: list[dict[str, Any]] = []
+    for task in assignable:
+        conflict = active_work_conflict_for_task(
+            task, leases, lease_owner=lease_owner
+        )
+        if conflict:
+            active_work_blocked.append(conflict)
+            continue
+        conflict_filtered.append(task)
+
     if task_ids:
-        selected = assignable
+        selected = conflict_filtered
     else:
-        selected = assignable[:limit]
+        selected = conflict_filtered[:limit]
 
     if not selected:
         summary = {
@@ -396,10 +517,13 @@ def dispatch(
             "total_candidates": len(candidates),
             "requested_candidates": len(requested_candidates),
             "assignable_candidates": len(assignable),
+            "conflict_free_candidates": len(conflict_filtered),
             "filtered_by_lease": len(lease_blocked),
             "filtered_by_worker_mapping": len(unassignable_tasks),
+            "filtered_by_active_work": len(active_work_blocked),
             "unassignable_repos": sorted(unassignable_repos),
             "unassignable_tasks": unassignable_tasks,
+            "active_work_blocked": active_work_blocked,
             "lease_blocked": lease_blocked,
         }
         if json_output:
@@ -410,6 +534,8 @@ def dispatch(
                 print(f"  BLOCKED: {blk['task_id']} ({blk['repo']}) - {blk['reason']}")
             for item in unassignable_tasks:
                 print(f"  UNASSIGNABLE: {item['task_id']} ({item['repo']}) - {item['reason']}")
+            for item in active_work_blocked:
+                print(f"  ACTIVE-WORK: {item['task_id']} ({item['repo']}) - {item['reason']}")
         return 0
 
     results: list[dict[str, Any]] = []
@@ -539,11 +665,14 @@ def dispatch(
         "total_candidates": len(candidates),
         "requested_candidates": len(requested_candidates),
         "assignable_candidates": len(assignable),
+        "conflict_free_candidates": len(conflict_filtered),
         "selected": len(selected),
         "filtered_by_lease": len(lease_blocked),
         "filtered_by_worker_mapping": len(unassignable_tasks),
+        "filtered_by_active_work": len(active_work_blocked),
         "unassignable_repos": sorted(unassignable_repos),
         "unassignable_tasks": unassignable_tasks,
+        "active_work_blocked": active_work_blocked,
         "dispatched": len(results),
         "lease_blocked": lease_blocked,
         "results": results,
@@ -561,10 +690,14 @@ def dispatch(
         print(f"  Candidates:        {len(candidates)}")
         print(f"  Selected:          {len(selected)}")
         print(f"  Assignable:        {len(assignable)}")
+        print(f"  Conflict-free:     {len(conflict_filtered)}")
         print(f"  Filtered (lease):  {len(lease_blocked)}")
         print(f"  Filtered (worker): {len(unassignable_tasks)}")
+        print(f"  Filtered (active): {len(active_work_blocked)}")
         for item in unassignable_tasks:
             print(f"  UNASSIGNABLE: {item['task_id']} ({item['repo']}) - {item['reason']}")
+        for item in active_work_blocked:
+            print(f"  ACTIVE-WORK: {item['task_id']} ({item['repo']}) - {item['reason']}")
         print(f"  Dispatched:        {len(results)}")
         for r in results:
             print(f"  [{r['repo']}] {r['task_id']}:")
