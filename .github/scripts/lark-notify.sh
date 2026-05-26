@@ -194,6 +194,10 @@ def fetch_error_excerpt():
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
             archive = response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return "Logs are not available (the run may have expired or logs were not generated)"
+        return f"Log download failed: HTTP {exc.code}"
     except Exception as exc:
         return f"Log download failed: {exc}"
 
