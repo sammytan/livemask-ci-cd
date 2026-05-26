@@ -561,7 +561,7 @@ CREATE_PAYLOAD=$(cat <<EOF
 {
   "slug": "${SMOKE_SLUG}",
   "locale": "en-US",
-  "content_type": "announcement",
+  "content_type": "app_content",
   "surface": "app",
   "placement": "app_notice_center",
   "title": "Smoke Announcement ${TIMESTAMP}",
@@ -697,7 +697,7 @@ INVALID_LINK_PAYLOAD=$(cat <<EOF
 {
   "slug": "smoke-invalid-link-${TIMESTAMP}",
   "locale": "en-US",
-  "content_type": "announcement",
+  "content_type": "app_content",
   "surface": "app",
   "placement": "app_notice_center",
   "title": "Invalid Link",
