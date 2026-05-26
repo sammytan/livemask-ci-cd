@@ -61,6 +61,7 @@ jobs:
         with:
           repository: MyAiDevs/livemask-ci-cd
           ref: dev
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
 
       - name: Python compile check
         run: python3 -m py_compile scripts/auto-task-assignment.py
