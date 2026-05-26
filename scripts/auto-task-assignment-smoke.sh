@@ -23,6 +23,7 @@
 #   SC-12  unknown expected_files on same repo blocks conservatively
 #   SC-13  worker invocation receives a supported default Cursor SDK model
 #   SC-14  worker timeout is configurable and long enough for SDK agents
+#   SC-15  implement-for-review syncs docs task brief before worker launch
 
 set -euo pipefail
 
@@ -467,6 +468,18 @@ test_worker_timeout_is_configurable() {
   assert_contains "SC-14: subprocess uses configured timeout" "${source}" 'timeout=worker_timeout_seconds'
 }
 
+test_implement_syncs_worker_brief() {
+  echo ""
+  echo "=== SC-15: implement-for-review syncs worker brief ==="
+
+  local source
+  source="$(cat "${AUTO_ASSIGN}")"
+  assert_contains "SC-15: brief builder reads task_doc" "${source}" 'task_doc = str(task.get("task_doc", ""))'
+  assert_contains "SC-15: brief sync writes runtime brief" "${source}" 'sync_worker_brief('
+  assert_contains "SC-15: brief sync uses worker repo" "${source}" 'worker_path.parent.parent, task, docs_dir'
+  assert_contains "SC-15: brief path recorded in evidence" "${source}" 'evidence_data["brief_path"]'
+}
+
 # ============================================================================
 # SC-05: Worker command mapping resolves expected script paths for all 6 runtime repos
 # ============================================================================
@@ -774,6 +787,7 @@ test_active_work_different_files_allows_selection
 test_active_work_unknown_files_blocks_selection
 test_worker_invocation_uses_supported_default_model
 test_worker_timeout_is_configurable
+test_implement_syncs_worker_brief
 
 echo ""
 echo "================================================================"
