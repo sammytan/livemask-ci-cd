@@ -11,6 +11,7 @@
 #   SC-02  active lease (non-expired) prevents task selection
 #   SC-03  expired lease allows task selection
 #   SC-04  non-dry-run accept-only acquires lease in temp lease file
+#   SC-04B accept-only uses wildcard expected_files when ledger scope is missing
 #   SC-05  worker command mapping resolves expected paths for all 6 runtime repos
 #   SC-06  implement-for-review requires opt-in guard
 #   SC-07  no commits/merges/pushes/dispatches in any mode
@@ -372,8 +373,42 @@ test_accept_acquires_lease() {
   assert_contains "SC-04: lease was acquired" "${lease_content}" '"status": "active"'
   assert_contains "SC-04: lease has owner" "${lease_content}" 'ci-cd-smoke-test'
   assert_contains "SC-04: lease has task id" "${lease_content}" 'TASK-SMOKE-FAKE-001'
+  assert_contains "SC-04: lease carries expected_files" "${lease_content}" 'internal/protocol/types.go'
 
   verify_real_files_unchanged "SC-04"
+
+  teardown_sandbox
+}
+
+test_accept_missing_expected_files_uses_wildcard() {
+  echo ""
+  echo "=== SC-04B: accept-only missing expected_files uses wildcard ==="
+  setup_sandbox
+
+  python3 - <<PY
+import json
+from pathlib import Path
+
+path = Path("${SANDBOX}/task-state-ledger.json")
+data = json.loads(path.read_text())
+for module in data["modules"]:
+    for task in module["tasks"]:
+        if task["task_id"] == "TASK-SMOKE-FAKE-001":
+            task.pop("expected_files", None)
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+
+  local output
+  output="$(run_assign "--mode accept-only --limit 1 --json" 2>&1 || true)"
+
+  assert_contains "SC-04B: shows dispatched" "${output}" "dispatched"
+
+  local lease_content
+  lease_content="$(cat "${SANDBOX}/task-leases.json")"
+  assert_contains "SC-04B: lease was acquired" "${lease_content}" '"status": "active"'
+  assert_contains "SC-04B: wildcard expected_files used" "${lease_content}" '"*"'
+
+  verify_real_files_unchanged "SC-04B"
 
   teardown_sandbox
 }
@@ -673,6 +708,7 @@ test_dry_run_selects_task
 test_active_lease_blocks_selection
 test_expired_lease_allows_selection
 test_accept_acquires_lease
+test_accept_missing_expected_files_uses_wildcard
 test_worker_mapping_script_parse
 test_implement_requires_opt_in
 test_no_side_effects

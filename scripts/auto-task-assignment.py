@@ -221,6 +221,11 @@ def normalize_expected_files(value: Any) -> list[str]:
     return sorted(set(files))
 
 
+def lease_expected_files(value: Any) -> list[str]:
+    files = normalize_expected_files(value)
+    return files or ["*"]
+
+
 def active_work_conflict_for_task(
     task: dict[str, Any],
     leases: list[dict[str, Any]],
@@ -587,7 +592,7 @@ def dispatch(
                 repo=trepo,
                 branch=branch,
                 lease_owner=lease_owner,
-                expected_files=task.get("expected_files", []),
+                expected_files=lease_expected_files(task.get("expected_files", [])),
             )
             evidence_data["lease_acquired"] = True
             evidence_data["lease_entry"] = lease_entry
