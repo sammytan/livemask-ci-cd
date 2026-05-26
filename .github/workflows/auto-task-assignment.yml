@@ -1,0 +1,163 @@
+# TASK-CICD-AUTO-TASK-ASSIGNMENT-WORKFLOW-INTEGRATION-001
+#
+# Manual trigger workflow for auto-task-assignment smoke/validation.
+#
+# Safety constraints:
+#   - workflow_dispatch only  (no cron, no push, no PR)
+#   - default mode: dry-run
+#   - accepted modes: dry-run, accept-only
+#   - implement mode is blocked by script CI guard + workflow input validation
+#   - approved mode is never referenced
+#   - skip-worker-invoke is always set
+#   - no commit, no merge, no push, no dispatch
+
+name: Auto Task Assignment
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Assignment mode
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - accept-only
+      repo:
+        description: Optional runtime repo filter (e.g. livemask-backend)
+        required: false
+        default: ""
+        type: string
+      task_id:
+        description: Optional TASK ID filter (repeatable not supported in workflow input; comma-separated)
+        required: false
+        default: ""
+        type: string
+      limit:
+        description: Max tasks to select from planner
+        required: false
+        default: 1
+        type: number
+      lease_owner:
+        description: Owner name for lease acquisition
+        required: false
+        default: github-actions-auto-task-assignment
+        type: string
+      run_smoke:
+        description: Run auto-task-assignment-smoke.sh before assignment
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-assign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-ci-cd
+          ref: dev
+
+      - name: Python compile check
+        run: python3 -m py_compile scripts/auto-task-assignment.py
+
+      - name: Shell syntax check
+        run: |
+          bash -n scripts/auto-task-assignment-smoke.sh
+          if [[ -f scripts/auto-task-assignment-workflow-smoke.sh ]]; then
+            bash -n scripts/auto-task-assignment-workflow-smoke.sh
+          fi
+
+      - name: Run auto-task-assignment smoke
+        if: ${{ inputs.run_smoke == true }}
+        run: bash scripts/auto-task-assignment-smoke.sh
+
+      - name: Run workflow smoke
+        if: ${{ inputs.run_smoke == true }}
+        run: bash scripts/auto-task-assignment-workflow-smoke.sh
+
+      - name: Validate mode safety
+        run: |
+          mode="${{ inputs.mode }}"
+          case "${mode}" in
+            dry-run|accept-only)
+              echo "mode=${mode} OK"
+              ;;
+            *)
+              echo "ERROR: invalid mode '${mode}'"
+              exit 2
+              ;;
+          esac
+
+      - name: Verify workflow_dispatch mode safety
+        run: |
+          # mode is already restricted by input options (dry-run, accept-only)
+          echo "Workflow mode safety: allowed options = dry-run, accept-only (enforced by YAML schema)"
+
+      - name: Run auto-task-assignment (dry-run / accept-only, skip-worker-invoke)
+        id: assignment
+        env:
+          MODE: ${{ inputs.mode }}
+          REPO: ${{ inputs.repo }}
+          TASK_IDS: ${{ inputs.task_id }}
+          LIMIT: ${{ inputs.limit }}
+          LEASE_OWNER: ${{ inputs.lease_owner }}
+          SKIP_WORKER: "true"
+        run: |
+          args=(
+            --mode "${MODE}"
+            --lease-owner "${LEASE_OWNER}"
+            --skip-worker-invoke
+            --json
+            --evidence-dir ".cursor-worker/auto-task-assignment"
+          )
+
+          if [[ -n "${REPO}" ]]; then
+            args+=(--repo "${REPO}")
+          fi
+
+          if [[ -n "${TASK_IDS}" ]]; then
+            IFS=',' read -ra IDS <<< "${TASK_IDS}"
+            for tid in "${IDS[@]}"; do
+              tid="$(echo "${tid}" | xargs)"
+              if [[ -n "${tid}" ]]; then
+                args+=(--task-id "${tid}")
+              fi
+            done
+          fi
+
+          args+=(--limit "${LIMIT}")
+
+          python3 scripts/auto-task-assignment.py "${args[@]}"
+
+      - name: Write evidence summary
+        id: evidence
+        run: |
+          EVIDENCE_DIR=".cursor-worker/auto-task-assignment"
+          mkdir -p "${EVIDENCE_DIR}"
+          SUMMARY_FILE="${EVIDENCE_DIR}/workflow-summary.json"
+          {
+            echo '{'
+            echo '  "workflow": "auto-task-assignment",'
+            echo '  "mode": "${{ inputs.mode }}",'
+            echo '  "dry_run": ${{ inputs.mode == 'dry-run' }},'
+            echo '  "repo": "${{ inputs.repo }}",'
+            echo '  "task_id": "${{ inputs.task_id }}",'
+            echo '  "limit": ${{ inputs.limit }},'
+            echo '  "lease_owner": "${{ inputs.lease_owner }}",'
+            echo '  "run_smoke": ${{ inputs.run_smoke }},'
+            echo '  "skip_worker_invoke": true,'
+            echo '  "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"'
+            echo '}'
+          } > "${SUMMARY_FILE}"
+          echo "Evidence written to ${SUMMARY_FILE}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: auto-task-assignment-evidence
+          path: .cursor-worker/auto-task-assignment/
+          if-no-files-found: warn

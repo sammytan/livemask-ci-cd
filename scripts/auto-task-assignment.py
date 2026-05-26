@@ -645,6 +645,17 @@ def main(argv: list[str]) -> int:
     if args.dry_run_override:
         mode = "dry-run"
 
+    # Safety guard: in CI/GitHub Actions context, never run implement-for-review
+    if mode == "implement-for-review" and (
+        os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS")
+    ):
+        print(
+            "BLOCKED: --mode implement-for-review is forbidden in CI/GitHub Actions "
+            "context. This runner only supports dry-run and accept-only.",
+            file=sys.stderr,
+        )
+        return 3
+
     if mode == "implement-for-review" and not args.confirm_implement:
         if not args.task_id and not args.repo:
             print(
