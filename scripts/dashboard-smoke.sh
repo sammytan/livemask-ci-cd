@@ -406,14 +406,14 @@ else
       pass "traffic/flows: has non-empty traffic data"
       ;;
     EMPTY_WITH_REASON:*)
-      local ereason="${TRAFFIC_EMPTY_CHECK#EMPTY_WITH_REASON:}"
+      ereason="${TRAFFIC_EMPTY_CHECK#EMPTY_WITH_REASON:}"
       pass "traffic/flows: empty with explicit reason: ${ereason}"
       ;;
     EMPTY_NO_REASON)
       fail "traffic/flows: empty response without explicit empty_reason"
       ;;
     NONSTANDARD:*)
-      local shape="${TRAFFIC_EMPTY_CHECK#NONSTANDARD:}"
+      shape="${TRAFFIC_EMPTY_CHECK#NONSTANDARD:}"
       pass "traffic/flows: non-standard shape: ${shape}"
       ;;
     *)
@@ -459,14 +459,14 @@ else:
 " 2>/dev/null || true
       ;;
     EMPTY_WITH_REASON:*)
-      local ereason="${COUNTRIES_EMPTY#EMPTY_WITH_REASON:}"
+      ereason="${COUNTRIES_EMPTY#EMPTY_WITH_REASON:}"
       pass "traffic/countries: empty with explicit reason: ${ereason}"
       ;;
     EMPTY_NO_REASON)
       fail "traffic/countries: empty response without explicit empty_reason"
       ;;
     NONSTANDARD:*)
-      local shape="${COUNTRIES_EMPTY#NONSTANDARD:}"
+      shape="${COUNTRIES_EMPTY#NONSTANDARD:}"
       pass "traffic/countries: non-standard shape: ${shape}"
       ;;
     *)
@@ -501,14 +501,14 @@ else
       pass "traffic/bandwidth-trend: has bandwidth trend data"
       ;;
     EMPTY_WITH_REASON:*)
-      local ereason="${BW_EMPTY#EMPTY_WITH_REASON:}"
+      ereason="${BW_EMPTY#EMPTY_WITH_REASON:}"
       pass "traffic/bandwidth-trend: empty with explicit reason: ${ereason}"
       ;;
     EMPTY_NO_REASON)
       fail "traffic/bandwidth-trend: empty response without explicit empty_reason"
       ;;
     NONSTANDARD:*)
-      local shape="${BW_EMPTY#NONSTANDARD:}"
+      shape="${BW_EMPTY#NONSTANDARD:}"
       pass "traffic/bandwidth-trend: non-standard shape: ${shape}"
       ;;
     *)
@@ -554,14 +554,14 @@ else:
 " 2>/dev/null || true
       ;;
     EMPTY_WITH_REASON:*)
-      local ereason="${USERS_EMPTY#EMPTY_WITH_REASON:}"
+      ereason="${USERS_EMPTY#EMPTY_WITH_REASON:}"
       pass "traffic/top-users: empty with explicit reason: ${ereason}"
       ;;
     EMPTY_NO_REASON)
       fail "traffic/top-users: empty response without explicit empty_reason"
       ;;
     NONSTANDARD:*)
-      local shape="${USERS_EMPTY#NONSTANDARD:}"
+      shape="${USERS_EMPTY#NONSTANDARD:}"
       pass "traffic/top-users: non-standard shape: ${shape}"
       ;;
     *)
