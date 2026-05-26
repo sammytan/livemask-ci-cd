@@ -1978,7 +1978,17 @@ if [[ -n "${ELIG_TEMPLATE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
         ELIG_LKG_FIELD_CHECK=$(echo "${ELIG_LKG_RESP}" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
-# Check for nested 'capability_eligibility' array
+if 'lkg_version' in d or 'lkg_at' in d:
+    print('FOUND: lkg_version at top/root level')
+    sys.exit(0)
+if 'template' in d and isinstance(d['template'], dict) and ('lkg_version' in d['template'] or 'lkg_at' in d['template']):
+    print('FOUND: lkg_version in template object')
+    sys.exit(0)
+adj = d.get('eligibility',d.get('data',{}))
+if isinstance(adj, dict) and ('lkg_version' in adj or 'lkg_at' in adj):
+    print('FOUND: lkg_version in eligibility object')
+    sys.exit(0)
+# Check for nested 'capability_eligibility' array after top-level contracts.
 cap_elig = d.get('capability_eligibility',d.get('capabilities',d.get('items',[])))
 if isinstance(cap_elig, list):
     has_lkg = any('lkg_version' in item for item in cap_elig)
@@ -1987,17 +1997,7 @@ if isinstance(cap_elig, list):
     else:
         print(f'NO_LKG: capability_eligibility has {len(cap_elig)} entries but no lkg_version')
 else:
-    # Check top-level or nested directly
-    if 'lkg_version' in d or 'lkg_at' in d:
-        print('FOUND: lkg_version at top/root level')
-    elif 'template' in d and isinstance(d['template'], dict) and ('lkg_version' in d['template']):
-        print('FOUND: lkg_version in template object')
-    else:
-        adj = d.get('eligibility',d.get('data',{}))
-        if 'lkg_version' in adj if isinstance(adj, dict) else False:
-            print('FOUND: lkg_version in eligibility object')
-        else:
-            print('NO_LKG_FIELDS')
+    print('NO_LKG_FIELDS')
 " 2>/dev/null || echo "PARSE_ERROR")
 
         case "${ELIG_LKG_FIELD_CHECK}" in

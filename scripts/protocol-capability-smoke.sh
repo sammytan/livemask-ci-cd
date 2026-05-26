@@ -1455,14 +1455,22 @@ if [[ -n "${ELIG_TID}" && -n "${ADMIN_TOKEN}" ]]; then
       ELIG_LKG_FOUND=$(echo "${ELIG_LKG_RESP}" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
+if 'lkg_version' in d or 'lkg_at' in d:
+    print('top_level_lkg=yes')
+    sys.exit(0)
+if 'template' in d and isinstance(d['template'], dict) and ('lkg_version' in d['template'] or 'lkg_at' in d['template']):
+    print('template_lkg=yes')
+    sys.exit(0)
+adj = d.get('eligibility',d.get('data',{}))
+if isinstance(adj, dict) and ('lkg_version' in adj or 'lkg_at' in adj):
+    print('eligibility_lkg=yes')
+    sys.exit(0)
 cap = d.get('capability_eligibility',d.get('capabilities',d.get('items',[])))
 if isinstance(cap, list):
     has = any('lkg_version' in c for c in cap)
     print(f'cap_elig_has_lkg={\"yes\" if has else \"no\"} count={len(cap)}')
 else:
-    # Check top-level
-    has = 'lkg_version' in d
-    print(f'top_level_lkg={\"yes\" if has else \"no\"}')
+    print('top_level_lkg=no')
 " 2>/dev/null || echo "PARSE_ERROR")
       if echo "${ELIG_LKG_FOUND}" | grep -q "yes"; then
         pass "Template eligibility contains per-node lkg_version: ${ELIG_LKG_FOUND}"
