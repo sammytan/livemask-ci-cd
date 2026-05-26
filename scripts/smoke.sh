@@ -1021,4 +1021,27 @@ else
 fi
 
 echo ""
+# ── Auto Task Assignment Smoke (TASK-CICD-AUTO-TASK-ASSIGNMENT-WORKFLOW-INTEGRATION-001) ──
+if [[ "${RUN_AUTO_TASK_ASSIGNMENT_SMOKE:-}" == "1" ]]; then
+  echo ""
+  echo "=== Smoke: Auto Task Assignment (TASK-CICD-AUTO-TASK-ASSIGNMENT-WORKFLOW-INTEGRATION-001) ==="
+  if bash "${SCRIPT_DIR}/auto-task-assignment-smoke.sh" 2>&1; then
+    echo "Auto task assignment smoke PASSED."
+  else
+    ata_rc=$?
+    echo ""
+    echo "=== Auto Task Assignment Smoke FAILED ==="
+    exit ${ata_rc}
+  fi
+  if bash "${SCRIPT_DIR}/auto-task-assignment-workflow-smoke.sh" 2>&1; then
+    echo "Auto task assignment workflow smoke PASSED."
+  else
+    ataw_rc=$?
+    echo ""
+    echo "=== Auto Task Assignment Workflow Smoke FAILED ==="
+    exit ${ataw_rc}
+  fi
+fi
+
+echo ""
 echo "Smoke PASS: full stack (health + config center + auth/rbac + node agent + billing/devices + connect session + content system + geoip + job-service + dashboard + protocol-endpoint-rollout + protocol-capability + geoip-credentials + nodeagent-release + website-blog + system-settings + scheduler + app-release + sentry-config + observability + i18n-language + bandwidth-auto-reconnect + traffic-analytics-v2 + admin-nav-ia + jobs-hardening + growth-revenue + reward-notification + release-control + connection-quality + nodeagent-config-sync + nat-sharing-guard + nodeagent-speedtest-bandwidth + nodeagent-credential-rotation + real-data-closed-loop + jobs-real-data + node-status-freshness + app-runtime-governance + protocol-parity + log-retention + admin-nodes-ux + website-i18n-announcement + secret-leak-standard + worker-harness)"
