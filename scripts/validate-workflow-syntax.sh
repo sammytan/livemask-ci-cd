@@ -37,6 +37,11 @@ workflow_contracts = {
     "on" => ["push", "workflow_dispatch"],
     "jobs" => ["deploy", "notify-lark"],
   },
+  ".github/workflows/auto-task-assignment.yml" => {
+    "name" => "Auto Task Assignment",
+    "on" => ["workflow_dispatch"],
+    "jobs" => ["validate-and-assign"],
+  },
   ".github/workflows/ci-runner-diagnostics.yml" => {
     "name" => "CI Runner Diagnostics",
     "on" => ["workflow_dispatch"],

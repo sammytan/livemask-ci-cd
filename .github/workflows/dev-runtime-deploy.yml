@@ -28,11 +28,16 @@ jobs:
       LIVEMASK_JOB_SERVICE_PORT: "19191"
       POSTGRES_PORT: "15432"
       REDIS_PORT: "16379"
+      LIVEMASK_PUBLIC_HOST: "47.243.128.122"
+      PUBLIC_API_BASE_URL: "http://47.243.128.122:18080"
+      CORS_ALLOWED_ORIGINS: "http://47.243.128.122:3001,http://47.243.128.122:3002,http://127.0.0.1:3001,http://127.0.0.1:3002,http://localhost:3001,http://localhost:3002"
     runs-on:
       group: livemask-staging
       labels: [self-hosted, Linux, livemask, docker, staging]
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
 
       - name: Checkout backend source into build context
         uses: actions/checkout@v4
@@ -78,6 +83,10 @@ jobs:
           echo "  host 19191 -> job-service container 19191"
           echo "  host 15432 -> postgres container 5432"
           echo "  host 16379 -> redis container 6379"
+          echo "Browser-facing dev runtime URLs:"
+          echo "  backend public API: ${PUBLIC_API_BASE_URL}"
+          echo "  admin public URL:   http://${LIVEMASK_PUBLIC_HOST}:${LIVEMASK_ADMIN_PORT}"
+          echo "  website public URL: http://${LIVEMASK_PUBLIC_HOST}:${LIVEMASK_WEBSITE_PORT}"
           docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' || true
 
       - name: Start persistent dev runtime
@@ -122,6 +131,26 @@ jobs:
           check_url "admin" "http://127.0.0.1:${LIVEMASK_ADMIN_PORT}/login"
           check_url "website" "http://127.0.0.1:${LIVEMASK_WEBSITE_PORT}/"
 
+      - name: Verify browser-facing dev runtime config
+        run: |
+          echo "Checking website bundle does not point browser clients at 127.0.0.1:${LIVEMASK_BACKEND_HTTP_PORT}"
+          if docker compose -f infra/docker-compose.staging.yml exec -T website sh -lc "grep -R \"127.0.0.1:${LIVEMASK_BACKEND_HTTP_PORT}\" -n /usr/share/nginx/html >/tmp/livemask-localhost-api.txt 2>/dev/null"; then
+            echo "FAIL: website bundle still contains browser-facing localhost API URL"
+            docker compose -f infra/docker-compose.staging.yml exec -T website sh -lc "cat /tmp/livemask-localhost-api.txt | head -20" || true
+            exit 1
+          fi
+          echo "PASS: website bundle does not contain browser-facing localhost API URL"
+
+          code=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+            -X OPTIONS "http://127.0.0.1:${LIVEMASK_BACKEND_HTTP_PORT}/api/v1/content/website?locale=en-US" \
+            -H "Origin: http://${LIVEMASK_PUBLIC_HOST}:${LIVEMASK_WEBSITE_PORT}" \
+            -H "Access-Control-Request-Method: GET" || echo "000")
+          if [[ "${code}" != "200" && "${code}" != "204" ]]; then
+            echo "FAIL: CORS preflight returned HTTP ${code}"
+            exit 1
+          fi
+          echo "PASS: CORS preflight from website public origin returned HTTP ${code}"
+
       - name: Upload runtime status artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -136,6 +165,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
 
       - name: Download runtime status artifact
         uses: actions/download-artifact@v4
