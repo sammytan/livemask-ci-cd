@@ -134,7 +134,7 @@ Admin Sentry Summary	GET	/admin/api/v1/observability/sentry	200|401|404	json.tot
 # ═══════════════════════════════════════════════════════════════════════════════
 # I18n endpoints (TASK-CICD-I18N-001)
 # ═══════════════════════════════════════════════════════════════════════════════
-I18n Messages List	GET	/api/v1/i18n/messages	200|404	json.messages.length>=0	-	-
+I18n Messages List	GET	/api/v1/i18n/messages	200|404	json.supported_locales.length>=1;json.error_codes.AUTH_INVALID_CREDENTIALS=errors.auth.invalid_credentials	-	-
 App I18n Locale	GET	/api/v1/i18n/app?locale=en	200|404	-	-	-
 
 # ═══════════════════════════════════════════════════════════════════════════════
