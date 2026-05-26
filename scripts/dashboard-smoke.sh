@@ -292,6 +292,18 @@ dashboard_get() {
   echo "${http_code}|||${body}"
 }
 
+dashboard_response_code() {
+  local response="$1"
+  printf '%s' "${response%%|||*}"
+}
+
+dashboard_response_body() {
+  local response="$1"
+  if [[ "${response}" == *"|||"* ]]; then
+    printf '%s' "${response#*|||}"
+  fi
+}
+
 check_dashboard_endpoint() {
   local label="$1"
   local path="$2"
@@ -317,8 +329,8 @@ check_dashboard_endpoint() {
 echo ""
 echo "--- [3] GET /admin/api/v1/dashboard/overview ---"
 resp=$(dashboard_get "overview" "/admin/api/v1/dashboard/overview")
-HTTP_OVERVIEW=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_OVERVIEW=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_OVERVIEW=$(dashboard_response_code "${resp}")
+BODY_OVERVIEW=$(dashboard_response_body "${resp}")
 check_dashboard_endpoint "overview" "/admin/api/v1/dashboard/overview" "${BODY_OVERVIEW}" "${HTTP_OVERVIEW}"
 
 OVERVIEW_MODULES=$(echo "${BODY_OVERVIEW}" | python3 -c "
@@ -351,8 +363,8 @@ fi
 echo ""
 echo "--- [4] GET /admin/api/v1/dashboard/control-plane ---"
 resp=$(dashboard_get "control-plane" "/admin/api/v1/dashboard/control-plane")
-HTTP_CP=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_CP=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_CP=$(dashboard_response_code "${resp}")
+BODY_CP=$(dashboard_response_body "${resp}")
 check_dashboard_endpoint "control-plane" "/admin/api/v1/dashboard/control-plane" "${BODY_CP}" "${HTTP_CP}"
 
 CP_CHECK=$(echo "${BODY_CP}" | python3 -c "
@@ -379,8 +391,8 @@ fi
 echo ""
 echo "--- [5] GET /admin/api/v1/dashboard/traffic/flows ---"
 resp=$(dashboard_get "traffic/flows" "/admin/api/v1/dashboard/traffic/flows")
-HTTP_TRAFFIC=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_TRAFFIC=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_TRAFFIC=$(dashboard_response_code "${resp}")
+BODY_TRAFFIC=$(dashboard_response_body "${resp}")
 
 if [[ "${HTTP_TRAFFIC}" != "200" ]]; then
   fail "traffic/flows: HTTP ${HTTP_TRAFFIC} (expected 200)"
@@ -419,8 +431,8 @@ fi
 echo ""
 echo "--- [6] GET /admin/api/v1/dashboard/traffic/countries ---"
 resp=$(dashboard_get "traffic/countries" "/admin/api/v1/dashboard/traffic/countries")
-HTTP_COUNTRIES=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_COUNTRIES=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_COUNTRIES=$(dashboard_response_code "${resp}")
+BODY_COUNTRIES=$(dashboard_response_body "${resp}")
 
 if [[ "${HTTP_COUNTRIES}" == "404" ]]; then
   skip "traffic/countries: HTTP 404 (endpoint not yet deployed)"
@@ -472,8 +484,8 @@ fi
 echo ""
 echo "--- [7] GET /admin/api/v1/dashboard/traffic/bandwidth-trend ---"
 resp=$(dashboard_get "traffic/bandwidth-trend" "/admin/api/v1/dashboard/traffic/bandwidth-trend")
-HTTP_BW=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_BW=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_BW=$(dashboard_response_code "${resp}")
+BODY_BW=$(dashboard_response_body "${resp}")
 
 if [[ "${HTTP_BW}" == "404" ]]; then
   skip "traffic/bandwidth-trend: HTTP 404 (endpoint not yet deployed)"
@@ -514,8 +526,8 @@ fi
 echo ""
 echo "--- [8] GET /admin/api/v1/dashboard/traffic/top-users ---"
 resp=$(dashboard_get "traffic/top-users" "/admin/api/v1/dashboard/traffic/top-users")
-HTTP_USERS=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_USERS=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_USERS=$(dashboard_response_code "${resp}")
+BODY_USERS=$(dashboard_response_body "${resp}")
 
 if [[ "${HTTP_USERS}" == "404" ]]; then
   skip "traffic/top-users: HTTP 404 (endpoint not yet deployed)"
@@ -567,8 +579,8 @@ fi
 echo ""
 echo "--- [9] GET /admin/api/v1/dashboard/jobs/summary ---"
 resp=$(dashboard_get "jobs/summary" "/admin/api/v1/dashboard/jobs/summary")
-HTTP_JOBS=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_JOBS=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_JOBS=$(dashboard_response_code "${resp}")
+BODY_JOBS=$(dashboard_response_body "${resp}")
 check_dashboard_endpoint "jobs/summary" "/admin/api/v1/dashboard/jobs/summary" "${BODY_JOBS}" "${HTTP_JOBS}"
 
 JOBS_CHECK=$(echo "${BODY_JOBS}" | python3 -c "
@@ -592,8 +604,8 @@ pass "jobs/summary: response structure verified"
 echo ""
 echo "--- [10] GET /admin/api/v1/dashboard/geoip/summary ---"
 resp=$(dashboard_get "geoip/summary" "/admin/api/v1/dashboard/geoip/summary")
-HTTP_GEOIP=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_GEOIP=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_GEOIP=$(dashboard_response_code "${resp}")
+BODY_GEOIP=$(dashboard_response_body "${resp}")
 check_dashboard_endpoint "geoip/summary" "/admin/api/v1/dashboard/geoip/summary" "${BODY_GEOIP}" "${HTTP_GEOIP}"
 
 GEOIP_CHECK=$(echo "${BODY_GEOIP}" | python3 -c "
@@ -617,8 +629,8 @@ pass "geoip/summary: response structure verified"
 echo ""
 echo "--- [11] GET /admin/api/v1/dashboard/content/summary ---"
 resp=$(dashboard_get "content/summary" "/admin/api/v1/dashboard/content/summary")
-HTTP_CONTENT=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_CONTENT=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_CONTENT=$(dashboard_response_code "${resp}")
+BODY_CONTENT=$(dashboard_response_body "${resp}")
 check_dashboard_endpoint "content/summary" "/admin/api/v1/dashboard/content/summary" "${BODY_CONTENT}" "${HTTP_CONTENT}"
 
 CONTENT_CHECK=$(echo "${BODY_CONTENT}" | python3 -c "
@@ -642,8 +654,8 @@ pass "content/summary: response structure verified"
 echo ""
 echo "--- [12] GET /admin/api/v1/dashboard/reconnect/summary ---"
 resp=$(dashboard_get "reconnect/summary" "/admin/api/v1/dashboard/reconnect/summary")
-HTTP_RECONNECT=$(echo "${resp}" | awk -F'|||' '{print $1}')
-BODY_RECONNECT=$(echo "${resp}" | awk -F'|||' '{print $2}')
+HTTP_RECONNECT=$(dashboard_response_code "${resp}")
+BODY_RECONNECT=$(dashboard_response_body "${resp}")
 check_dashboard_endpoint "reconnect/summary" "/admin/api/v1/dashboard/reconnect/summary" "${BODY_RECONNECT}" "${HTTP_RECONNECT}"
 
 RECONNECT_CHECK=$(echo "${BODY_RECONNECT}" | python3 -c "
