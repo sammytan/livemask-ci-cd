@@ -146,15 +146,24 @@ SAFE_SECRET_REF_PREFIXES = (
 def path_join(path, key):
     return f'{path}.{key}' if path else str(key)
 
-def looks_like_raw_secret(value):
+def has_sensitive_value_pattern(value):
     if not isinstance(value, str):
         return False
     stripped = value.strip()
     if any(pattern in stripped for pattern in SENSITIVE_VALUE_PATTERNS):
         return True
+    return False
+
+def looks_like_raw_secret_ref(value):
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if has_sensitive_value_pattern(stripped):
+        return True
     if len(stripped) >= 48 and not any(ch.isspace() for ch in stripped):
-        # Long opaque strings in a secret_ref field are suspicious unless they
-        # are explicit references handled by the backend resolver.
+        # Long opaque strings are suspicious in a secret_ref field unless they
+        # are explicit references handled by the backend resolver. Do not apply
+        # this rule to normal hash/version fields such as latest_config_hash.
         return not stripped.startswith(SAFE_SECRET_REF_PREFIXES)
     return False
 
@@ -164,7 +173,7 @@ def scan(obj, path=''):
             key_l = str(key).lower()
             current_path = path_join(path, key)
             if key_l == 'secret_ref':
-                if looks_like_raw_secret(value):
+                if looks_like_raw_secret_ref(value):
                     return f'secret_ref raw value: {current_path}'
                 continue
             for sensitive_key in SENSITIVE_KEYS:
@@ -179,7 +188,7 @@ def scan(obj, path=''):
             if found:
                 return found
     elif isinstance(obj, str):
-        if looks_like_raw_secret(obj):
+        if has_sensitive_value_pattern(obj):
             return f'value pattern: {path or \"<root>\"}'
     return None
 
@@ -232,6 +241,12 @@ security_check_self_test() {
   result=$(security_check_raw '{"protocol_config":{"supports_client_config":true}}')
   if [[ "${result}" != "OK" ]]; then
     echo "FAIL: protocol_config schema container should be allowed (${result})"
+    failed=1
+  fi
+
+  result=$(security_check_raw '{"template":{"latest_config_hash":"sha256:f55e94eaa4665b743174826cf97f877409dafe07da941fec43424d8a5c8529b7"}}')
+  if [[ "${result}" != "OK" ]]; then
+    echo "FAIL: latest_config_hash should be allowed (${result})"
     failed=1
   fi
 
