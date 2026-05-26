@@ -122,6 +122,22 @@ fi
 # [2] Website homepage contains Blog nav or blog route handling
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "--- [1a] Website runtime cache / stale asset guard ---"
+HOME_HEADERS=$(curl -sSI --max-time 10 "${WEBSITE_BASE}/" 2>/dev/null || true)
+if echo "${HOME_HEADERS}" | tr -d '\r' | grep -qi '^Cache-Control:.*no-store'; then
+  pass "Website index response uses no-store cache policy"
+else
+  fail "Website index response is missing Cache-Control: no-store"
+fi
+
+MISSING_ASSET_CODE=$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" "${WEBSITE_BASE}/assets/index-LIVEMASK_STALE_ASSET_PROBE.js" 2>/dev/null || echo "000")
+if [[ "${MISSING_ASSET_CODE}" == "404" ]]; then
+  pass "Missing hashed website asset returns HTTP 404 instead of SPA index fallback"
+else
+  fail "Missing hashed website asset returned HTTP ${MISSING_ASSET_CODE}; stale browser bundles may keep executing"
+fi
+
+echo ""
 echo "--- [2] Website homepage content (Blog nav check) ---"
 HOMEPAGE_HTML=$(curl -sS --max-time 10 "${WEBSITE_BASE}/" 2>/dev/null || true)
 if [[ -n "${HOMEPAGE_HTML}" ]]; then
