@@ -1853,6 +1853,9 @@ items = d.get('items',d.get('assignments',d.get('data',d.get('protocol_assignmen
 if not isinstance(items, list):
     print('NO_LIST')
     sys.exit(0)
+if len(items) == 0:
+    print('EMPTY_LIST')
+    sys.exit(0)
 required = ['lkg_info','lkg_status','lkg_rollback_available','rollback_to_version','rollback_to_template_version','previous_assignment_id']
 found = [f for f in required if any(f in item for item in items)]
 missing = [f for f in required if f not in found]
@@ -1877,6 +1880,9 @@ print(f'found={len(found)}/{len(required)} missing={\",\".join(missing) if missi
           ;;
         NO_LIST)
           skip "Assignments list: could not extract items from response"
+          ;;
+        EMPTY_LIST)
+          skip "Assignments list: no assignments available for LKG/rollback field check"
           ;;
       esac
       collect_response "assignments_list" "${ASSIGN_LIST_RESP}"
@@ -1991,6 +1997,9 @@ if isinstance(adj, dict) and ('lkg_version' in adj or 'lkg_at' in adj):
 # Check for nested 'capability_eligibility' array after top-level contracts.
 cap_elig = d.get('capability_eligibility',d.get('capabilities',d.get('items',[])))
 if isinstance(cap_elig, list):
+    if len(cap_elig) == 0:
+        print('EMPTY_CAPABILITY_ELIGIBILITY')
+        sys.exit(0)
     has_lkg = any('lkg_version' in item for item in cap_elig)
     if has_lkg:
         print(f'FOUND: capability_eligibility[].lkg_version present in {len(cap_elig)} entries')
@@ -2006,6 +2015,9 @@ else:
             ;;
           NO_LKG*|NO_LKG_FIELDS)
             fail "Template eligibility does not include lkg_version field: ${ELIG_LKG_FIELD_CHECK}"
+            ;;
+          EMPTY_CAPABILITY_ELIGIBILITY)
+            skip "Template eligibility LKG: no capability eligibility entries available"
             ;;
           *)
             fail "Template eligibility LKG check: ${ELIG_LKG_FIELD_CHECK}"

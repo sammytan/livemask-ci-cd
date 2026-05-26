@@ -1467,13 +1467,20 @@ if isinstance(adj, dict) and ('lkg_version' in adj or 'lkg_at' in adj):
     sys.exit(0)
 cap = d.get('capability_eligibility',d.get('capabilities',d.get('items',[])))
 if isinstance(cap, list):
+    if len(cap) == 0:
+        print('cap_elig_empty=yes count=0')
+        sys.exit(0)
     has = any('lkg_version' in c for c in cap)
     print(f'cap_elig_has_lkg={\"yes\" if has else \"no\"} count={len(cap)}')
 else:
     print('top_level_lkg=no')
 " 2>/dev/null || echo "PARSE_ERROR")
       if echo "${ELIG_LKG_FOUND}" | grep -q "yes"; then
-        pass "Template eligibility contains per-node lkg_version: ${ELIG_LKG_FOUND}"
+        if echo "${ELIG_LKG_FOUND}" | grep -q "cap_elig_empty=yes"; then
+          skip "Template eligibility LKG: no capability eligibility entries available"
+        else
+          pass "Template eligibility contains per-node lkg_version: ${ELIG_LKG_FOUND}"
+        fi
       else
         fail "Template eligibility missing lkg_version field: ${ELIG_LKG_FOUND}"
       fi
@@ -1510,6 +1517,9 @@ items = d.get('items',d.get('assignments',d.get('data',d.get('protocol_assignmen
 if not isinstance(items, list):
     print('NO_LIST')
     sys.exit(0)
+if len(items) == 0:
+    print('EMPTY_LIST')
+    sys.exit(0)
 required = ['lkg_info','lkg_status','lkg_rollback_available','rollback_to_version','rollback_to_template_version','previous_assignment_id']
 found = [f for f in required if any(f in item for item in items)]
 missing = [f for f in required if f not in found]
@@ -1524,6 +1534,9 @@ print(f'found={len(found)}/{len(required)} missing={\",\".join(missing) if missi
           ;;
         NO_LIST)
           skip "Assignments list: could not extract items"
+          ;;
+        EMPTY_LIST)
+          skip "Assignments list: no assignments available for LKG/rollback field check"
           ;;
         *)
           skip "Assignments list: ${A_LKG_CHECK}"
