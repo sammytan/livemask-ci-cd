@@ -59,16 +59,26 @@ DEFAULT_LEASE_OWNER = "ci-cd-auto-task-assignment"
 DEFAULT_PLANNER_LOOKAHEAD = 50
 DEFAULT_CURSOR_SDK_MODEL = "default"
 DEFAULT_WORKER_TIMEOUT_SECONDS = 1800
+DEFAULT_AGENT_EXECUTOR_SCRIPT = REPO_ROOT.parent / "agent_executor.sh"
+DEFAULT_AGENT_EXECUTOR = "cursor"
 
 ACTIVE_LEASE_STATUSES = {"active"}
 
+REPO_ROOT_MAP: dict[str, pathlib.Path] = {
+    "livemask-backend": REPO_ROOT.parent / "livemask-backend",
+    "livemask-nodeagent": REPO_ROOT.parent / "livemask-nodeagent",
+    "livemask-job-service": REPO_ROOT.parent / "livemask-job-service",
+    "livemask-app": REPO_ROOT.parent / "livemask-app",
+    "livemask-admin": REPO_ROOT.parent / "livemask-admin",
+    "livemask-website": REPO_ROOT.parent / "livemask-website",
+    "livemask-ci-cd": REPO_ROOT,
+    "livemask-docs": DOCS_DIR,
+}
+
 REPO_WORKER_MAP: dict[str, pathlib.Path] = {
-    "livemask-backend": REPO_ROOT.parent / "livemask-backend/scripts/task-worker.sh",
-    "livemask-nodeagent": REPO_ROOT.parent / "livemask-nodeagent/scripts/task-worker.sh",
-    "livemask-job-service": REPO_ROOT.parent / "livemask-job-service/scripts/task-worker.sh",
-    "livemask-app": REPO_ROOT.parent / "livemask-app/scripts/task-worker.sh",
-    "livemask-admin": REPO_ROOT.parent / "livemask-admin/scripts/task-worker.sh",
-    "livemask-website": REPO_ROOT.parent / "livemask-website/scripts/task-worker.sh",
+    repo: root / "scripts/task-worker.sh"
+    for repo, root in REPO_ROOT_MAP.items()
+    if repo not in {"livemask-ci-cd", "livemask-docs"}
 }
 
 
@@ -176,6 +186,79 @@ def sync_worker_brief(worker_repo: pathlib.Path, task: dict[str, Any], docs_dir:
     brief_path.parent.mkdir(parents=True, exist_ok=True)
     brief_path.write_text(build_worker_brief(task, docs_dir), encoding="utf-8")
     return brief_path
+
+def yaml_quote(value: Any) -> str:
+    text = str(value).replace('"', '\\"')
+    return f'"{text}"'
+
+
+def indent_block(text: str, spaces: int = 2) -> str:
+    prefix = " " * spaces
+    if not text:
+        return f"{prefix}_No task document content was found._"
+    return "\n".join(prefix + line for line in text.splitlines())
+
+
+def build_agent_executor_task_file(
+    worker_repo: pathlib.Path,
+    task: dict[str, Any],
+    docs_dir: pathlib.Path,
+    mode: str,
+) -> pathlib.Path:
+    task_id = str(task.get("task_id", ""))
+    task_dir = worker_repo / ".agent" / "tasks" / task_id
+    task_file = task_dir / "task.yml"
+    task_dir.mkdir(parents=True, exist_ok=True)
+
+    task_doc = str(task.get("task_doc", ""))
+    task_doc_content = ""
+    task_doc_path = safe_docs_relative_path(docs_dir, task_doc)
+    if task_doc_path and task_doc_path.exists():
+        task_doc_content = task_doc_path.read_text(encoding="utf-8")
+
+    include_files = lease_expected_files(task.get("expected_files", []))
+    include_yaml = "\n".join(f"    - {yaml_quote(item)}" for item in include_files)
+
+    task_file.write_text(
+        "\n".join([
+            f"id: {yaml_quote(task_id)}",
+            f"repo: {yaml_quote(task.get('repo', ''))}",
+            f"module_id: {yaml_quote(task.get('module_id', ''))}",
+            f"mode: {yaml_quote(mode)}",
+            f"priority: {yaml_quote(task.get('priority', ''))}",
+            f"source_task_doc: {yaml_quote(task_doc)}",
+            "scope:",
+            "  include:",
+            include_yaml,
+            "  exclude:",
+            "    - \"../livemask-docs/**\"",
+            "    - \"**/.env*\"",
+            "    - \"**/*secret*\"",
+            "instructions: |",
+            "  Implement the task below for Codex review only.",
+            "  Do not commit, merge, push, dispatch, or edit files outside scope.include.",
+            "  Preserve the existing LiveMask task-worker review-gated lifecycle expectations.",
+            "task_document: |",
+            indent_block(task_doc_content, 2),
+            "raw_task_metadata: |",
+            indent_block(json.dumps(task, ensure_ascii=False, indent=2), 2),
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    return task_file
+
+
+def list_agent_report_files(task_file: pathlib.Path) -> list[str]:
+    task_dir = task_file.parent
+    if not task_dir.exists():
+        return []
+    reports = sorted(
+        str(path)
+        for path in task_dir.iterdir()
+        if path.is_file() and path.name.endswith("report.md")
+    )
+    return reports
 
 
 def load_leases(lease_file: pathlib.Path) -> list[dict[str, Any]]:
@@ -440,10 +523,23 @@ def resolve_worker(repo: str) -> pathlib.Path | None:
     return REPO_WORKER_MAP.get(repo)
 
 
+def resolve_repo_root(repo: str) -> pathlib.Path | None:
+    return REPO_ROOT_MAP.get(repo)
+
+
 def build_worker_command(
     worker_path: pathlib.Path, mode: str, task_id: str
 ) -> list[str]:
     return [str(worker_path), mode, task_id]
+
+
+def build_agent_executor_command(
+    executor_script: pathlib.Path,
+    executor: str,
+    task_file: pathlib.Path,
+    round_number: int,
+) -> list[str]:
+    return [str(executor_script), executor, str(task_file), str(round_number)]
 
 
 def worker_exists(worker_path: pathlib.Path) -> bool:
@@ -453,12 +549,17 @@ def worker_exists(worker_path: pathlib.Path) -> bool:
     )
 
 
+def repo_root_exists(repo_root: pathlib.Path) -> bool:
+    return repo_root.is_dir()
+
+
 def write_evidence(
     evidence_dir: pathlib.Path,
     task_id: str,
     repo: str,
     mode: str,
     *,
+    worker_backend: str = "harness",
     worker_path: str = "",
     worker_command: list[str] | None = None,
     worker_exit_code: int | None = None,
@@ -476,6 +577,7 @@ def write_evidence(
         "task_id": task_id,
         "repo": repo,
         "mode": mode,
+        "worker_backend": worker_backend,
         "worker_path": worker_path,
         "worker_command": worker_command or [],
         "worker_exit_code": worker_exit_code,
@@ -512,6 +614,11 @@ def dispatch(
     confirm_implement: bool,
     json_output: bool,
     worker_timeout_seconds: int,
+    worker_backend: str,
+    agent_executor: str,
+    agent_executor_script: pathlib.Path,
+    agent_round: int,
+    agent_model: str,
     skip_worker_invoke: bool = False,
 ) -> int:
     planner_path = docs_dir / "scripts/plan-next-tasks.py"
@@ -572,12 +679,21 @@ def dispatch(
     for task in lease_filtered:
         tid = task.get("task_id", "")
         trepo = task.get("repo", "")
-        worker_path = resolve_worker(trepo)
         reason = ""
-        if not worker_path:
-            reason = "no worker mapping"
-        elif not worker_exists(worker_path):
-            reason = f"worker not found at {worker_path}"
+        if worker_backend == "harness":
+            worker_path = resolve_worker(trepo)
+            if not worker_path:
+                reason = "no worker mapping"
+            elif not worker_exists(worker_path):
+                reason = f"worker not found at {worker_path}"
+        else:
+            repo_root = resolve_repo_root(trepo)
+            if not repo_root:
+                reason = "no repo root mapping"
+            elif not repo_root_exists(repo_root):
+                reason = f"repo root not found at {repo_root}"
+            elif not worker_exists(agent_executor_script):
+                reason = f"agent executor not found at {agent_executor_script}"
 
         if reason:
             unassignable_repos.add(trepo)
@@ -642,17 +758,30 @@ def dispatch(
         trepo = task.get("repo", "")
 
         worker_path = resolve_worker(trepo)
-        if not worker_path:
+        worker_repo = worker_path.parent.parent if worker_path else resolve_repo_root(trepo)
+        if not worker_repo:
             # Should be unreachable because the coverage gate filters first.
             continue
 
-        worker_cmd = build_worker_command(worker_path, mode, tid)
+        if worker_backend == "harness":
+            if not worker_path:
+                continue
+            worker_cmd = build_worker_command(worker_path, mode, tid)
+            worker_display_path = str(worker_path)
+        else:
+            planned_task_file = worker_repo / ".agent" / "tasks" / tid / "task.yml"
+            worker_cmd = build_agent_executor_command(
+                agent_executor_script, agent_executor, planned_task_file, agent_round
+            )
+            worker_display_path = str(agent_executor_script)
 
         evidence_data: dict[str, Any] = {
             "task_id": tid,
             "repo": trepo,
             "mode": mode,
-            "worker_path": str(worker_path),
+            "worker_backend": worker_backend,
+            "worker_path": worker_display_path,
+            "worker_repo": str(worker_repo),
             "worker_command": worker_cmd,
             "worker_exit_code": None,
             "lease_acquired": False,
@@ -691,20 +820,35 @@ def dispatch(
             # Invoke worker if not skipped (testing flag)
             if not skip_worker_invoke and mode in ("accept-only", "implement-for-review"):
                 try:
-                    if mode == "implement-for-review":
-                        brief_path = sync_worker_brief(
-                            worker_path.parent.parent, task, docs_dir
-                        )
-                        evidence_data["brief_path"] = str(brief_path)
-
                     env = os.environ.copy()
                     env.setdefault("CURSOR_WORKER_MODE", mode)
                     env.setdefault("CURSOR_SDK_MODEL", DEFAULT_CURSOR_SDK_MODEL)
                     env["WORKER_HARNESS_TASK_ID"] = tid
 
+                    if worker_backend == "agent-executor":
+                        if mode != "implement-for-review":
+                            raise ValueError(
+                                "agent-executor backend only supports implement-for-review"
+                            )
+                        brief_path = sync_worker_brief(worker_repo, task, docs_dir)
+                        task_file = build_agent_executor_task_file(
+                            worker_repo, task, docs_dir, mode
+                        )
+                        worker_cmd = build_agent_executor_command(
+                            agent_executor_script, agent_executor, task_file, agent_round
+                        )
+                        evidence_data["brief_path"] = str(brief_path)
+                        evidence_data["agent_task_file"] = str(task_file)
+                        evidence_data["worker_command"] = worker_cmd
+                        if agent_model:
+                            env["CURSOR_MODEL"] = agent_model
+                    elif mode == "implement-for-review":
+                        brief_path = sync_worker_brief(worker_repo, task, docs_dir)
+                        evidence_data["brief_path"] = str(brief_path)
+
                     proc = subprocess.run(
                         worker_cmd,
-                        cwd=str(worker_path.parent.parent),
+                        cwd=str(worker_repo),
                         capture_output=True,
                         text=True,
                         timeout=worker_timeout_seconds,
@@ -713,20 +857,26 @@ def dispatch(
                     evidence_data["worker_exit_code"] = proc.returncode
                     evidence_data["worker_stdout"] = proc.stdout[:2000]
                     evidence_data["worker_stderr"] = proc.stderr[:2000]
+                    if worker_backend == "agent-executor" and evidence_data.get("agent_task_file"):
+                        evidence_data["agent_report_files"] = list_agent_report_files(
+                            pathlib.Path(str(evidence_data["agent_task_file"]))
+                        )
                     if proc.returncode != 0:
                         evidence_data["errors"].append(
                             f"worker exited {proc.returncode}"
                         )
                         overall_exit_code = 1
                 except subprocess.TimeoutExpired:
-                    evidence_data["errors"].append("worker timed out (60s)")
+                    evidence_data["errors"].append(
+                        f"worker timed out ({worker_timeout_seconds}s)"
+                    )
                     overall_exit_code = 1
                 except FileNotFoundError:
                     evidence_data["errors"].append(
-                        f"worker script not found at {worker_path}"
+                        f"worker executable not found at {worker_cmd[0]}"
                     )
                     overall_exit_code = 1
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     evidence_data["errors"].append(f"worker execution error: {exc}")
                     overall_exit_code = 1
 
@@ -738,8 +888,9 @@ def dispatch(
             tid,
             trepo,
             mode,
-            worker_path=str(worker_path),
-            worker_command=worker_cmd,
+            worker_backend=worker_backend,
+            worker_path=worker_display_path,
+            worker_command=evidence_data.get("worker_command", worker_cmd),
             worker_exit_code=evidence_data.get("worker_exit_code"),
             lease_acquired=evidence_data["lease_acquired"],
             lease_entry=evidence_data.get("lease_entry", {}),
@@ -754,7 +905,11 @@ def dispatch(
                 "task_id": tid,
                 "repo": trepo,
                 "mode": mode,
-                "worker_command": " ".join(shlex.quote(c) for c in worker_cmd),
+                "worker_backend": worker_backend,
+                "worker_command": " ".join(
+                    shlex.quote(c)
+                    for c in evidence_data.get("worker_command", worker_cmd)
+                ),
                 "lease_acquired": evidence_data["lease_acquired"],
                 "evidence_path": str(evidence_path),
                 "errors": evidence_data.get("errors", []),
@@ -783,6 +938,8 @@ def dispatch(
         "lease_file": str(lease_file),
         "ledger": str(ledger),
         "lease_owner": lease_owner,
+        "worker_backend": worker_backend,
+        "agent_executor": agent_executor if worker_backend == "agent-executor" else "",
     }
 
     if json_output:
@@ -802,6 +959,7 @@ def dispatch(
         for item in active_work_blocked:
             print(f"  ACTIVE-WORK: {item['task_id']} ({item['repo']}) - {item['reason']}")
         print(f"  Dispatched:        {len(results)}")
+        print(f"  Worker backend:    {worker_backend}")
         for r in results:
             print(f"  [{r['repo']}] {r['task_id']}:")
             print(f"    worker: {r['worker_path']}")
@@ -888,6 +1046,35 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=f"Timeout for worker subprocesses (default: {DEFAULT_WORKER_TIMEOUT_SECONDS}).",
     )
     parser.add_argument(
+        "--worker-backend",
+        choices=["harness", "agent-executor"],
+        default="harness",
+        help="Worker invocation backend (default: harness).",
+    )
+    parser.add_argument(
+        "--agent-executor",
+        choices=["cursor", "grok", "codex"],
+        default=DEFAULT_AGENT_EXECUTOR,
+        help="Executor passed to agent_executor.sh when --worker-backend agent-executor is used.",
+    )
+    parser.add_argument(
+        "--agent-executor-script",
+        type=pathlib.Path,
+        default=DEFAULT_AGENT_EXECUTOR_SCRIPT,
+        help=f"Path to agent_executor.sh (default: {DEFAULT_AGENT_EXECUTOR_SCRIPT}).",
+    )
+    parser.add_argument(
+        "--agent-round",
+        type=int,
+        default=1,
+        help="Round number passed to agent_executor.sh (default: 1).",
+    )
+    parser.add_argument(
+        "--agent-model",
+        default="",
+        help="Optional CURSOR_MODEL value for agent_executor.sh cursor backend.",
+    )
+    parser.add_argument(
         "--confirm-implement",
         action="store_true",
         help="Required to confirm implement-for-review mode.",
@@ -926,6 +1113,14 @@ def main(argv: list[str]) -> int:
         )
         return 3
 
+    if args.worker_backend == "agent-executor" and mode == "accept-only":
+        print(
+            "ERROR: --worker-backend agent-executor only supports dry-run and "
+            "implement-for-review. Use the default harness backend for accept-only.",
+            file=sys.stderr,
+        )
+        return 1
+
     if mode == "implement-for-review" and not args.confirm_implement:
         if not args.task_id and not args.repo:
             print(
@@ -949,6 +1144,11 @@ def main(argv: list[str]) -> int:
         confirm_implement=args.confirm_implement,
         json_output=args.json,
         worker_timeout_seconds=args.worker_timeout_seconds,
+        worker_backend=args.worker_backend,
+        agent_executor=args.agent_executor,
+        agent_executor_script=args.agent_executor_script,
+        agent_round=args.agent_round,
+        agent_model=args.agent_model,
         skip_worker_invoke=args.skip_worker_invoke,
     )
 

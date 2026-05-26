@@ -24,6 +24,7 @@
 #   SC-13  worker invocation receives a supported default Cursor SDK model
 #   SC-14  worker timeout is configurable and long enough for SDK agents
 #   SC-15  implement-for-review syncs docs task brief before worker launch
+#   SC-16  optional agent-executor backend covers ci-cd repo without harness
 
 set -euo pipefail
 
@@ -60,7 +61,7 @@ assert_eq() {
 
 assert_contains() {
   local label="$1" haystack="$2" needle="$3"
-  if echo "${haystack}" | grep -qF -- "${needle}"; then
+  if grep -qF -- "${needle}" <<< "${haystack}"; then
     echo "  PASS: ${label}"
     PASS_COUNT=$((PASS_COUNT + 1))
   else
@@ -74,7 +75,7 @@ assert_contains() {
 
 assert_not_contains() {
   local label="$1" haystack="$2" needle="$3"
-  if ! echo "${haystack}" | grep -qF -- "${needle}"; then
+  if ! grep -qF -- "${needle}" <<< "${haystack}"; then
     echo "  PASS: ${label}"
     PASS_COUNT=$((PASS_COUNT + 1))
   else
@@ -476,7 +477,7 @@ test_implement_syncs_worker_brief() {
   source="$(cat "${AUTO_ASSIGN}")"
   assert_contains "SC-15: brief builder reads task_doc" "${source}" 'task_doc = str(task.get("task_doc", ""))'
   assert_contains "SC-15: brief sync writes runtime brief" "${source}" 'sync_worker_brief('
-  assert_contains "SC-15: brief sync uses worker repo" "${source}" 'worker_path.parent.parent, task, docs_dir'
+  assert_contains "SC-15: brief sync uses worker repo" "${source}" 'sync_worker_brief(worker_repo, task, docs_dir)'
   assert_contains "SC-15: brief path recorded in evidence" "${source}" 'evidence_data["brief_path"]'
 }
 
@@ -529,20 +530,26 @@ else:
 # Alternative approach for SC-05 since importing the .py directly might have issues
 test_worker_mapping_script_parse() {
   echo ""
-  echo "=== SC-05b: worker mapping count via Python ==="
-  local map_lines
-  map_lines="$(python3 -c "
-import re
-with open('${SCRIPT_DIR}/auto-task-assignment.py') as f:
-    content = f.read()
-m = re.search(r'REPO_WORKER_MAP[^=]*=\s*\{(.*?)\}', content, re.DOTALL)
-if m:
-    entries = re.findall(r'\"(livemask-[^\"]+)\"\s*:', m.group(1))
-    print(len(entries))
-else:
-    print('0')
+  echo "=== SC-05b: worker/root mapping count via Python ==="
+  local counts
+  counts="$(python3 -c "
+import ast
+from pathlib import Path
+source = Path('${SCRIPT_DIR}/auto-task-assignment.py').read_text()
+tree = ast.parse(source)
+root_keys = []
+for node in tree.body:
+    if isinstance(node, ast.AnnAssign) and getattr(node.target, 'id', '') == 'REPO_ROOT_MAP':
+        for key in node.value.keys:
+            if isinstance(key, ast.Constant):
+                root_keys.append(key.value)
+print(len(root_keys), int('livemask-ci-cd' in root_keys), int('livemask-docs' in root_keys))
 ")"
-  assert_eq "SC-05b: script has 6 worker entries" "6" "${map_lines}"
+  assert_eq "SC-05b: script has 8 repo root entries incl ci-cd/docs" "8 1 1" "${counts}"
+
+  local source
+  source="$(cat "${AUTO_ASSIGN}")"
+  assert_contains "SC-05b: harness mapping excludes ci-cd/docs" "${source}" 'if repo not in {"livemask-ci-cd", "livemask-docs"}'
 }
 
 # ============================================================================
@@ -761,6 +768,39 @@ with open(path, 'w') as f:
 }
 
 # ============================================================================
+# SC-16: Optional agent-executor backend covers ci-cd repo without harness
+# ============================================================================
+
+test_agent_executor_backend_covers_cicd_repo() {
+  echo ""
+  echo "=== SC-16: agent-executor backend covers ci-cd repo ==="
+  setup_sandbox
+
+  local output
+  output="$(run_assign "--dry-run --repo livemask-ci-cd --limit 1 --json --worker-backend agent-executor --agent-executor-script /bin/echo")"
+
+  assert_contains "SC-16: ci-cd task selected" "${output}" 'TASK-SMOKE-CICD-001'
+  assert_contains "SC-16: selected one task" "${output}" '"selected": 1'
+  assert_contains "SC-16: backend recorded" "${output}" '"worker_backend": "agent-executor"'
+  assert_contains "SC-16: executor command planned" "${output}" '/bin/echo'
+  assert_contains "SC-16: planned agent task file" "${output}" '.agent/tasks/TASK-SMOKE-CICD-001/task.yml'
+
+  local lease_content
+  lease_content="$(cat "${SANDBOX}/task-leases.json")"
+  assert_contains "SC-16: dry-run did not acquire lease" "${lease_content}" '"leases": []'
+
+  local source
+  source="$(cat "${AUTO_ASSIGN}")"
+  assert_contains "SC-16: agent task file builder exists" "${source}" 'build_agent_executor_task_file('
+  assert_contains "SC-16: agent model option exists" "${source}" '--agent-model'
+  assert_contains "SC-16: accept-only guard exists" "${source}" 'agent-executor only supports dry-run and'
+
+  verify_real_files_unchanged "SC-16"
+
+  teardown_sandbox
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -788,6 +828,7 @@ test_active_work_unknown_files_blocks_selection
 test_worker_invocation_uses_supported_default_model
 test_worker_timeout_is_configurable
 test_implement_syncs_worker_brief
+test_agent_executor_backend_covers_cicd_repo
 
 echo ""
 echo "================================================================"
