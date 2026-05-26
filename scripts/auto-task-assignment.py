@@ -56,6 +56,7 @@ DEFAULT_DOCS_PLANNER = DOCS_DIR / "scripts/plan-next-tasks.py"
 DEFAULT_STATE_DIR = REPO_ROOT / ".local-dev/auto-task-assignment"
 DEFAULT_EVIDENCE_DIR = REPO_ROOT / ".cursor-worker/auto-task-assignment"
 DEFAULT_LEASE_OWNER = "ci-cd-auto-task-assignment"
+DEFAULT_PLANNER_LOOKAHEAD = 50
 
 ACTIVE_LEASE_STATUSES = {"active"}
 
@@ -316,36 +317,27 @@ def dispatch(
         print(f"ERROR: ledger not found at {ledger}", file=sys.stderr)
         return 1
 
+    planner_limit = max(limit, DEFAULT_PLANNER_LOOKAHEAD)
     candidates = run_planner(
-        planner_path, ledger, limit=limit, repo_filter=repo_filter,
+        planner_path, ledger, limit=planner_limit, repo_filter=repo_filter,
     )
 
+    requested_candidates = candidates
     if task_ids:
-        selected = [c for c in candidates if c.get("task_id") in task_ids]
-        if len(selected) < len(task_ids):
-            missing = set(task_ids) - {c.get("task_id", "") for c in selected}
+        requested_candidates = [c for c in candidates if c.get("task_id") in task_ids]
+        if len(requested_candidates) < len(task_ids):
+            missing = set(task_ids) - {c.get("task_id", "") for c in requested_candidates}
             print(
                 "WARNING: task(s) not found in planner candidates: "
                 + ", ".join(sorted(missing)),
                 file=sys.stderr,
             )
-    else:
-        selected = candidates[:limit]
-
-    if not selected:
-        if json_output:
-            print(json.dumps({
-                "summary": {"selected_count": 0, "mode": mode, "dry_run": mode == "dry-run"}
-            }, indent=2))
-        else:
-            print("No dispatchable tasks selected.")
-        return 0
 
     leases = load_leases(lease_file)
 
-    filtered: list[dict[str, Any]] = []
+    lease_filtered: list[dict[str, Any]] = []
     lease_blocked: list[dict[str, str]] = []
-    for task in selected:
+    for task in requested_candidates:
         tid = task.get("task_id", "")
         trepo = task.get("repo", "")
 
@@ -355,6 +347,7 @@ def dispatch(
         collision = repo_lease or task_lease
         if collision:
             if is_lease_expired(collision):
+                lease_filtered.append(task)
                 continue
             lease_blocked.append({
                 "task_id": tid,
@@ -365,44 +358,70 @@ def dispatch(
                 ),
             })
             continue
-        filtered.append(task)
+        lease_filtered.append(task)
 
-    if not filtered:
+    assignable: list[dict[str, Any]] = []
+    unassignable_tasks: list[dict[str, str]] = []
+    unassignable_repos: set[str] = set()
+    for task in lease_filtered:
+        tid = task.get("task_id", "")
+        trepo = task.get("repo", "")
+        worker_path = resolve_worker(trepo)
+        reason = ""
+        if not worker_path:
+            reason = "no worker mapping"
+        elif not worker_exists(worker_path):
+            reason = f"worker not found at {worker_path}"
+
+        if reason:
+            unassignable_repos.add(trepo)
+            unassignable_tasks.append({
+                "task_id": tid,
+                "repo": trepo,
+                "reason": reason,
+            })
+            continue
+        assignable.append(task)
+
+    if task_ids:
+        selected = assignable
+    else:
+        selected = assignable[:limit]
+
+    if not selected:
         summary = {
             "selected_count": 0,
             "mode": mode,
             "dry_run": mode == "dry-run",
-            "blocked_by_lease": len(lease_blocked),
+            "total_candidates": len(candidates),
+            "requested_candidates": len(requested_candidates),
+            "assignable_candidates": len(assignable),
+            "filtered_by_lease": len(lease_blocked),
+            "filtered_by_worker_mapping": len(unassignable_tasks),
+            "unassignable_repos": sorted(unassignable_repos),
+            "unassignable_tasks": unassignable_tasks,
             "lease_blocked": lease_blocked,
         }
         if json_output:
             print(json.dumps({"summary": summary}, indent=2))
         else:
-            print("No dispatchable tasks after lease filtering.")
+            print("No dispatchable tasks after lease and worker coverage filtering.")
             for blk in lease_blocked:
                 print(f"  BLOCKED: {blk['task_id']} ({blk['repo']}) - {blk['reason']}")
+            for item in unassignable_tasks:
+                print(f"  UNASSIGNABLE: {item['task_id']} ({item['repo']}) - {item['reason']}")
         return 0
 
     results: list[dict[str, Any]] = []
     overall_exit_code = 0
 
-    for task in filtered:
+    for task in selected:
         tid = task.get("task_id", "")
         trepo = task.get("repo", "")
 
         worker_path = resolve_worker(trepo)
         if not worker_path:
-            err = f"SKIP: no worker mapping for repo '{trepo}'"
-            print(err, file=sys.stderr)
-            if json_output:
-                results.append({"task_id": tid, "repo": trepo, "status": "skipped", "error": err})
-            continue
-
-        if not worker_exists(worker_path):
-            err = f"SKIP: worker not found at {worker_path}"
-            print(err, file=sys.stderr)
-            if json_output:
-                results.append({"task_id": tid, "repo": trepo, "status": "skipped", "error": err})
+            # Should be unreachable because the coverage gate filters first.
             continue
 
         worker_cmd = build_worker_command(worker_path, mode, tid)
@@ -518,8 +537,13 @@ def dispatch(
         "mode": mode,
         "dry_run": mode == "dry-run",
         "total_candidates": len(candidates),
+        "requested_candidates": len(requested_candidates),
+        "assignable_candidates": len(assignable),
         "selected": len(selected),
         "filtered_by_lease": len(lease_blocked),
+        "filtered_by_worker_mapping": len(unassignable_tasks),
+        "unassignable_repos": sorted(unassignable_repos),
+        "unassignable_tasks": unassignable_tasks,
         "dispatched": len(results),
         "lease_blocked": lease_blocked,
         "results": results,
@@ -536,7 +560,11 @@ def dispatch(
         print(f"  Mode:              {mode}")
         print(f"  Candidates:        {len(candidates)}")
         print(f"  Selected:          {len(selected)}")
+        print(f"  Assignable:        {len(assignable)}")
         print(f"  Filtered (lease):  {len(lease_blocked)}")
+        print(f"  Filtered (worker): {len(unassignable_tasks)}")
+        for item in unassignable_tasks:
+            print(f"  UNASSIGNABLE: {item['task_id']} ({item['repo']}) - {item['reason']}")
         print(f"  Dispatched:        {len(results)}")
         for r in results:
             print(f"  [{r['repo']}] {r['task_id']}:")

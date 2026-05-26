@@ -15,6 +15,7 @@
 #   SC-06  implement-for-review requires opt-in guard
 #   SC-07  no commits/merges/pushes/dispatches in any mode
 #   SC-08  real docs files unchanged (SHA256 check)
+#   SC-09  unmapped repos are filtered before selection and reported
 
 set -euo pipefail
 
@@ -138,6 +139,18 @@ setup_sandbox() {
       "overall_status": "in_progress",
       "owner_repo": "livemask-ci-cd",
       "tasks": [
+        {
+          "task_id": "TASK-SMOKE-CICD-001",
+          "repo": "livemask-ci-cd",
+          "module_id": "governance-control-plane",
+          "status": "ready",
+          "priority": "P0",
+          "blocked_by": [],
+          "unlocks": [],
+          "task_doc": "",
+          "validation": "",
+          "notes": "Smoke test task for unmapped ci-cd repo"
+        },
         {
           "task_id": "TASK-SMOKE-FAKE-001",
           "repo": "livemask-backend",
@@ -323,8 +336,9 @@ with open('${SANDBOX}/task-leases.json', 'w') as f:
   local output
   output="$(run_assign "--dry-run --limit 5 --json")"
 
-  # The expired lease should be skipped, allowing task dispatch
-  assert_not_contains "SC-03: no lease block reported" "${output}" 'TASK-SMOKE-FAKE-001'
+  # The expired lease should not block the task; it should remain selectable.
+  assert_contains "SC-03: no lease block reported" "${output}" '"filtered_by_lease": 0'
+  assert_contains "SC-03: expired task remains selectable" "${output}" 'TASK-SMOKE-FAKE-001'
 
   verify_real_files_unchanged "SC-03"
 
@@ -487,6 +501,32 @@ test_real_docs_files_unchanged() {
   teardown_sandbox
 }
 
+
+# ============================================================================
+# SC-09: Unmapped repos are filtered before selection and reported
+# ============================================================================
+
+test_worker_coverage_filters_unmapped_repo() {
+  echo ""
+  echo "=== SC-09: worker coverage filters unmapped repo ==="
+  setup_sandbox
+
+  local output
+  output="$(run_assign "--dry-run --repo livemask-ci-cd --limit 5 --json")"
+
+  assert_contains "SC-09: selected count is zero" "${output}" '"selected_count": 0'
+  assert_contains "SC-09: assignable count is zero" "${output}" '"assignable_candidates": 0'
+  assert_contains "SC-09: filtered by worker mapping" "${output}" '"filtered_by_worker_mapping": 1'
+  assert_contains "SC-09: unassignable repo reported" "${output}" '"livemask-ci-cd"'
+  assert_contains "SC-09: unassignable task reported" "${output}" '"task_id": "TASK-SMOKE-CICD-001"'
+  assert_contains "SC-09: no worker mapping reason" "${output}" '"reason": "no worker mapping"'
+  assert_not_contains "SC-09: no skipped result emitted" "${output}" '"status": "skipped"'
+
+  verify_real_files_unchanged "SC-09"
+
+  teardown_sandbox
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -506,6 +546,7 @@ test_worker_mapping_script_parse
 test_implement_requires_opt_in
 test_no_side_effects
 test_real_docs_files_unchanged
+test_worker_coverage_filters_unmapped_repo
 
 echo ""
 echo "================================================================"
