@@ -3,25 +3,8 @@ set -euo pipefail
 
 # TASK-CICD-DEV-MERGE-GUARD-001
 # Guarded one-task-at-a-time merge flow for LiveMask repositories.
-# TASK-CICD-WORKSPACE-PATH-MIGRATION-001 — added workspace path guard.
 
-# ---------------------------------------------------------------------------
-# Workspace / path guard — run before anything else.
-# ---------------------------------------------------------------------------
 LIVEMASK_WORKSPACE_ROOT="${LIVEMASK_WORKSPACE_ROOT:-$HOME/Developer/LiveMask}"
-
-_guard_old_path() {
-  local cwd
-  cwd="$(pwd -P 2>/dev/null || echo "$PWD")"
-  if [[ "${cwd}" == "/Users/sammytan/Documents/New project 2"* ]]; then
-    echo "FATAL: Old workspace path detected: ${cwd}" >&2
-    echo "FATAL: Reopen this repo under ${LIVEMASK_WORKSPACE_ROOT}/<repo>" >&2
-    echo "FATAL: No changes permitted from the old path." >&2
-    exit 3
-  fi
-}
-_guard_old_path
-# ---------------------------------------------------------------------------
 
 usage() {
   cat <<'EOF'

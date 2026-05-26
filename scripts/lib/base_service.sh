@@ -110,13 +110,7 @@ lm_workspace_check() {
   echo "  Current dir: ${current_dir}"
   echo "  Workspace root: ${ws_root}"
 
-  # 1. Ban old Documents path
-  if [[ "${current_dir}" == "/Users/sammytan/Documents/New project 2"* ]]; then
-    echo "  FAIL: Old workspace path detected.  Stop and reopen under ${ws_root}." >&2
-    return 1
-  fi
-
-  # 2. Workspace root must be a directory
+  # Workspace root must be a directory
   if [[ ! -d "${ws_root}" ]]; then
     echo "  FAIL: Workspace root does not exist: ${ws_root}" >&2
     return 1

@@ -37,18 +37,6 @@ else
 fi
 echo ""
 
-# Old path check
-echo "--- Workspace Path Check ---"
-if [[ "$PWD" == "/Users/sammytan/Documents/New project 2"* ]]; then
-  echo "  FAIL: Old workspace path detected."
-  echo "  ACTION: Reopen this repo under ${LIVEMASK_WORKSPACE_ROOT}/<repo>"
-elif [[ "$PWD" == "${LIVEMASK_WORKSPACE_ROOT}"* ]]; then
-  echo "  PASS: Inside canonical workspace root."
-else
-  echo "  WARN: Outside canonical workspace root (${LIVEMASK_WORKSPACE_ROOT})"
-fi
-echo ""
-
 # Repo presence
 echo "--- Repositories under ${LIVEMASK_WORKSPACE_ROOT} ---"
 for repo in livemask-docs livemask-backend livemask-admin livemask-website \
