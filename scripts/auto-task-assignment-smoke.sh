@@ -793,6 +793,8 @@ test_agent_executor_backend_covers_cicd_repo() {
   source="$(cat "${AUTO_ASSIGN}")"
   assert_contains "SC-16: agent task file builder exists" "${source}" 'build_agent_executor_task_file('
   assert_contains "SC-16: agent model option exists" "${source}" '--agent-model'
+  assert_contains "SC-16: claude executor option exists" "${source}" '"claude"'
+  assert_not_contains "SC-16: grok executor option removed" "${source}" '"grok"'
   assert_contains "SC-16: aichat executor option exists" "${source}" '"aichat"'
   assert_contains "SC-16: aichat model env is wired" "${source}" 'env["AICHAT_MODEL"] = agent_model'
   assert_contains "SC-16: accept-only guard exists" "${source}" 'agent-executor only supports dry-run and'

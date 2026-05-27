@@ -1054,7 +1054,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--agent-executor",
-        choices=["cursor", "grok", "codex", "aichat"],
+        choices=["cursor", "claude", "codex", "aichat"],
         default=DEFAULT_AGENT_EXECUTOR,
         help="Executor passed to agent_executor.sh when --worker-backend agent-executor is used.",
     )
