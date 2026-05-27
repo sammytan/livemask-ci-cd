@@ -796,6 +796,7 @@ test_agent_executor_backend_covers_cicd_repo() {
   assert_contains "SC-16: claude executor option exists" "${source}" '"claude"'
   assert_not_contains "SC-16: grok executor option removed" "${source}" '"grok"'
   assert_contains "SC-16: aichat executor option exists" "${source}" '"aichat"'
+  assert_contains "SC-16: claude model env is wired" "${source}" 'env["CLAUDE_MODEL"] = agent_model'
   assert_contains "SC-16: aichat model env is wired" "${source}" 'env["AICHAT_MODEL"] = agent_model'
   assert_contains "SC-16: accept-only guard exists" "${source}" 'agent-executor only supports dry-run and'
 
