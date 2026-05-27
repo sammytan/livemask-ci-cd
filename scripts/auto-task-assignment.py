@@ -842,6 +842,7 @@ def dispatch(
                         evidence_data["worker_command"] = worker_cmd
                         if agent_model:
                             env["CURSOR_MODEL"] = agent_model
+                            env["CLAUDE_MODEL"] = agent_model
                             env["AICHAT_MODEL"] = agent_model
                     elif mode == "implement-for-review":
                         brief_path = sync_worker_brief(worker_repo, task, docs_dir)
@@ -1073,7 +1074,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--agent-model",
         default="",
-        help="Optional CURSOR_MODEL value for agent_executor.sh cursor backend.",
+        help="Optional model value for agent_executor.sh cursor/claude/aichat backends.",
     )
     parser.add_argument(
         "--confirm-implement",
