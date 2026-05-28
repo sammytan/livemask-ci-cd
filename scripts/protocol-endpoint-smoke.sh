@@ -976,8 +976,8 @@ else
   fi
 fi
 
-# Activate the node
-if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" && -z "${SMOKE_NODE_ID_OVERRIDE}" ]]; then
+# Activate the node (real node mode included)
+if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
   curl -sS --max-time 5 -X POST "${API_BASE}/admin/api/v1/nodes/${NODE_ID}/approve" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
@@ -987,6 +987,9 @@ if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" && -z "${SMOKE_NODE_ID_OVERRIDE}" ]
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
     -d '{"reason":"Activated by protocol-endpoint-smoke.sh"}' >/dev/null 2>&1 || true
   pg_exec -c "UPDATE nodes SET status='active', approved_at=NOW(), approved_by='proto-smoke' WHERE id='${NODE_ID}'" 2>/dev/null || true
+  NODE_STATUS=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes/${NODE_ID}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | quiet_json "status" || true)
+  echo "  Node activation check: id=${NODE_ID} status=${NODE_STATUS:-unknown}"
 fi
 
 # Now pull assignment

@@ -623,8 +623,8 @@ else
   fi
 fi
 
-# Activate node
-if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" && -z "${REAL_NODE_ID}" ]]; then
+# Activate node (real node mode included)
+if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
   curl -sS --max-time 5 -X POST "${API_BASE}/admin/api/v1/nodes/${NODE_ID}/approve" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
@@ -634,7 +634,9 @@ if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" && -z "${REAL_NODE_ID}" ]]; then
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
     -d '{"reason":"Activated by cap-smoke"}' >/dev/null 2>&1 || true
   pg_exec -c "UPDATE nodes SET status='active', approved_at=NOW(), approved_by='cap-smoke' WHERE id='${NODE_ID}'" 2>/dev/null || true
-  echo "  Node activated"
+  NODE_STATUS=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes/${NODE_ID}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | quiet_json "status" || true)
+  echo "  Node activation check: id=${NODE_ID} status=${NODE_STATUS:-unknown}"
 fi
 
 # --- [5a] Send heartbeat with protocol_capabilities ---
@@ -1332,16 +1334,14 @@ if [[ -z "${APP_TOKEN}" ]]; then
 else
   pass "App user login OK (token length=${#APP_TOKEN})"
 
-  # Create a session and check connect_config
-  SESSION_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${APP_TOKEN}" \
-    -d "{\"platform\":\"ios\",\"app_version\":\"0.1.0\"}") || true
-  SESSION_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" -X POST \
+  # Create a session and check connect_config (single request; avoid double-post races)
+  SESSION_BODY_FILE="${SMOKE_TMPDIR}/cap_session.json"
+  SESSION_HTTP=$(curl -sS --max-time 5 -o "${SESSION_BODY_FILE}" -w "%{http_code}" -X POST \
     "${API_BASE}/api/v1/connect/session" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${APP_TOKEN}" \
     -d "{\"platform\":\"ios\",\"app_version\":\"0.1.0\"}" 2>/dev/null || true)
+  SESSION_RESP=$(cat "${SESSION_BODY_FILE}" 2>/dev/null || echo "{}")
 
   case "${SESSION_HTTP}" in
     200|201)
