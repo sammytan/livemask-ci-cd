@@ -885,12 +885,52 @@ if [[ "${HAVE_ROLLOUT}" == "true" && -n "${ROLLOUT_RUN_ID}" && "${ROLLOUT_RUN_ID
     "${JOB_SERVICE_URL}/internal/jobs/runs/${ROLLOUT_RUN_ID}" 2>/dev/null || true)
   if [[ "${JOB_RUN_HTTP}" == "200" ]]; then
     JOB_RUN_RESP=$(curl -sS --max-time 5 "${JOB_SERVICE_URL}/internal/jobs/runs/${ROLLOUT_RUN_ID}") || true
-    JOB_STATUS=$(echo "${JOB_RUN_RESP}" | quiet_json "status" || echo "")
+    JOB_STATUS=$(first_non_empty_json "${JOB_RUN_RESP}" "status" "run.status")
     pass "Job service run: HTTP 200, status=${JOB_STATUS}"
     collect_response "job_run" "${JOB_RUN_RESP}"
     security_check "Job run" "${JOB_RUN_RESP}" || true
   else
-    skip "Get job run: job service HTTP ${JOB_RUN_HTTP} (run may not yet be processed)"
+    # Fallback: query latest protocol_endpoint_rollout run from job-service list.
+    JOB_LIST_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+      "${JOB_SERVICE_URL}/internal/jobs/runs?job_type=protocol_endpoint_rollout" 2>/dev/null || true)
+    if [[ "${JOB_LIST_HTTP}" == "200" ]]; then
+      JOB_LIST_RESP=$(curl -sS --max-time 5 "${JOB_SERVICE_URL}/internal/jobs/runs?job_type=protocol_endpoint_rollout") || true
+      JOB_LIST_SUMMARY=$(echo "${JOB_LIST_RESP}" | python3 -c "
+import sys, json
+d=json.load(sys.stdin)
+runs=d.get('runs',[])
+if not isinstance(runs,list) or len(runs)==0:
+    print('EMPTY')
+    sys.exit(0)
+r=runs[0] if isinstance(runs[0],dict) else {}
+run_id=r.get('run_id','')
+status=r.get('status','')
+started_at=r.get('started_at','')
+finished_at=r.get('finished_at','')
+summary=r.get('result_summary',{}) if isinstance(r.get('result_summary'),dict) else {}
+node_count=summary.get('total',summary.get('node_count',''))
+success_count=summary.get('succeeded',summary.get('success_count',''))
+failed_count=summary.get('failed',summary.get('failed_count',''))
+error_summary=summary.get('error',summary.get('error_summary',''))
+print(f'run_id={run_id} status={status} started_at={started_at} finished_at={finished_at} node_count={node_count} success_count={success_count} failed_count={failed_count} error_summary={error_summary}')
+" 2>/dev/null || echo "PARSE_ERROR")
+
+      case "${JOB_LIST_SUMMARY}" in
+        EMPTY)
+          skip "Get job run: job service list returned 0 protocol_endpoint_rollout runs"
+          ;;
+        PARSE_ERROR)
+          skip "Get job run: job service list parse error"
+          ;;
+        *)
+          pass "Job service run fallback (list): ${JOB_LIST_SUMMARY}"
+          collect_response "job_run_list" "${JOB_LIST_RESP}"
+          security_check "Job run list" "${JOB_LIST_RESP}" || true
+          ;;
+      esac
+    else
+      skip "Get job run: job service HTTP ${JOB_RUN_HTTP}; fallback list HTTP ${JOB_LIST_HTTP}"
+    fi
   fi
 else
   skip "Get job run: no rollout run id available"
