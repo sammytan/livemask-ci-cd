@@ -59,6 +59,29 @@ Fixed local URLs:
 EOF
 }
 
+print_nodeagent_log_upload_status() {
+  local container_id=""
+  local enabled=""
+
+  container_id="$(compose_base ps -q nodeagent 2>/dev/null || true)"
+  if [[ -z "${container_id}" ]]; then
+    echo "NodeAgent log upload: nodeagent container not running"
+    return 0
+  fi
+
+  enabled="$(docker inspect "${container_id}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | awk -F= '$1 == "LOG_UPLOAD_ENABLED" {print $2; exit}')"
+  if [[ -z "${enabled}" ]]; then
+    echo "NodeAgent log upload: LOG_UPLOAD_ENABLED not set"
+    return 0
+  fi
+
+  echo "NodeAgent log upload: LOG_UPLOAD_ENABLED=${enabled}"
+  if [[ "${enabled}" != "true" ]]; then
+    echo "  Admin node logs read Backend observability data; with upload disabled, the UI can show stale DB logs."
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --env-file)
@@ -211,6 +234,7 @@ case "${command}" in
     echo
     echo "NodeAgent status:"
     curl -fsS "http://127.0.0.1:${LIVEMASK_NODEAGENT_PORT:-19090}/config/status" 2>/dev/null || echo "nodeagent status unavailable"
+    print_nodeagent_log_upload_status
     echo
     echo "Job Service health:"
     curl -fsS "http://127.0.0.1:${LIVEMASK_JOB_SERVICE_PORT:-19191}/healthz" 2>/dev/null || echo "job service health unavailable"
