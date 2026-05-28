@@ -2085,17 +2085,28 @@ echo "--- [22] Template Eligibility LKG Version ---"
 
 ELIG_TEMPLATE_ID="${FIRST_TEMPLATE_ID:-${TEMPLATE_ID:-}}"
 if [[ -n "${ELIG_TEMPLATE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
+  ELIG_LKG_RESULT=""
+  ELIG_LKG_SAW_200=0
+  ELIG_LKG_SAW_EMPTY=0
+  ELIG_LKG_QUERY_SUFFIXES=("")
+  if [[ -n "${NODE_ID:-}" ]]; then
+    # Prefer node-scoped eligibility first so capability_eligibility can be
+    # populated from real node capabilities instead of returning an empty list.
+    ELIG_LKG_QUERY_SUFFIXES=("?node_id=${NODE_ID}" "")
+  fi
   # Check eligibility endpoint for LKG info
   for elig_path in "protocol-templates" "protocol_endpoint_templates" "protocol/templates"; do
     for elig_detail_path in "${elig_path}/${ELIG_TEMPLATE_ID}/eligibility" "${elig_path}/${ELIG_TEMPLATE_ID}/eligibility-info"; do
-      ELIG_LKG_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-        "${API_BASE}/admin/api/v1/${elig_detail_path}" \
-        -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
-      if [[ "${ELIG_LKG_HTTP}" == "200" ]]; then
-        ELIG_LKG_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${elig_detail_path}" \
-          -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
-        # Check for per-node / per-capability lkg_version
-        ELIG_LKG_FIELD_CHECK=$(echo "${ELIG_LKG_RESP}" | python3 -c "
+      for elig_query_suffix in "${ELIG_LKG_QUERY_SUFFIXES[@]}"; do
+        ELIG_LKG_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+          "${API_BASE}/admin/api/v1/${elig_detail_path}${elig_query_suffix}" \
+          -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+        if [[ "${ELIG_LKG_HTTP}" == "200" ]]; then
+          ELIG_LKG_SAW_200=1
+          ELIG_LKG_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${elig_detail_path}${elig_query_suffix}" \
+            -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+          # Check for per-node / per-capability lkg_version
+          ELIG_LKG_FIELD_CHECK=$(echo "${ELIG_LKG_RESP}" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 if 'lkg_version' in d or 'lkg_at' in d:
@@ -2123,26 +2134,37 @@ else:
     print('NO_LKG_FIELDS')
 " 2>/dev/null || echo "PARSE_ERROR")
 
-        case "${ELIG_LKG_FIELD_CHECK}" in
-          FOUND:*)
-            pass "Template eligibility contains LKG fields: ${ELIG_LKG_FIELD_CHECK#FOUND: }"
-            ;;
-          NO_LKG*|NO_LKG_FIELDS)
-            fail "Template eligibility does not include lkg_version field: ${ELIG_LKG_FIELD_CHECK}"
-            ;;
-          EMPTY_CAPABILITY_ELIGIBILITY)
-            skip "Template eligibility LKG: no capability eligibility entries available"
-            ;;
-          *)
-            fail "Template eligibility LKG check: ${ELIG_LKG_FIELD_CHECK}"
-            ;;
-        esac
-        collect_response "eligibility_lkg" "${ELIG_LKG_RESP}"
-        break 2
-      fi
+          case "${ELIG_LKG_FIELD_CHECK}" in
+            FOUND:*)
+              pass "Template eligibility contains LKG fields: ${ELIG_LKG_FIELD_CHECK#FOUND: }"
+              ELIG_LKG_RESULT="PASS"
+              collect_response "eligibility_lkg" "${ELIG_LKG_RESP}"
+              break 3
+              ;;
+            NO_LKG*|NO_LKG_FIELDS)
+              fail "Template eligibility does not include lkg_version field: ${ELIG_LKG_FIELD_CHECK}"
+              ELIG_LKG_RESULT="FAIL"
+              collect_response "eligibility_lkg" "${ELIG_LKG_RESP}"
+              break 3
+              ;;
+            EMPTY_CAPABILITY_ELIGIBILITY)
+              ELIG_LKG_SAW_EMPTY=1
+              collect_response "eligibility_lkg_empty" "${ELIG_LKG_RESP}"
+              ;;
+            *)
+              fail "Template eligibility LKG check: ${ELIG_LKG_FIELD_CHECK}"
+              ELIG_LKG_RESULT="FAIL"
+              collect_response "eligibility_lkg" "${ELIG_LKG_RESP}"
+              break 3
+              ;;
+          esac
+        fi
+      done
     done
   done
-  if [[ -z "${ELIG_LKG_HTTP:-}" || "${ELIG_LKG_HTTP}" != "200" ]]; then
+  if [[ -z "${ELIG_LKG_RESULT}" && "${ELIG_LKG_SAW_EMPTY}" == "1" ]]; then
+    fail "Template eligibility LKG: endpoint returned empty capability eligibility even with node-scoped probe"
+  elif [[ -z "${ELIG_LKG_HTTP:-}" || "${ELIG_LKG_SAW_200}" != "1" ]]; then
     skip "Template eligibility LKG: endpoint not available (last HTTP ${ELIG_LKG_HTTP:-none})"
   fi
 else
