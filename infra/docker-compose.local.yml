@@ -61,6 +61,9 @@ services:
       # Job Service gateway
       JOB_SERVICE_ENABLED: "${JOB_SERVICE_ENABLED:-true}"
       JOB_SERVICE_INTERNAL_URL: "${JOB_SERVICE_INTERNAL_URL:-http://job-service:19191}"
+      # Local dev control-plane URL used by Backend to call the bundled NodeAgent.
+      NODEAGENT_CONTROL_URL: "${NODEAGENT_CONTROL_URL:-http://nodeagent:9100}"
+      NODEAGENT_CONTROL_NODE_NAME: "${NODEAGENT_CONTROL_NODE_NAME:-local-nodeagent}"
       GOPROXY: "${GOPROXY:-https://goproxy.cn,direct}"
       GOCACHE: /workspace/.cache/go-build
       GOMODCACHE: /workspace/.cache/go/pkg/mod
