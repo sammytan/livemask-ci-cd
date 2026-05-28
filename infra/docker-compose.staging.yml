@@ -62,6 +62,11 @@ services:
       DEV_USER_PASSWORD: "${DEV_USER_PASSWORD:-UserPass123!}"
       # GeoIP credential encryption (dev-only; production uses a real key)
       GEOIP_CREDENTIAL_ENCRYPTION_KEY: "${GEOIP_CREDENTIAL_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
+      # Job Service admin gateway (dev/staging runtime)
+      JOB_SERVICE_ENABLED: "${JOB_SERVICE_ENABLED:-true}"
+      JOB_SERVICE_INTERNAL_URL: "${JOB_SERVICE_INTERNAL_URL:-http://job-service:19191}"
+      JOB_SERVICE_AUTH_MODE: "${JOB_SERVICE_AUTH_MODE:-none}"
+      JOB_SERVICE_TIMEOUT_SEC: "${JOB_SERVICE_TIMEOUT_SEC:-30}"
     depends_on:
       postgres:
         condition: service_healthy

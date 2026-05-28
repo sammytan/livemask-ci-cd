@@ -143,6 +143,22 @@ jobs:
           fi
           echo "admin runtime proxy login reachable: HTTP ${admin_login_code}"
 
+          admin_token=$(python3 -c 'import json,sys; print(json.load(open("/tmp/livemask-admin-login.json")).get("access_token", ""))')
+          if [[ -z "${admin_token}" ]]; then
+            echo "FAIL: admin runtime proxy login did not return an access token" >&2
+            cat /tmp/livemask-admin-login.json >&2 || true
+            exit 1
+          fi
+          jobs_code=$(curl -sS --max-time 5 -o /tmp/livemask-admin-jobs.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${admin_token}" \
+            "http://127.0.0.1:${LIVEMASK_ADMIN_PORT}/admin/api/v1/jobs" || echo "000")
+          if [[ "${jobs_code}" != "200" ]]; then
+            echo "FAIL: admin jobs gateway returned HTTP ${jobs_code}" >&2
+            cat /tmp/livemask-admin-jobs.json >&2 || true
+            exit 1
+          fi
+          echo "admin jobs gateway reachable: HTTP ${jobs_code}"
+
       - name: Verify browser-facing dev runtime config
         run: |
           echo "Checking website bundle does not point browser clients at 127.0.0.1:${LIVEMASK_BACKEND_HTTP_PORT}"
