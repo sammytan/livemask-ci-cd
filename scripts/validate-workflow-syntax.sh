@@ -42,6 +42,11 @@ workflow_contracts = {
     "on" => ["workflow_dispatch"],
     "jobs" => ["validate-and-assign"],
   },
+  ".github/workflows/app-hysteria2-aar-build.yml" => {
+    "name" => "App Hysteria2 AAR Build",
+    "on" => ["workflow_dispatch"],
+    "jobs" => ["build-aar"],
+  },
   ".github/workflows/ci-runner-diagnostics.yml" => {
     "name" => "CI Runner Diagnostics",
     "on" => ["workflow_dispatch"],

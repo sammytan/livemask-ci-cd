@@ -131,6 +131,18 @@ jobs:
           check_url "admin" "http://127.0.0.1:${LIVEMASK_ADMIN_PORT}/login"
           check_url "website" "http://127.0.0.1:${LIVEMASK_WEBSITE_PORT}/"
 
+          echo "Checking admin runtime proxy can reach backend"
+          admin_login_code=$(curl -sS --max-time 5 -o /tmp/livemask-admin-login.json -w "%{http_code}" \
+            -X POST "http://127.0.0.1:${LIVEMASK_ADMIN_PORT}/admin/api/v1/auth/login" \
+            -H "Content-Type: application/json" \
+            -d '{"request_id":"dev-runtime-admin-proxy-smoke","email":"admin@livemask.dev","password":"AdminPass123!","client_type":"admin"}' || echo "000")
+          if [[ "${admin_login_code}" != "200" ]]; then
+            echo "FAIL: admin runtime proxy login returned HTTP ${admin_login_code}" >&2
+            cat /tmp/livemask-admin-login.json >&2 || true
+            exit 1
+          fi
+          echo "admin runtime proxy login reachable: HTTP ${admin_login_code}"
+
       - name: Verify browser-facing dev runtime config
         run: |
           echo "Checking website bundle does not point browser clients at 127.0.0.1:${LIVEMASK_BACKEND_HTTP_PORT}"
