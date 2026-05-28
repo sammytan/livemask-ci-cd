@@ -362,6 +362,8 @@ trap 'rm -rf "${SMOKE_TMPDIR}"' EXIT
 
 TIMESTAMP=$(date +%s)
 SUFFIX="cap-${TIMESTAMP}"
+REAL_NODE_ID="${LIVEMASK_SMOKE_NODE_ID:-}"
+REAL_NODE_SECRET_HASH="${LIVEMASK_SMOKE_NODE_SECRET_HASH:-}"
 
 # Collected responses for secret leak scan
 ALL_RESPONSES=()
@@ -575,28 +577,45 @@ fi
 echo ""
 echo "--- [5] NodeAgent Reports Capabilities via Heartbeat ---"
 
-echo "  Registering smoke node..."
-NODE_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/register" \
-  -H "Content-Type: application/json" \
-  -d "{\"node_name\":\"cap-smoke-node-${SUFFIX}\",\"agent_version\":\"smoke-1.0.0\"}") || true
-NODE_ID=$(echo "${NODE_REG}" | quiet_json "node_id")
-NODE_SECRET=$(echo "${NODE_REG}" | quiet_json "node_secret")
-NODE_STATUS=$(echo "${NODE_REG}" | quiet_json "status")
-if [[ -z "${NODE_ID}" || -z "${NODE_SECRET}" ]]; then
-  fail "Node registration — no node_id/node_secret"
-  NODE_ID=""
-  NODE_SECRET=""
-else
-  pass "Node registered: id=${NODE_ID} status=${NODE_STATUS}"
-fi
-
+NODE_ID=""
+NODE_SECRET=""
+NODE_STATUS=""
 NODE_SECRET_HASH=""
-if [[ -n "${NODE_SECRET}" ]]; then
-  NODE_SECRET_HASH=$(echo -n "${NODE_SECRET}" | sha256sum | cut -d' ' -f1)
+
+if [[ -n "${REAL_NODE_ID}" ]]; then
+  NODE_ID="${REAL_NODE_ID}"
+  NODE_STATUS=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes/${NODE_ID}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | quiet_json "status" || true)
+  NODE_SECRET_HASH="${REAL_NODE_SECRET_HASH}"
+  if [[ -z "${NODE_SECRET_HASH}" ]]; then
+    NODE_SECRET_HASH=$(pg_exec -c "SELECT node_secret_hash FROM nodes WHERE id='${NODE_ID}' LIMIT 1" | tr -d '[:space:]' || true)
+  fi
+  if [[ -z "${NODE_SECRET_HASH}" ]]; then
+    skip "Using real node ${NODE_ID} but node_secret_hash unavailable; HMAC heartbeat checks will be skipped"
+  fi
+  pass "Using real smoke node: id=${NODE_ID} status=${NODE_STATUS:-unknown}"
+else
+  echo "  Registering smoke node..."
+  NODE_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/register" \
+    -H "Content-Type: application/json" \
+    -d "{\"node_name\":\"cap-smoke-node-${SUFFIX}\",\"agent_version\":\"smoke-1.0.0\"}") || true
+  NODE_ID=$(echo "${NODE_REG}" | quiet_json "node_id")
+  NODE_SECRET=$(echo "${NODE_REG}" | quiet_json "node_secret")
+  NODE_STATUS=$(echo "${NODE_REG}" | quiet_json "status")
+  if [[ -z "${NODE_ID}" || -z "${NODE_SECRET}" ]]; then
+    fail "Node registration — no node_id/node_secret"
+    NODE_ID=""
+    NODE_SECRET=""
+  else
+    pass "Node registered: id=${NODE_ID} status=${NODE_STATUS}"
+  fi
+  if [[ -n "${NODE_SECRET}" ]]; then
+    NODE_SECRET_HASH=$(echo -n "${NODE_SECRET}" | sha256sum | cut -d' ' -f1)
+  fi
 fi
 
 # Activate node
-if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
+if [[ -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" && -z "${REAL_NODE_ID}" ]]; then
   curl -sS --max-time 5 -X POST "${API_BASE}/admin/api/v1/nodes/${NODE_ID}/approve" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" \
