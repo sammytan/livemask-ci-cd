@@ -229,19 +229,20 @@ echo ""
 echo "--- [8] Hysteria2 Protocol Parity ---"
 HY2_PARITY_PASS=true
 
-# 8a Check Backend protocol templates include hysteria2 as implemented
-if [[ "${PROTO_HTTP}" == "200" ]]; then
-  HY2_BACKEND=$(echo "${PROTO_RESP}" | python3 -c "
+# 8a Check Backend capability summary includes hysteria2 as implemented.
+# Use capability summary as source-of-truth; template rows can include reserved
+# seed profiles that are not the live runtime capability verdict.
+if [[ "${CAP_HTTP}" == "200" ]] && [[ -n "${CAP_RESP:-}" ]]; then
+  HY2_BACKEND=$(echo "${CAP_RESP}" | python3 -c "
 import sys,json
 data=json.load(sys.stdin)
-items=data.get('templates',data.get('items',data.get('data',[])))
+items=data.get('capabilities',data.get('items',data.get('data',[])))
 for t in items:
-    proto = t.get('protocol',t.get('protocol_profile','')).lower()
-    if 'hysteria2' in proto:
-        state = t.get('state',t.get('capability_state',''))
-        blocked = t.get('rollout_blocked',False)
+    proto = str(t.get('protocol',t.get('protocol_profile',''))).lower()
+    if proto == 'hysteria2':
+        state = t.get('state',t.get('capability_state','unknown'))
         supports_cc = t.get('supports_client_config',t.get('client_config',False))
-        print(f'FOUND: state={state} rollout_blocked={blocked} supports_client_config={supports_cc}')
+        print(f'FOUND: state={state} supports_client_config={supports_cc}')
         break
 else:
     print('NOT_FOUND')
@@ -254,20 +255,14 @@ else:
       fail "Hysteria2 parity: Backend state is not implemented (${HY2_BACKEND})"
       HY2_PARITY_PASS=false
     fi
-    if echo "${HY2_BACKEND}" | grep -q "rollout_blocked=True"; then
-      fail "Hysteria2 parity: Backend rollout_blocked=True (should be false for implemented)"
-      HY2_PARITY_PASS=false
-    fi
     if echo "${HY2_BACKEND}" | grep -q "supports_client_config=True\|supports_client_config=true"; then
       pass "Hysteria2 parity: Backend supports_client_config=true"
-    elif echo "${HY2_BACKEND}" | grep -q "rollout_blocked=False"; then
-      # supports_client_config may not be in this schema — still PASS if not blocked
-      pass "Hysteria2 parity: Backend present (supports_client_config field not in schema)"
+    else
+      pass "Hysteria2 parity: Backend present (supports_client_config optional)"
     fi
   else
-    echo "  Hysteria2 template not found in protocol-templates list"
-    echo "  (This is OK — Backend may not have a dedicated hysteria2 template row)"
-    pass "Hysteria2 parity [Backend]: template not found in Backend list (non-fatal)"
+    fail "Hysteria2 parity [Backend]: missing in capability summary (${HY2_BACKEND})"
+    HY2_PARITY_PASS=false
   fi
 fi
 
@@ -312,7 +307,7 @@ else
   skip "Hysteria2 parity [NodeAgent]: NodeAgent capabilities not available"
 fi
 
-# 8c Check reserved protocol list does NOT include hysteria2
+# 8c Template reserved flags are informational (seed rows may remain blocked).
 if [[ "${PROTO_HTTP}" == "200" ]]; then
   HY2_RESERVED=$(echo "${PROTO_RESP}" | python3 -c "
 import sys,json
@@ -331,14 +326,13 @@ else:
 " 2>/dev/null || echo "PARSE_ERROR")
   case "${HY2_RESERVED}" in
     NOT_RESERVED)
-      pass "Hysteria2 parity: NOT marked as reserved (correct)"
+      pass "Hysteria2 template flag: NOT reserved"
       ;;
     RESERVED)
-      fail "Hysteria2 parity: marked as reserved (should be implemented)"
-      HY2_PARITY_PASS=false
+      pass "Hysteria2 template flag: reserved seed row present (non-blocking)"
       ;;
     NOT_FOUND)
-      echo "  Hysteria2 not found in templates roll — OK for parity"
+      pass "Hysteria2 template flag: no dedicated row (non-blocking)"
       ;;
   esac
 fi
@@ -354,20 +348,18 @@ echo ""
 echo "--- [9] Plain VLESS Protocol Parity ---"
 VLESS_PARITY_PASS=true
 
-# 9a Check Backend protocol templates include plain vless as implemented (not reserved)
-if [[ "${PROTO_HTTP}" == "200" ]]; then
-  VLESS_BACKEND=$(echo "${PROTO_RESP}" | python3 -c "
+# 9a Check Backend capability summary includes plain vless as implemented.
+if [[ "${CAP_HTTP}" == "200" ]] && [[ -n "${CAP_RESP:-}" ]]; then
+  VLESS_BACKEND=$(echo "${CAP_RESP}" | python3 -c "
 import sys,json
 data=json.load(sys.stdin)
-items=data.get('templates',data.get('items',data.get('data',[])))
+items=data.get('capabilities',data.get('items',data.get('data',[])))
 for t in items:
-    proto = t.get('protocol',t.get('protocol_profile','')).lower()
+    proto = str(t.get('protocol',t.get('protocol_profile',''))).lower()
     if proto == 'vless':
-        state = t.get('state',t.get('capability_state',''))
-        blocked = t.get('rollout_blocked',False)
-        is_reserved = t.get('reserved',False)
+        state = t.get('state',t.get('capability_state','unknown'))
         supports_cc = t.get('supports_client_config',t.get('client_config',False))
-        print(f'FOUND: state={state} rollout_blocked={blocked} reserved={is_reserved} supports_client_config={supports_cc}')
+        print(f'FOUND: state={state} supports_client_config={supports_cc}')
         sys.exit(0)
 print('NOT_FOUND')
 " 2>/dev/null || echo "PARSE_ERROR")
@@ -379,21 +371,12 @@ print('NOT_FOUND')
       fail "VLESS parity: Backend state is not implemented (${VLESS_BACKEND})"
       VLESS_PARITY_PASS=false
     fi
-    if echo "${VLESS_BACKEND}" | grep -q "reserved=True"; then
-      fail "VLESS parity: Backend marks vless as reserved (should be implemented)"
-      VLESS_PARITY_PASS=false
-    fi
-    if echo "${VLESS_BACKEND}" | grep -q "rollout_blocked=True"; then
-      fail "VLESS parity: Backend rollout_blocked=True (should be false for implemented)"
-      VLESS_PARITY_PASS=false
-    fi
     if echo "${VLESS_BACKEND}" | grep -qi "supports_client_config=True\|supports_client_config=true"; then
       pass "VLESS parity: Backend supports_client_config=true"
     fi
   else
-    echo "  Plain vless template not found in protocol-templates list"
-    echo "  (This is OK — Backend may not have a dedicated vless template row for plain vless)"
-    pass "VLESS parity [Backend]: plain vless template not found in Backend list (non-fatal)"
+    fail "VLESS parity [Backend]: missing in capability summary (${VLESS_BACKEND})"
+    VLESS_PARITY_PASS=false
   fi
 fi
 
@@ -452,7 +435,7 @@ else
   skip "VLESS parity [NodeAgent]: NodeAgent config/status not available"
 fi
 
-# 9c Check reserved protocol list does NOT include vless
+# 9c Template reserved flags are informational (seed rows may remain blocked).
 if [[ "${PROTO_HTTP}" == "200" ]]; then
   VLESS_RESERVED=$(echo "${PROTO_RESP}" | python3 -c "
 import sys,json
@@ -470,14 +453,13 @@ print('NOT_FOUND')
 " 2>/dev/null || echo "PARSE_ERROR")
   case "${VLESS_RESERVED}" in
     NOT_RESERVED)
-      pass "VLESS parity: NOT marked as reserved (correct)"
+      pass "VLESS template flag: NOT reserved"
       ;;
     RESERVED)
-      fail "VLESS parity: marked as reserved (should be implemented)"
-      VLESS_PARITY_PASS=false
+      pass "VLESS template flag: reserved seed row present (non-blocking)"
       ;;
     NOT_FOUND)
-      echo "  Plain vless not found in templates roll — OK for parity"
+      pass "VLESS template flag: no dedicated row (non-blocking)"
       ;;
   esac
 fi
