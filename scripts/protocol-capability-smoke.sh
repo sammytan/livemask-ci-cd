@@ -534,7 +534,19 @@ if [[ "${HAVE_TEMPLATES}" == "true" ]]; then
   BLOCKED_CHECK=$(echo "${TEMPLATE_ITEMS}" | python3 -c "
 import sys,json
 items=json.load(sys.stdin)
-reserved = [t for t in items if t.get('template_type') in ('builtin','reserved','seed') or t.get('is_reserved')==True or t.get('built_in')==True or t.get('is_seed')==True]
+reserved = []
+for t in items:
+    name = str(t.get('name','')).lower()
+    proto = str(t.get('protocol', t.get('protocol_profile',''))).lower()
+    is_reserved = bool(
+        t.get('is_reserved')==True
+        or t.get('rollout_blocked')==True
+        or t.get('enabled')==False
+        or 'reserved' in name
+        or proto in ('vless_reality','trojan','shadowtls','wireguard')
+    )
+    if is_reserved:
+        reserved.append(t)
 has_blocked_field = any('rollout_blocked' in t or 'rollout_enabled' in t or 'can_rollout' in t for t in reserved)
 all_blocked = all(t.get('rollout_blocked')==True or t.get('rollout_enabled')==False or t.get('can_rollout')==False for t in reserved) if reserved else False
 blocked_count = sum(1 for t in reserved if t.get('rollout_blocked')==True or t.get('rollout_enabled')==False or t.get('can_rollout')==False)
@@ -559,8 +571,8 @@ print(f'reserved={len(reserved)} has_field={\"yes\" if has_blocked_field else \"
       skip "Reserved templates exist (${RESERVED_COUNT}) but no rollout_blocked field in schema"
     fi
   else
-    DB_RESERVED=$(pg_exec -c "SELECT count(*) FROM protocol_templates WHERE template_type='builtin' OR template_type='reserved' OR is_reserved=true" 2>/dev/null || echo "0")
-    DB_BLOCKED=$(pg_exec -c "SELECT count(*) FROM protocol_templates WHERE (template_type='builtin' OR template_type='reserved' OR is_reserved=true) AND (rollout_blocked=true OR rollout_enabled=false)" 2>/dev/null || echo "0")
+    DB_RESERVED=$(pg_exec -c "SELECT count(*) FROM protocol_templates WHERE rollout_blocked=true OR enabled=false OR lower(name) LIKE '%reserved%'" 2>/dev/null || echo "0")
+    DB_BLOCKED=$(pg_exec -c "SELECT count(*) FROM protocol_templates WHERE (rollout_blocked=true OR enabled=false OR lower(name) LIKE '%reserved%') AND rollout_blocked=true" 2>/dev/null || echo "0")
     if [[ "${DB_RESERVED}" -gt 0 ]]; then
       if [[ "${DB_BLOCKED}" -gt 0 ]]; then
         pass "DB: ${DB_BLOCKED}/${DB_RESERVED} reserved templates rollout_blocked=true"
@@ -926,47 +938,49 @@ APP_PENDING_TEMPLATE_ID=""
 IMPLEMENTED_TEMPLATE_ID=""
 
 if [[ "${HAVE_TEMPLATES}" == "true" ]]; then
-  # Extract template IDs from template items
-  TEMPLATE_IDS=$(echo "${TEMPLATE_ITEMS}" | python3 -c "
+  # Extract deterministic template IDs from template items.
+  # Prefer canonical seed names to avoid picking transient smoke custom templates.
+  TEMPLATE_PICKED=$(echo "${TEMPLATE_ITEMS}" | python3 -c "
 import sys,json
 items=json.load(sys.stdin)
+reserved_id = ''
+h2_id = ''
+implemented_id = ''
+by_name = {}
+normalized = []
+
 for t in items:
     tid = t.get('template_id', t.get('id',''))
-    tname = t.get('name','')
-    tproto = t.get('protocol',t.get('protocol_profile','')).lower()
-    ttype = str(t.get('template_type','')).lower()
+    if not tid:
+        continue
+    name = str(t.get('name','')).lower()
+    proto = str(t.get('protocol', t.get('protocol_profile',''))).lower()
     rollout_blocked = bool(t.get('rollout_blocked', False))
     enabled = t.get('enabled', True)
-    is_reserved = bool(
-        t.get('is_reserved', False)
-        or rollout_blocked
-        or (enabled is False)
-        or ('reserved' in tname.lower())
-        or ttype == 'reserved'
-    )
-    print(f'{tid}|{tname}|{tproto}|{is_reserved}|{rollout_blocked}|{enabled}')
+    is_reserved = bool(t.get('is_reserved', False) or rollout_blocked or (enabled is False) or ('reserved' in name))
+    normalized.append((tid, name, proto, is_reserved))
+    if name and name not in by_name:
+        by_name[name] = tid
+
+# Deterministic seed-name priority
+if 'mixed-basic-public' in by_name:
+    implemented_id = by_name['mixed-basic-public']
+if 'hysteria2-udp-standard' in by_name:
+    h2_id = by_name['hysteria2-udp-standard']
+
+# Fallbacks
+for tid, name, proto, is_reserved in normalized:
+    if not reserved_id and is_reserved and ('reserved' in name or proto in ('vless_reality','trojan','shadowtls','wireguard')):
+        reserved_id = tid
+    if not h2_id and proto == 'hysteria2' and not is_reserved:
+        h2_id = tid
+    if not implemented_id and proto in ('mixed','socks','tun') and not is_reserved:
+        implemented_id = tid
+
+print(f'{reserved_id}|{h2_id}|{implemented_id}')
 " 2>/dev/null || echo "")
 
-  while IFS='|' read -r tid tname tproto tis_reserved tis_blocked tis_enabled; do
-    [[ -z "${tid}" ]] && continue
-    if [[ "${tis_reserved}" == "True" ]] || [[ "${tis_reserved}" == "true" ]]; then
-      if [[ -z "${RESERVED_TEMPLATE_ID}" ]]; then
-        RESERVED_TEMPLATE_ID="${tid}"
-      fi
-    fi
-    # For app_pending: hysteria2
-    if echo "${tproto}" | grep -q "hysteria2"; then
-      if [[ "${tis_reserved}" != "True" ]] && [[ "${tis_reserved}" != "true" ]]; then
-        APP_PENDING_TEMPLATE_ID="${tid}"
-      fi
-    fi
-    # For implemented: mixed, socks, or tun
-    if echo "${tproto}" | grep -q "mixed\|socks\|tun"; then
-      if [[ "${tis_reserved}" != "True" ]] && [[ "${tis_reserved}" != "true" ]] && [[ -z "${IMPLEMENTED_TEMPLATE_ID}" ]]; then
-        IMPLEMENTED_TEMPLATE_ID="${tid}"
-      fi
-    fi
-  done <<< "${TEMPLATE_IDS}"
+  IFS='|' read -r RESERVED_TEMPLATE_ID APP_PENDING_TEMPLATE_ID IMPLEMENTED_TEMPLATE_ID <<< "${TEMPLATE_PICKED}"
 
   echo "  Reserved template ID: ${RESERVED_TEMPLATE_ID:-none}"
   echo "  app_pending template ID: ${APP_PENDING_TEMPLATE_ID:-none}"
@@ -1089,8 +1103,31 @@ if [[ -n "${APP_PENDING_TEMPLATE_ID}" && -n "${ADMIN_TOKEN}" ]]; then
     if [[ "${HY2_ELIG_HTTP}" == "200" ]]; then
       HY2_ELIG_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${elig_path}/${APP_PENDING_TEMPLATE_ID}/eligibility" \
         -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
-      ELIG_ALLOWED=$(echo "${HY2_ELIG_RESP}" | quiet_json "eligible" || echo "${HY2_ELIG_RESP}" | quiet_json "allowed" || echo "")
-      ELIG_REASON=$(echo "${HY2_ELIG_RESP}" | quiet_json "reason" || echo "${HY2_ELIG_RESP}" | quiet_json "blocking_reason" || echo "")
+      ELIG_ALLOWED=$(echo "${HY2_ELIG_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+v=d.get('eligible', d.get('allowed', None))
+if isinstance(v, bool):
+    print('true' if v else 'false')
+elif isinstance(v, str) and v.lower() in ('true','false'):
+    print(v.lower())
+elif isinstance(d.get('eligible_nodes'), int):
+    print('true' if d.get('eligible_nodes',0) > 0 else 'false')
+else:
+    print('')
+" 2>/dev/null || echo "")
+      ELIG_REASON=$(echo "${HY2_ELIG_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+reason=d.get('reason') or d.get('blocking_reason')
+if not reason:
+    skipped=d.get('skipped_nodes') or []
+    if isinstance(skipped, list) and skipped:
+        first=skipped[0]
+        if isinstance(first, dict):
+            reason=first.get('reason') or first.get('code')
+print(reason or '')
+" 2>/dev/null || echo "")
       # Hysteria2 is now implemented — eligibility should be true (or at least
       # not explicitly blocked for app_pending reasons).
       if [[ "${ELIG_ALLOWED}" == "true" ]] || [[ "${ELIG_ALLOWED}" == "True" ]]; then
@@ -1132,8 +1169,31 @@ if [[ -n "${IMPLEMENTED_TEMPLATE_ID}" && -n "${NODE_ID}" && -n "${ADMIN_TOKEN}" 
     if [[ "${IMPL_ELIG_HTTP}" == "200" ]]; then
       IMPL_ELIG_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/${elig_path}/${IMPLEMENTED_TEMPLATE_ID}/eligibility?node_id=${NODE_ID}" \
         -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
-      ELIG_ALLOWED=$(echo "${IMPL_ELIG_RESP}" | quiet_json "eligible" || echo "${IMPL_ELIG_RESP}" | quiet_json "allowed" || echo "")
-      ELIG_REASON=$(echo "${IMPL_ELIG_RESP}" | quiet_json "reason" || echo "${IMPL_ELIG_RESP}" | quiet_json "blocking_reason" || echo "")
+      ELIG_ALLOWED=$(echo "${IMPL_ELIG_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+v=d.get('eligible', d.get('allowed', None))
+if isinstance(v, bool):
+    print('true' if v else 'false')
+elif isinstance(v, str) and v.lower() in ('true','false'):
+    print(v.lower())
+elif isinstance(d.get('eligible_nodes'), int):
+    print('true' if d.get('eligible_nodes',0) > 0 else 'false')
+else:
+    print('')
+" 2>/dev/null || echo "")
+      ELIG_REASON=$(echo "${IMPL_ELIG_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+reason=d.get('reason') or d.get('blocking_reason')
+if not reason:
+    skipped=d.get('skipped_nodes') or []
+    if isinstance(skipped, list) and skipped:
+        first=skipped[0]
+        if isinstance(first, dict):
+            reason=first.get('reason') or first.get('code')
+print(reason or '')
+" 2>/dev/null || echo "")
 
       if [[ "${ELIG_ALLOWED}" == "true" ]] || [[ "${ELIG_ALLOWED}" == "True" ]]; then
         pass "Implemented protocol (mixed) eligibility: allowed for node ${NODE_ID:0:8}"
