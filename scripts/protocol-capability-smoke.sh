@@ -1921,16 +1921,27 @@ if [[ "${HAVE_TEMPLATES}" == "true" ]]; then
   VLESS_TEMPLATE_STATE=$(echo "${TEMPLATE_ITEMS}" | python3 -c "
 import sys,json
 items=json.load(sys.stdin)
+preferred = []
+fallback = []
 for t in items:
     tproto = t.get('protocol',t.get('protocol_profile','')).lower()
     tname = t.get('name','').lower()
     if 'vless' in tproto or 'vless' in tname:
         if tproto == 'vless_reality':
             continue
-        is_blocked = t.get('rollout_blocked',False) or t.get('reserved',False)
+        is_blocked = bool(t.get('rollout_blocked',False) or t.get('reserved',False))
         state = t.get('state',t.get('capability_state',''))
-        print(f'PROTO={tproto} NAME={tname} rollout_blocked={is_blocked} state={state}')
-        sys.exit(0)
+        line = f'PROTO={tproto} NAME={tname} rollout_blocked={is_blocked} state={state}'
+        if not is_blocked:
+            preferred.append(line)
+        else:
+            fallback.append(line)
+if preferred:
+    print(preferred[0])
+    sys.exit(0)
+if fallback:
+    print(fallback[0])
+    sys.exit(0)
 print('NOT_FOUND')
 " 2>/dev/null || echo "PARSE_ERROR")
   case "${VLESS_TEMPLATE_STATE}" in
