@@ -1004,6 +1004,15 @@ if [[ -n "${NODE_ID}" && -n "${NODE_SECRET_HASH}" ]]; then
         ASSIGN_DATA=$(cat "${ASSIGN_BODY}" 2>/dev/null || echo "")
         ASSIGN_TEMPLATE_ID=$(echo "${ASSIGN_DATA}" | quiet_json "template_id" || echo "${ASSIGN_DATA}" | quiet_json "assignment.template_id" || echo "")
         ASSIGN_PROTOCOL=$(echo "${ASSIGN_DATA}" | quiet_json "protocol" || echo "${ASSIGN_DATA}" | quiet_json "assignment.protocol" || echo "")
+        ASSIGNMENT_ID_FROM_AGENT=$(first_non_empty_json "${ASSIGN_DATA}" \
+          "assignment_id" \
+          "assignment.assignment_id" \
+          "assignment.id" \
+          "id")
+        if [[ -n "${ASSIGNMENT_ID_FROM_AGENT}" ]]; then
+          EVENT_ASSIGNMENT_ID="${ASSIGNMENT_ID_FROM_AGENT}"
+          echo "  Using assignment_id from NodeAgent pull: ${EVENT_ASSIGNMENT_ID:0:12}..."
+        fi
         if [[ -n "${ASSIGN_TEMPLATE_ID}" ]] || [[ -n "${ASSIGN_PROTOCOL}" ]]; then
           pass "NodeAgent assignment (${assign_path}): HTTP 200, template=${ASSIGN_TEMPLATE_ID}, protocol=${ASSIGN_PROTOCOL}"
         else
@@ -1106,6 +1115,45 @@ print(0)
 PY
 )
       if [[ "${NODE_ASSIGN_COUNT}" -gt 0 ]]; then
+        NODE_ASSIGN_ID=$(python3 - "${SMOKE_TMPDIR}/node_assignment_admin.json" <<'PY'
+import json,sys
+p=sys.argv[1]
+try:
+    with open(p, "r", encoding="utf-8") as f:
+        data=json.load(f)
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+def pick_id(obj):
+    if not isinstance(obj, dict):
+        return ""
+    for key in ("assignment_id","id","protocol_assignment_id"):
+        v = obj.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+for key in ("assignments","items","data","node_assignments"):
+    v = data.get(key) if isinstance(data, dict) else None
+    if isinstance(v, list) and v:
+        aid = pick_id(v[0])
+        if aid:
+            print(aid)
+            raise SystemExit(0)
+if isinstance(data, dict):
+    for key in ("current","target"):
+        aid = pick_id(data.get(key))
+        if aid:
+            print(aid)
+            raise SystemExit(0)
+print("")
+PY
+)
+        if [[ -n "${NODE_ASSIGN_ID}" ]]; then
+          EVENT_ASSIGNMENT_ID="${NODE_ASSIGN_ID}"
+          echo "  Using assignment_id from Admin assignment view: ${EVENT_ASSIGNMENT_ID:0:12}..."
+        fi
         pass "Assignment API record (admin node protocol-assignments): count=${NODE_ASSIGN_COUNT}"
         ASSIGN_DB_FOUND=true
       fi
