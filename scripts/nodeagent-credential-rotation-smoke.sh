@@ -189,7 +189,7 @@ import sys, json, re
 
 SECRET_FIELDS = frozenset([
     "node_secret", "secret_hash", "access_token", "bearer_token",
-    "refresh_token", "api_key", "private_key", "dsn", "secret",
+    "refresh_token", "token", "api_key", "private_key", "dsn", "secret",
     "hmac_key", "signing_key", "session_token",
 ])
 
@@ -215,11 +215,16 @@ text = re.sub(
     r"(Authorization:\s*Bearer\s+)[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+",
     r"\1<REDACTED-JWT>", text, flags=re.IGNORECASE
 )
+# Any standalone JWT-like token
+text = re.sub(
+    r"(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{12,}(?![A-Za-z0-9_\-])",
+    "<REDACTED-JWT>", text
+)
 # X-Signature: <long-hex>
 text = re.sub(r"(X-Signature:\s*)[a-fA-F0-9]{64,}", r"\1<REDACTED-SIG>", text)
 # key=value or key:value for known fields
 text = re.sub(
-    r"(node_secret|access_token|bearer_token|secret_hash|private_key)\s*[=:]\s*[A-Za-z0-9_\-{}]{8,}",
+    r"(node_secret|access_token|bearer_token|refresh_token|token|secret_hash|private_key)\s*[=:]\s*[A-Za-z0-9_\-{}]{8,}",
     r"\1=<REDACTED>", text, flags=re.IGNORECASE
 )
 # Long hex strings (potential hashes / raw secrets)
@@ -267,7 +272,7 @@ secret_leak_detect_only() {
   python3 -c '
 import sys, re
 LEAK_PATTERNS = [
-    (r"[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+", "JWT-token"),
+    (r"[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{12,}", "JWT-token"),
     (r"[a-fA-F0-9]{64,}", "hex-64+"),
     (r"[A-Za-z0-9+/=]{80,}", "base64-80+"),
     (r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----", "private-key"),
