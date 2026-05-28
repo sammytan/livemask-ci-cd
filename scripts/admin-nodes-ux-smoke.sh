@@ -8,7 +8,7 @@
 #   [2]  Seed multiple test nodes with different statuses
 #   [3]  Admin API node list: pagination
 #   [4]  Admin API node list: search by name/id
-#   [5]  Admin API node list: filter by status
+#   [5]  Admin API node list: filter by status + owner/inviter
 #   [6]  Admin API node count (total and per-status)
 #   [7]  Admin API node detail
 #   [8]  Secret leak scan
@@ -21,8 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/base_service.sh"
 
-COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
 API_BASE="$(lm_backend_base_url)"
+LM_COMPOSE_FILE="${COMPOSE_FILE:-$(lm_detect_compose_file postgres)}"
 
 FAILED=0; PASS_COUNT=0; SKIP_COUNT=0; FAIL_COUNT=0; SUMMARY_LINES=()
 
@@ -43,7 +43,7 @@ for p in '${path}'.split('.'):
 print(d)" 2>/dev/null || echo ""
 }
 
-pg_exec() { docker compose -f "${COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true; }
+pg_exec() { LM_COMPOSE_FILE="${LM_COMPOSE_FILE}" lm_pg_exec "$@"; }
 
 security_check() {
   local label="$1"; local json="$2"
@@ -69,6 +69,7 @@ echo "================================================"
 echo " TASK-CICD-ADMIN-NODES-UX-SMOKE-001"
 echo " Admin Nodes UX: Search / Pagination / Tab / Count / Status"
 echo "================================================"
+echo "Compose file: ${LM_COMPOSE_FILE}"
 lm_runtime_status_report; echo ""
 
 # [1] Backend health + Admin login
@@ -103,22 +104,28 @@ echo "--- [2] Seed Test Nodes ---"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "2026-01-01T00:00:00Z")
 
 SEED_NODES=(
-  "nodesux-active-01|Active Node Tokyo|active|Tokyo|JP|shadowsocks"
-  "nodesux-active-02|Active Node Singapore|active|Singapore|SG|wireguard"
-  "nodesux-inactive-01|Inactive Node US|inactive|New York|US|shadowsocks"
-  "nodesux-offline-01|Offline Node EU|offline|Frankfurt|DE|vmess"
-  "nodesux-degraded-01|Degraded Node AU|degraded|Sydney|AU|shadowsocks"
-  "nodesux-pending-01|Pending Node BR|pending|Sao Paulo|BR|wireguard"
-  "nodesux-search-01|Searchable Node Z|active|Tokyo|JP|shadowsocks,wireguard"
+  "1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a101|Active Node Tokyo|active|Tokyo|JP|shadowsocks|amb_owner_01|amb_inviter_01"
+  "1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a102|Active Node Singapore|active|Singapore|SG|wireguard|amb_owner_02|amb_inviter_01"
+  "1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a103|Disabled Node US|disabled|New York|US|shadowsocks|amb_owner_01|amb_inviter_02"
+  "1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a104|Suspended Node EU|suspended|Frankfurt|DE|vmess|amb_owner_03|amb_inviter_03"
+  "1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a105|Rejected Node AU|rejected|Sydney|AU|shadowsocks|amb_owner_04|amb_inviter_04"
+  "1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a106|Pending Node BR|pending_review|Sao Paulo|BR|wireguard|amb_owner_05|amb_inviter_05"
+  "1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a107|Searchable Node Z|active|Tokyo|JP|shadowsocks,wireguard|amb_owner_01|amb_inviter_01"
 )
 
 SEEDED=0
 for entry in "${SEED_NODES[@]}"; do
-  IFS='|' read -r id name status city country protos <<< "${entry}"
+  IFS='|' read -r id name status city country _protos owner inviter <<< "${entry}"
   pg_exec -c "
-    INSERT INTO nodes (id, node_name, node_secret, status, agent_version, public_ip, city, country, isp, protocols_supported, last_heartbeat_at, created_at)
-    VALUES ('${id}', '${name}', 'test', '${status}', 'smoke-1.0.0', '10.0.0.1', '${city}', '${country}', 'TestISP', '{${protos//,/,\"}}', '${NOW}', '${NOW}')
-    ON CONFLICT (id) DO UPDATE SET status='${status}', city='${city}', country='${country}'" 2>/dev/null || true
+    INSERT INTO nodes (id, node_name, node_secret_hash, owner_ambassador_id, inviter_ambassador_id, status, agent_version, ip_address, node_region, last_heartbeat_at, created_at, updated_at)
+    VALUES ('${id}', '${name}', 'test', '${owner}', '${inviter}', '${status}', 'smoke-1.0.0', '10.0.0.1', '${country}', '${NOW}', '${NOW}', '${NOW}')
+    ON CONFLICT (id) DO UPDATE SET
+      status='${status}',
+      node_region='${country}',
+      owner_ambassador_id='${owner}',
+      inviter_ambassador_id='${inviter}',
+      last_heartbeat_at='${NOW}',
+      updated_at='${NOW}'" 2>/dev/null || true
   SEEDED=$((SEEDED+1))
 done
 pass "Seeded ${SEEDED} test nodes"
@@ -163,10 +170,10 @@ else
   skip "Node search: HTTP ${SEARCH_HTTP}"
 fi
 
-# [5] Filter by status
+# [5] Filter by status + owner/inviter
 echo ""
 echo "--- [5] Node Status Filters ---"
-for status in active inactive offline degraded pending; do
+for status in active pending_review disabled suspended rejected; do
   FILTER_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
     "${API_BASE}/admin/api/v1/nodes?status=${status}" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
@@ -179,6 +186,40 @@ for status in active inactive offline degraded pending; do
     skip "Status filter '${status}': HTTP ${FILTER_HTTP}"
   fi
 done
+
+echo ""
+echo "--- [5b] Owner/Inviter Filters ---"
+OWNER_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${API_BASE}/admin/api/v1/nodes?owner_ambassador_id=amb_owner_01" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+if [[ "${OWNER_HTTP}" == "200" ]]; then
+  OWNER_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes?owner_ambassador_id=amb_owner_01" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
+  OWNER_COUNT=$(echo "${OWNER_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); items=d.get('nodes',d.get('items',d.get('data',[]))); print(len(items))" 2>/dev/null || echo "0")
+  if [[ "${OWNER_COUNT}" =~ ^[0-9]+$ ]] && [[ "${OWNER_COUNT}" -gt 0 ]]; then
+    pass "Owner filter owner_ambassador_id=amb_owner_01: HTTP 200, ${OWNER_COUNT} nodes"
+  else
+    fail "Owner filter owner_ambassador_id=amb_owner_01 returned 0 nodes (seed expected >0)"
+  fi
+else
+  fail "Owner filter: HTTP ${OWNER_HTTP}"
+fi
+
+INVITER_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+  "${API_BASE}/admin/api/v1/nodes?inviter_ambassador_id=amb_inviter_01" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
+if [[ "${INVITER_HTTP}" == "200" ]]; then
+  INVITER_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes?inviter_ambassador_id=amb_inviter_01" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
+  INVITER_COUNT=$(echo "${INVITER_RESP}" | python3 -c "import sys,json; d=json.load(sys.stdin); items=d.get('nodes',d.get('items',d.get('data',[]))); print(len(items))" 2>/dev/null || echo "0")
+  if [[ "${INVITER_COUNT}" =~ ^[0-9]+$ ]] && [[ "${INVITER_COUNT}" -gt 0 ]]; then
+    pass "Inviter filter inviter_ambassador_id=amb_inviter_01: HTTP 200, ${INVITER_COUNT} nodes"
+  else
+    fail "Inviter filter inviter_ambassador_id=amb_inviter_01 returned 0 nodes (seed expected >0)"
+  fi
+else
+  fail "Inviter filter: HTTP ${INVITER_HTTP}"
+fi
 
 # [6] Node counts
 echo ""
@@ -217,17 +258,17 @@ fi
 echo ""
 echo "--- [7] Node Detail ---"
 DETAIL_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
-  "${API_BASE}/admin/api/v1/nodes/nodesux-active-01" \
+  "${API_BASE}/admin/api/v1/nodes/1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a101" \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
 if [[ "${DETAIL_HTTP}" == "200" ]]; then
-  DETAIL_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes/nodesux-active-01" \
+  DETAIL_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes/1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a101" \
     -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "{}")
   DETAIL_STATUS=$(echo "${DETAIL_RESP}" | quiet_json "node.status" || echo "$(echo "${DETAIL_RESP}" | quiet_json "status" || echo '')")
   pass "Node detail: HTTP 200, status=${DETAIL_STATUS}"
-  security_check "admin/nodes/nodesux-active-01" "${DETAIL_RESP}" || true
+  security_check "admin/nodes/1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a101" "${DETAIL_RESP}" || true
 else
   # Try different path patterns
-  for detail_path in "admin/api/v1/node/nodesux-active-01" "admin/api/v1/nodes/detail/nodesux-active-01"; do
+  for detail_path in "admin/api/v1/node/1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a101" "admin/api/v1/nodes/detail/1d91c4a1-4a6d-4f52-9ee4-29f4f8f2a101"; do
     code=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
       "${API_BASE}/${detail_path}" \
       -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || echo "000")
