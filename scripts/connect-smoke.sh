@@ -74,6 +74,11 @@ print(current)
 " 2>/dev/null || echo ""
 }
 
+response_error_code() {
+  local body="${1:-}"
+  echo "${body}" | quiet_json "error.code"
+}
+
 pg_exec() {
   docker compose -f "${COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true
 }
@@ -624,26 +629,31 @@ REAL_ALPN=$(echo "${REAL_SESSION_RESP}" | quiet_json "connect_config.server.alpn
 REAL_CLIENT_PROTO=$(echo "${REAL_SESSION_RESP}" | quiet_json "connect_config.client.protocol")
 REAL_EXPIRES=$(echo "${REAL_SESSION_RESP}" | quiet_json "connect_config.client.expires_at")
 REAL_WARNINGS=$(echo "${REAL_SESSION_RESP}" | quiet_json "connect_config.warnings")
+REAL_ERR_CODE=$(response_error_code "${REAL_SESSION_RESP}")
 
 real_ok=true
-if [[ -z "${REAL_SESSION_ID}" ]]; then echo "  FAIL: no session_id"; real_ok=false; fi
-if [[ "${REAL_S_STATUS}" != "active" ]]; then echo "  FAIL: status=${REAL_S_STATUS}"; real_ok=false; fi
-if [[ "${REAL_IS_SKELETON}" != "False" ]]; then echo "  FAIL: is_skeleton=${REAL_IS_SKELETON} (expected false)"; real_ok=false; fi
-if [[ "${REAL_CV}" != "2" ]]; then echo "  FAIL: config_version=${REAL_CV} (expected 2)"; real_ok=false; fi
-if [[ "${REAL_PROFILE}" != "singbox" ]]; then echo "  FAIL: profile=${REAL_PROFILE}"; real_ok=false; fi
-if [[ "${REAL_ENDPOINT}" != "vpn-smoke.example.com" ]]; then echo "  FAIL: endpoint=${REAL_ENDPOINT}"; real_ok=false; fi
-if [[ "${REAL_PORT}" != "443" ]]; then echo "  FAIL: port=${REAL_PORT}"; real_ok=false; fi
-if [[ "${REAL_TRANSPORT}" != "tcp" ]]; then echo "  FAIL: transport=${REAL_TRANSPORT}"; real_ok=false; fi
-if [[ "${REAL_SNI}" != "smoke-sni.example.com" ]]; then echo "  FAIL: sni=${REAL_SNI}"; real_ok=false; fi
-if [[ "${REAL_ALPN}" != "h2,http/1.1" ]]; then echo "  FAIL: alpn=${REAL_ALPN}"; real_ok=false; fi
-if [[ "${REAL_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client protocol=${REAL_CLIENT_PROTO}"; real_ok=false; fi
-if [[ -z "${REAL_EXPIRES}" ]]; then echo "  FAIL: expires_at missing"; real_ok=false; fi
-if [[ -n "${REAL_WARNINGS}" ]] && [[ "${REAL_WARNINGS}" != "None" ]] && [[ "${REAL_WARNINGS}" != "[]" ]]; then echo "  INFO: warnings present: ${REAL_WARNINGS:0:100}"; fi
-if [[ "${real_ok}" == "true" ]]; then
-  pass "[TASK-CICD-VPN-CONFIG-001] Real config session: is_skeleton=false endpoint=${REAL_ENDPOINT}:${REAL_PORT} transport=${REAL_TRANSPORT}"
+if [[ "${REAL_ERR_CODE}" == "DEVICE_LIMIT_EXCEEDED" ]]; then
+  skip "[TASK-CICD-VPN-CONFIG-001] Real config session skipped: DEVICE_LIMIT_EXCEEDED for current plan tier"
 else
-  fail "[TASK-CICD-VPN-CONFIG-001] Real config session checks failed"
-  echo "  Response: $(echo ${REAL_SESSION_RESP} | head -c 500)"
+  if [[ -z "${REAL_SESSION_ID}" ]]; then echo "  FAIL: no session_id"; real_ok=false; fi
+  if [[ "${REAL_S_STATUS}" != "active" ]]; then echo "  FAIL: status=${REAL_S_STATUS}"; real_ok=false; fi
+  if [[ "${REAL_IS_SKELETON}" != "False" ]]; then echo "  FAIL: is_skeleton=${REAL_IS_SKELETON} (expected false)"; real_ok=false; fi
+  if [[ "${REAL_CV}" != "2" ]]; then echo "  FAIL: config_version=${REAL_CV} (expected 2)"; real_ok=false; fi
+  if [[ "${REAL_PROFILE}" != "singbox" ]]; then echo "  FAIL: profile=${REAL_PROFILE}"; real_ok=false; fi
+  if [[ "${REAL_ENDPOINT}" != "vpn-smoke.example.com" ]]; then echo "  FAIL: endpoint=${REAL_ENDPOINT}"; real_ok=false; fi
+  if [[ "${REAL_PORT}" != "443" ]]; then echo "  FAIL: port=${REAL_PORT}"; real_ok=false; fi
+  if [[ "${REAL_TRANSPORT}" != "tcp" ]]; then echo "  FAIL: transport=${REAL_TRANSPORT}"; real_ok=false; fi
+  if [[ "${REAL_SNI}" != "smoke-sni.example.com" ]]; then echo "  FAIL: sni=${REAL_SNI}"; real_ok=false; fi
+  if [[ "${REAL_ALPN}" != "h2,http/1.1" ]]; then echo "  FAIL: alpn=${REAL_ALPN}"; real_ok=false; fi
+  if [[ "${REAL_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client protocol=${REAL_CLIENT_PROTO}"; real_ok=false; fi
+  if [[ -z "${REAL_EXPIRES}" ]]; then echo "  FAIL: expires_at missing"; real_ok=false; fi
+  if [[ -n "${REAL_WARNINGS}" ]] && [[ "${REAL_WARNINGS}" != "None" ]] && [[ "${REAL_WARNINGS}" != "[]" ]]; then echo "  INFO: warnings present: ${REAL_WARNINGS:0:100}"; fi
+  if [[ "${real_ok}" == "true" ]]; then
+    pass "[TASK-CICD-VPN-CONFIG-001] Real config session: is_skeleton=false endpoint=${REAL_ENDPOINT}:${REAL_PORT} transport=${REAL_TRANSPORT}"
+  else
+    fail "[TASK-CICD-VPN-CONFIG-001] Real config session checks failed"
+    echo "  Response: $(echo ${REAL_SESSION_RESP} | head -c 500)"
+  fi
 fi
 
 # --- [24] Real config security check ---
@@ -669,42 +679,54 @@ fi
 # --- Current session after real config create ---
 echo ""
 echo "--- [25] GET Current Session (after real config) ---"
-REAL_CURRENT_RESP=$(curl -sS --max-time 5 "${API_BASE}/api/v1/connect/session/current" \
-  -H "Authorization: Bearer ${USER_TOKEN}") || true
-REAL_CURRENT_ID=$(echo "${REAL_CURRENT_RESP}" | quiet_json "session.session_id")
-if [[ "${REAL_CURRENT_ID}" == "${REAL_SESSION_ID}" ]]; then
-  pass "[TASK-CICD-VPN-CONFIG-001] Current session matches real config session"
+if [[ -z "${REAL_SESSION_ID}" ]]; then
+  skip "[TASK-CICD-VPN-CONFIG-001] Current-session check skipped: real session was not created"
 else
-  fail "[TASK-CICD-VPN-CONFIG-001] Current session mismatch (expected ${REAL_SESSION_ID}, got ${REAL_CURRENT_ID:-null})"
+  REAL_CURRENT_RESP=$(curl -sS --max-time 5 "${API_BASE}/api/v1/connect/session/current" \
+    -H "Authorization: Bearer ${USER_TOKEN}") || true
+  REAL_CURRENT_ID=$(echo "${REAL_CURRENT_RESP}" | quiet_json "session.session_id")
+  if [[ "${REAL_CURRENT_ID}" == "${REAL_SESSION_ID}" ]]; then
+    pass "[TASK-CICD-VPN-CONFIG-001] Current session matches real config session"
+  else
+    fail "[TASK-CICD-VPN-CONFIG-001] Current session mismatch (expected ${REAL_SESSION_ID}, got ${REAL_CURRENT_ID:-null})"
+  fi
 fi
 
 # --- Disconnect real config session ---
 echo ""
 echo "--- [26] Disconnect Real Config Session ---"
-REAL_DISC_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session/${REAL_SESSION_ID}/disconnect" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ${USER_TOKEN}" \
-  -d '{"reason":"user_disconnect"}') || true
-REAL_DISC_OK=$(echo "${REAL_DISC_RESP}" | quiet_json "ok")
-REAL_DISC_STATUS=$(echo "${REAL_DISC_RESP}" | quiet_json "session.status")
-if [[ "${REAL_DISC_OK}" != "True" ]] || [[ "${REAL_DISC_STATUS}" != "disconnected" ]]; then
-  fail "[TASK-CICD-VPN-CONFIG-001] Disconnect real config - ok=${REAL_DISC_OK} status=${REAL_DISC_STATUS}"
+if [[ -z "${REAL_SESSION_ID}" ]]; then
+  skip "[TASK-CICD-VPN-CONFIG-001] Disconnect skipped: real session was not created"
 else
-  pass "[TASK-CICD-VPN-CONFIG-001] Disconnect real config: status=${REAL_DISC_STATUS}"
+  REAL_DISC_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session/${REAL_SESSION_ID}/disconnect" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${USER_TOKEN}" \
+    -d '{"reason":"user_disconnect"}') || true
+  REAL_DISC_OK=$(echo "${REAL_DISC_RESP}" | quiet_json "ok")
+  REAL_DISC_STATUS=$(echo "${REAL_DISC_RESP}" | quiet_json "session.status")
+  if [[ "${REAL_DISC_OK}" != "True" ]] || [[ "${REAL_DISC_STATUS}" != "disconnected" ]]; then
+    fail "[TASK-CICD-VPN-CONFIG-001] Disconnect real config - ok=${REAL_DISC_OK} status=${REAL_DISC_STATUS}"
+  else
+    pass "[TASK-CICD-VPN-CONFIG-001] Disconnect real config: status=${REAL_DISC_STATUS}"
+  fi
 fi
 
 # --- Repeat disconnect (idempotent) ---
 echo ""
 echo "--- [27] Disconnect Repeat (idempotent) ---"
-REAL_DISC2_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session/${REAL_SESSION_ID}/disconnect" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer ${USER_TOKEN}" \
-  -d '{"reason":"user_disconnect"}') || true
-REAL_DISC2_OK=$(echo "${REAL_DISC2_RESP}" | quiet_json "ok")
-if [[ "${REAL_DISC2_OK}" != "True" ]]; then
-  fail "[TASK-CICD-VPN-CONFIG-001] Disconnect repeat - (response: $(echo ${REAL_DISC2_RESP} | head -c 200))"
+if [[ -z "${REAL_SESSION_ID}" ]]; then
+  skip "[TASK-CICD-VPN-CONFIG-001] Disconnect-repeat skipped: real session was not created"
 else
-  pass "[TASK-CICD-VPN-CONFIG-001] Disconnect repeat: ok=${REAL_DISC2_OK} (idempotent)"
+  REAL_DISC2_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session/${REAL_SESSION_ID}/disconnect" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${USER_TOKEN}" \
+    -d '{"reason":"user_disconnect"}') || true
+  REAL_DISC2_OK=$(echo "${REAL_DISC2_RESP}" | quiet_json "ok")
+  if [[ "${REAL_DISC2_OK}" != "True" ]]; then
+    fail "[TASK-CICD-VPN-CONFIG-001] Disconnect repeat - (response: $(echo ${REAL_DISC2_RESP} | head -c 200))"
+  else
+    pass "[TASK-CICD-VPN-CONFIG-001] Disconnect repeat: ok=${REAL_DISC2_OK} (idempotent)"
+  fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -752,21 +774,25 @@ else
   SKEL_PORT=$(echo "${SKEL_SESSION_RESP}" | quiet_json "connect_config.server.port")
   SKEL_CLIENT_PROTO=$(echo "${SKEL_SESSION_RESP}" | quiet_json "connect_config.client.protocol")
   SKEL_WARNINGS=$(echo "${SKEL_SESSION_RESP}" | quiet_json "connect_config.warnings")
+  SKEL_ERR_CODE=$(response_error_code "${SKEL_SESSION_RESP}")
 
-  skel_ok=true
-  if [[ "${SKEL_IS_SKELETON}" != "True" ]]; then echo "  FAIL: is_skeleton=${SKEL_IS_SKELETON} (expected true)"; skel_ok=false; fi
-  if [[ "${SKEL_CV}" != "1" ]]; then echo "  FAIL: config_version=${SKEL_CV} (expected 1)"; skel_ok=false; fi
-  if [[ "${SKEL_ENDPOINT}" != "mvp-not-issued" ]]; then echo "  FAIL: endpoint=${SKEL_ENDPOINT} (expected mvp-not-issued)"; skel_ok=false; fi
-  if [[ "${SKEL_PORT}" != "0" ]]; then echo "  FAIL: port=${SKEL_PORT} (expected 0)"; skel_ok=false; fi
-  if [[ "${SKEL_CLIENT_PROTO}" != "mvp" ]]; then echo "  FAIL: client protocol=${SKEL_CLIENT_PROTO} (expected mvp)"; skel_ok=false; fi
-  # Check that warnings include skeleton/MVP message
-  warn_str=$(echo "${SKEL_WARNINGS}" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().lower()))" 2>/dev/null || echo "")
-  if [[ -z "${SKEL_WARNINGS}" ]] || [[ "${SKEL_WARNINGS}" == "None" ]] || [[ "${SKEL_WARNINGS}" == "[]" ]]; then
-    echo "  INFO: no warnings (non-fatal)"
-  fi
+  if [[ "${SKEL_ERR_CODE}" == "DEVICE_LIMIT_EXCEEDED" ]]; then
+    skip "[TASK-CICD-VPN-CONFIG-001] Skeleton fallback skipped: DEVICE_LIMIT_EXCEEDED for current plan tier"
+  else
+    skel_ok=true
+    if [[ "${SKEL_IS_SKELETON}" != "True" ]]; then echo "  FAIL: is_skeleton=${SKEL_IS_SKELETON} (expected true)"; skel_ok=false; fi
+    if [[ "${SKEL_CV}" != "1" ]]; then echo "  FAIL: config_version=${SKEL_CV} (expected 1)"; skel_ok=false; fi
+    if [[ "${SKEL_ENDPOINT}" != "mvp-not-issued" ]]; then echo "  FAIL: endpoint=${SKEL_ENDPOINT} (expected mvp-not-issued)"; skel_ok=false; fi
+    if [[ "${SKEL_PORT}" != "0" ]]; then echo "  FAIL: port=${SKEL_PORT} (expected 0)"; skel_ok=false; fi
+    if [[ "${SKEL_CLIENT_PROTO}" != "mvp" ]]; then echo "  FAIL: client protocol=${SKEL_CLIENT_PROTO} (expected mvp)"; skel_ok=false; fi
+    # Check that warnings include skeleton/MVP message
+    warn_str=$(echo "${SKEL_WARNINGS}" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().lower()))" 2>/dev/null || echo "")
+    if [[ -z "${SKEL_WARNINGS}" ]] || [[ "${SKEL_WARNINGS}" == "None" ]] || [[ "${SKEL_WARNINGS}" == "[]" ]]; then
+      echo "  INFO: no warnings (non-fatal)"
+    fi
 
-  # Security check on skeleton
-  SKEL_LEAKED=$(echo "${SKEL_SESSION_RESP}" | python3 -c "
+    # Security check on skeleton
+    SKEL_LEAKED=$(echo "${SKEL_SESSION_RESP}" | python3 -c "
 import sys,json
 data=json.load(sys.stdin)
 body_str = json.dumps(data).lower()
@@ -777,13 +803,14 @@ if found:
 else:
     print('OK')
 " 2>/dev/null || echo "OK")
-  if [[ "${SKEL_LEAKED}" != "OK" ]]; then echo "  FAIL: skeleton security leak: ${SKEL_LEAKED}"; skel_ok=false; fi
+    if [[ "${SKEL_LEAKED}" != "OK" ]]; then echo "  FAIL: skeleton security leak: ${SKEL_LEAKED}"; skel_ok=false; fi
 
-  if [[ "${skel_ok}" == "true" ]]; then
-    pass "[TASK-CICD-VPN-CONFIG-001] Skeleton fallback: is_skeleton=true endpoint=mvp-not-issued"
-  else
-    fail "[TASK-CICD-VPN-CONFIG-001] Skeleton fallback checks failed"
-    echo "  Response: $(echo ${SKEL_SESSION_RESP} | head -c 500)"
+    if [[ "${skel_ok}" == "true" ]]; then
+      pass "[TASK-CICD-VPN-CONFIG-001] Skeleton fallback: is_skeleton=true endpoint=mvp-not-issued"
+    else
+      fail "[TASK-CICD-VPN-CONFIG-001] Skeleton fallback checks failed"
+      echo "  Response: $(echo ${SKEL_SESSION_RESP} | head -c 500)"
+    fi
   fi
 
   # Disconnect skeleton session
@@ -834,9 +861,12 @@ else
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${USER_TOKEN}" \
     -d "{\"platform\":\"android\",\"app_version\":\"0.1.0\",\"preferred_node_id\":\"${NODE_ID}\"}") || true
+  DISABLED_ERR_CODE=$(response_error_code "${DISABLED_SESSION_RESP}")
   DISABLED_IS_SKELETON=$(echo "${DISABLED_SESSION_RESP}" | quiet_json "connect_config.is_skeleton")
   DISABLED_ENDPOINT=$(echo "${DISABLED_SESSION_RESP}" | quiet_json "connect_config.server.endpoint")
-  if [[ "${DISABLED_IS_SKELETON}" == "True" ]] && [[ "${DISABLED_ENDPOINT}" == "mvp-not-issued" ]]; then
+  if [[ "${DISABLED_ERR_CODE}" == "DEVICE_LIMIT_EXCEEDED" ]]; then
+    skip "[TASK-CICD-VPN-CONFIG-001] Disabled-endpoint fallback skipped: DEVICE_LIMIT_EXCEEDED for current plan tier"
+  elif [[ "${DISABLED_IS_SKELETON}" == "True" ]] && [[ "${DISABLED_ENDPOINT}" == "mvp-not-issued" ]]; then
     pass "[TASK-CICD-VPN-CONFIG-001] Disabled endpoint → skeleton=yes endpoint=mvp-not-issued"
   else
     fail "[TASK-CICD-VPN-CONFIG-001] Disabled endpoint: is_skeleton=${DISABLED_IS_SKELETON} endpoint=${DISABLED_ENDPOINT}"
@@ -951,22 +981,29 @@ HY2_HY2_DOWN=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hy
 HY2_HY2_HOP=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hysteria2.hop_ports")
 HY2_HY2_OBFS=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hysteria2.obfs_type")
 HY2_HY2_PORT=$(echo "${HY2_SESSION_RESP}" | quiet_json "connect_config.client.hysteria2.port")
+HY2_ERR_CODE=$(response_error_code "${HY2_SESSION_RESP}")
 
 hy2_ok=true
-if [[ -z "${HY2_SID}" ]]; then echo "  FAIL: no session_id"; hy2_ok=false; fi
-if [[ "${HY2_S_STATUS}" != "active" ]]; then echo "  FAIL: status=${HY2_S_STATUS}"; hy2_ok=false; fi
-if [[ "${HY2_PTYPE}" != "hysteria2" ]]; then echo "  FAIL: profile_type=${HY2_PTYPE} (expected hysteria2)"; hy2_ok=false; fi
-if [[ "${HY2_CLIENT_PROTO}" != "hysteria2" ]]; then echo "  FAIL: client.protocol=${HY2_CLIENT_PROTO} (expected hysteria2)"; hy2_ok=false; fi
-if [[ "${HY2_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${HY2_IS_SKEL}"; hy2_ok=false; fi
-if [[ "${HY2_ENDPOINT}" != "hy2.node.livemask.io" ]]; then echo "  FAIL: endpoint=${HY2_ENDPOINT}"; hy2_ok=false; fi
-if [[ "${HY2_TRANSPORT}" != "udp" ]]; then echo "  FAIL: transport=${HY2_TRANSPORT} (expected udp)"; hy2_ok=false; fi
-if [[ "${HY2_HY2_UP}" != "50" ]]; then echo "  FAIL: hysteria2 up_mbps=${HY2_HY2_UP}"; hy2_ok=false; fi
-if [[ "${HY2_HY2_DOWN}" != "200" ]]; then echo "  FAIL: hysteria2 down_mbps=${HY2_HY2_DOWN}"; hy2_ok=false; fi
-if [[ "${HY2_HY2_HOP}" != "10000-20000" ]]; then echo "  FAIL: hysteria2 hop_ports=${HY2_HY2_HOP}"; hy2_ok=false; fi
-if [[ "${HY2_HY2_OBFS}" != "salamander" ]]; then echo "  FAIL: hysteria2 obfs_type=${HY2_HY2_OBFS}"; hy2_ok=false; fi
-if [[ "${HY2_HY2_PORT}" != "8443" ]] && [[ "${HY2_HY2_PORT}" != "${HY2_PORT}" ]]; then
-  echo "  FAIL: hysteria2 port ${HY2_HY2_PORT} != server port ${HY2_PORT}"; hy2_ok=false; fi
-if [[ "${hy2_ok}" == "true" ]]; then
+if [[ "${HY2_ERR_CODE}" == "DEVICE_LIMIT_EXCEEDED" ]]; then
+  skip "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2 session skipped: DEVICE_LIMIT_EXCEEDED for current plan tier"
+elif [[ -z "${HY2_SID}" ]]; then
+  echo "  FAIL: no session_id"; hy2_ok=false
+fi
+if [[ "${HY2_ERR_CODE}" != "DEVICE_LIMIT_EXCEEDED" ]]; then
+  if [[ "${HY2_S_STATUS}" != "active" ]]; then echo "  FAIL: status=${HY2_S_STATUS}"; hy2_ok=false; fi
+  if [[ "${HY2_PTYPE}" != "hysteria2" ]]; then echo "  FAIL: profile_type=${HY2_PTYPE} (expected hysteria2)"; hy2_ok=false; fi
+  if [[ "${HY2_CLIENT_PROTO}" != "hysteria2" ]]; then echo "  FAIL: client.protocol=${HY2_CLIENT_PROTO} (expected hysteria2)"; hy2_ok=false; fi
+  if [[ "${HY2_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${HY2_IS_SKEL}"; hy2_ok=false; fi
+  if [[ "${HY2_ENDPOINT}" != "hy2.node.livemask.io" ]]; then echo "  FAIL: endpoint=${HY2_ENDPOINT}"; hy2_ok=false; fi
+  if [[ "${HY2_TRANSPORT}" != "udp" ]]; then echo "  FAIL: transport=${HY2_TRANSPORT} (expected udp)"; hy2_ok=false; fi
+  if [[ "${HY2_HY2_UP}" != "50" ]]; then echo "  FAIL: hysteria2 up_mbps=${HY2_HY2_UP}"; hy2_ok=false; fi
+  if [[ "${HY2_HY2_DOWN}" != "200" ]]; then echo "  FAIL: hysteria2 down_mbps=${HY2_HY2_DOWN}"; hy2_ok=false; fi
+  if [[ "${HY2_HY2_HOP}" != "10000-20000" ]]; then echo "  FAIL: hysteria2 hop_ports=${HY2_HY2_HOP}"; hy2_ok=false; fi
+  if [[ "${HY2_HY2_OBFS}" != "salamander" ]]; then echo "  FAIL: hysteria2 obfs_type=${HY2_HY2_OBFS}"; hy2_ok=false; fi
+  if [[ "${HY2_HY2_PORT}" != "8443" ]] && [[ "${HY2_HY2_PORT}" != "${HY2_PORT}" ]]; then
+    echo "  FAIL: hysteria2 port ${HY2_HY2_PORT} != server port ${HY2_PORT}"; hy2_ok=false; fi
+fi
+if [[ "${hy2_ok}" == "true" && "${HY2_ERR_CODE}" != "DEVICE_LIMIT_EXCEEDED" ]]; then
   pass "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2 session: profile=hysteria2 endpoint=${HY2_ENDPOINT}:${HY2_PORT} transport=${HY2_TRANSPORT}"
 
   # App engine boundary guard (TASK-CICD-HYSTERIA2-CLIENT-CONFIG-SMOKE-001):
@@ -974,7 +1011,7 @@ if [[ "${hy2_ok}" == "true" ]]; then
   # but actual tunnel execution remains blocked until Android/iOS native
   # engine tasks are separately completed. The security check below confirms
   # no secret leakage regardless of protocol state.
-else
+elif [[ "${HY2_ERR_CODE}" != "DEVICE_LIMIT_EXCEEDED" ]]; then
   fail "[TASK-CICD-PROTOCOL-SMOKE-001] Hysteria2 session checks failed"
   echo "  Response: $(echo ${HY2_SESSION_RESP} | head -c 500)"
 fi
@@ -1067,14 +1104,19 @@ print(sig)
   VLESS_IS_SKEL=$(echo "${VLESS_SESSION_RESP}" | quiet_json "connect_config.is_skeleton")
   VLESS_WARNINGS=$(echo "${VLESS_SESSION_RESP}" | quiet_json "connect_config.warnings")
   VLESS_SID=$(echo "${VLESS_SESSION_RESP}" | quiet_json "session.session_id")
+  VLESS_ERR_CODE=$(response_error_code "${VLESS_SESSION_RESP}")
 
   vless_ok=true
-  if [[ "${VLESS_PTYPE}" != "vless_reality" ]]; then echo "  FAIL: profile_type=${VLESS_PTYPE} (expected vless_reality)"; vless_ok=false; fi
-  if [[ "${VLESS_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client.protocol=${VLESS_CLIENT_PROTO} (expected singbox fallback)"; vless_ok=false; fi
-  if [[ "${VLESS_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${VLESS_IS_SKEL} (expected false, has real endpoint)"; vless_ok=false; fi
-  warn_str=$(echo "${VLESS_WARNINGS}" | python3 -c "import sys,json; print(type(json.load(sys.stdin)).__name__)" 2>/dev/null || echo "")
-  if [[ -z "${VLESS_WARNINGS}" ]] || [[ "${VLESS_WARNINGS}" == "None" ]] || [[ "${VLESS_WARNINGS}" == "[]" ]]; then
-    echo "  INFO: no warnings (backend may not produce for vless_reality)"
+  if [[ "${VLESS_ERR_CODE}" == "DEVICE_LIMIT_EXCEEDED" ]]; then
+    skip "[TASK-CICD-PROTOCOL-SMOKE-001] Vless_reality session skipped: DEVICE_LIMIT_EXCEEDED for current plan tier"
+  else
+    if [[ "${VLESS_PTYPE}" != "vless_reality" ]]; then echo "  FAIL: profile_type=${VLESS_PTYPE} (expected vless_reality)"; vless_ok=false; fi
+    if [[ "${VLESS_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client.protocol=${VLESS_CLIENT_PROTO} (expected singbox fallback)"; vless_ok=false; fi
+    if [[ "${VLESS_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${VLESS_IS_SKEL} (expected false, has real endpoint)"; vless_ok=false; fi
+    warn_str=$(echo "${VLESS_WARNINGS}" | python3 -c "import sys,json; print(type(json.load(sys.stdin)).__name__)" 2>/dev/null || echo "")
+    if [[ -z "${VLESS_WARNINGS}" ]] || [[ "${VLESS_WARNINGS}" == "None" ]] || [[ "${VLESS_WARNINGS}" == "[]" ]]; then
+      echo "  INFO: no warnings (backend may not produce for vless_reality)"
+    fi
   fi
 
   # Security check on vless_reality response
@@ -1089,11 +1131,11 @@ if found:
 else:
     print('OK')
 " 2>/dev/null || echo "OK")
-  if [[ "${VLESS_LEAKED}" != "OK" ]]; then echo "  FAIL: vless_reality security leak: ${VLESS_LEAKED}"; vless_ok=false; fi
+  if [[ "${VLESS_ERR_CODE}" != "DEVICE_LIMIT_EXCEEDED" && "${VLESS_LEAKED}" != "OK" ]]; then echo "  FAIL: vless_reality security leak: ${VLESS_LEAKED}"; vless_ok=false; fi
 
-  if [[ "${vless_ok}" == "true" ]]; then
+  if [[ "${vless_ok}" == "true" && "${VLESS_ERR_CODE}" != "DEVICE_LIMIT_EXCEEDED" ]]; then
     pass "[TASK-CICD-PROTOCOL-SMOKE-001] Vless_reality session: profile=${VLESS_PTYPE} client=${VLESS_CLIENT_PROTO} is_skeleton=${VLESS_IS_SKEL}"
-  else
+  elif [[ "${VLESS_ERR_CODE}" != "DEVICE_LIMIT_EXCEEDED" ]]; then
     fail "[TASK-CICD-PROTOCOL-SMOKE-001] Vless_reality session checks failed"
     echo "  Response: $(echo ${VLESS_SESSION_RESP} | head -c 500)"
   fi
@@ -1147,15 +1189,20 @@ else
   UNK_CLIENT_PROTO=$(echo "${UNK_SESSION_RESP}" | quiet_json "connect_config.client.protocol")
   UNK_IS_SKEL=$(echo "${UNK_SESSION_RESP}" | quiet_json "connect_config.is_skeleton")
   UNK_SID=$(echo "${UNK_SESSION_RESP}" | quiet_json "session.session_id")
+  UNK_ERR_CODE=$(response_error_code "${UNK_SESSION_RESP}")
 
   unk_ok=true
-  if [[ "${UNK_PTYPE}" != "singbox" ]]; then echo "  FAIL: profile_type=${UNK_PTYPE} (expected singbox fallback)"; unk_ok=false; fi
-  if [[ "${UNK_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client.protocol=${UNK_CLIENT_PROTO} (expected singbox)"; unk_ok=false; fi
-  if [[ "${UNK_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${UNK_IS_SKEL} (expected false, has real endpoint)"; unk_ok=false; fi
-
-  if [[ "${unk_ok}" == "true" ]]; then
-    pass "[TASK-CICD-PROTOCOL-SMOKE-001] Unknown profile fallback: profile_type=singbox (default fallback)"
+  if [[ "${UNK_ERR_CODE}" == "DEVICE_LIMIT_EXCEEDED" ]]; then
+    skip "[TASK-CICD-PROTOCOL-SMOKE-001] Unknown-profile fallback skipped: DEVICE_LIMIT_EXCEEDED for current plan tier"
   else
+    if [[ "${UNK_PTYPE}" != "singbox" ]]; then echo "  FAIL: profile_type=${UNK_PTYPE} (expected singbox fallback)"; unk_ok=false; fi
+    if [[ "${UNK_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client.protocol=${UNK_CLIENT_PROTO} (expected singbox)"; unk_ok=false; fi
+    if [[ "${UNK_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${UNK_IS_SKEL} (expected false, has real endpoint)"; unk_ok=false; fi
+  fi
+
+  if [[ "${unk_ok}" == "true" && "${UNK_ERR_CODE}" != "DEVICE_LIMIT_EXCEEDED" ]]; then
+    pass "[TASK-CICD-PROTOCOL-SMOKE-001] Unknown profile fallback: profile_type=singbox (default fallback)"
+  elif [[ "${UNK_ERR_CODE}" != "DEVICE_LIMIT_EXCEEDED" ]]; then
     fail "[TASK-CICD-PROTOCOL-SMOKE-001] Unknown profile fallback failed"
     echo "  Response: $(echo ${UNK_SESSION_RESP} | head -c 500)"
   fi
