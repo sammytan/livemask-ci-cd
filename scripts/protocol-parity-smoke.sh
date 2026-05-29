@@ -20,9 +20,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/base_service.sh"
 
-COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.staging.yml}"
 API_BASE="$(lm_backend_base_url)"
 NODEAGENT_API="http://127.0.0.1:${LIVEMASK_NODEAGENT_PORT:-19090}"
+LM_COMPOSE_FILE="${COMPOSE_FILE:-$(lm_detect_compose_file postgres)}"
 
 FAILED=0; PASS_COUNT=0; SKIP_COUNT=0; FAIL_COUNT=0; SUMMARY_LINES=()
 
@@ -41,6 +41,32 @@ for p in '${path}'.split('.'):
         except: d=''
     else: d=''
 print(d)" 2>/dev/null || echo ""
+}
+
+extract_protocol_caps_json() {
+  python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('[]')
+    raise SystemExit(0)
+
+caps = d.get('protocol_capabilities')
+if not isinstance(caps, list):
+    caps = d.get('capabilities')
+if not isinstance(caps, list):
+    for key in ('config', 'data', 'status'):
+        sub = d.get(key)
+        if isinstance(sub, dict):
+            nested = sub.get('protocol_capabilities', sub.get('capabilities'))
+            if isinstance(nested, list):
+                caps = nested
+                break
+if not isinstance(caps, list):
+    caps = []
+print(json.dumps(caps))
+" 2>/dev/null || echo "[]"
 }
 
 security_check() {
@@ -67,6 +93,7 @@ echo "================================================"
 echo " TASK-CICD-PROTOCOL-PARITY-SMOKE-001"
 echo " Protocol Capability vs NodeAgent Parity"
 echo "================================================"
+echo "Compose file: ${LM_COMPOSE_FILE}"
 lm_runtime_status_report; echo ""
 
 # [1] Backend health
@@ -83,7 +110,7 @@ done
 # Admin login
 echo ""
 echo "--- Admin Login ---"
-pg_exec() { docker compose -f "${COMPOSE_FILE}" exec -T postgres psql -U livemask -tA "$@" 2>/dev/null || true; }
+pg_exec() { LM_COMPOSE_FILE="${LM_COMPOSE_FILE}" lm_pg_exec "$@"; }
 pg_exec -c "DELETE FROM users WHERE email='admin@livemask.dev'" 2>/dev/null || true
 ADMIN_HASH=$(pg_exec -c "SELECT crypt('AdminPass123!', gen_salt('bf', 12))" 2>/dev/null || echo "")
 if [[ -n "${ADMIN_HASH}" ]]; then
@@ -157,6 +184,7 @@ NA_STATUS_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
   "${NODEAGENT_API}/agent/status" 2>/dev/null || echo "000")
 if [[ "${NA_STATUS_HTTP}" == "200" ]]; then
   NA_RESP=$(curl -sS --max-time 5 "${NODEAGENT_API}/agent/status" 2>/dev/null || echo "{}")
+  NA_PROTOS=$(echo "${NA_RESP}" | extract_protocol_caps_json)
   NA_CAP_COUNT=$(echo "${NA_RESP}" | python3 -c "
 import sys, json
 try:
@@ -178,7 +206,7 @@ else
     "${NODEAGENT_API}/config/status" 2>/dev/null || echo "000")
   if [[ "${NA_CFG_HTTP}" == "200" ]]; then
     NA_RESP=$(curl -sS --max-time 5 "${NODEAGENT_API}/config/status" 2>/dev/null || echo "{}")
-    NA_PROTOS=$(echo "${NA_RESP}" | quiet_json "protocol_capabilities" || echo "")
+    NA_PROTOS=$(echo "${NA_RESP}" | extract_protocol_caps_json)
     if [[ -n "${NA_PROTOS}" && "${NA_PROTOS}" != "None" ]]; then
       pass "NodeAgent reports protocol_capabilities via /config/status (legacy)"
     else
@@ -267,7 +295,7 @@ else:
 fi
 
 # 8b Check NodeAgent protocol_capabilities includes hysteria2 as implemented
-if [[ "${NA_STATUS_HTTP}" == "200" ]] && [[ -n "${NA_PROTOS:-}" ]] && [[ "${NA_PROTOS}" != "None" ]]; then
+if [[ "${NA_STATUS_HTTP}" == "200" ]] && [[ -n "${NA_PROTOS:-}" ]] && [[ "${NA_PROTOS}" != "[]" ]] && [[ "${NA_PROTOS}" != "None" ]]; then
   HY2_NODEAGENT=$(echo "${NA_PROTOS}" | python3 -c "
 import sys,json
 try:
