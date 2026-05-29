@@ -160,6 +160,18 @@ Smoke validation is **dev-only**. Do not run acceptance smoke from `task/*`,
 prechecks, but final CI/CD evidence must come after the task branch is merged
 into `dev`, pushed to `origin/dev`, and rebuilt from `dev`.
 
+NodeAgent-protocol smoke rules (mandatory for local runtime):
+
+- `scripts/protocol-endpoint-smoke.sh` and `scripts/protocol-capability-smoke.sh`
+  must use an existing real node (default node name: `local-nodeagent`).
+- The scripts no longer create virtual smoke nodes for protocol validation.
+- Override only when needed with `LIVEMASK_SMOKE_NODE_ID` and optionally
+  `LIVEMASK_SMOKE_NODE_NAME`.
+- If a new node is required, provision it as a **real NodeAgent container**
+  (for example by scaling `nodeagent` service in local compose), let it register,
+  run smoke, then remove/scale-down after test. Do not use fake DB-only nodes.
+- Each run must include backend + nodeagent container log sanity checks.
+
 The workflow and compose defaults set service refs to `dev`. `scripts/validate-dev-ref.sh`
 fails fast if a smoke run tries to use a non-`dev` service ref.
 

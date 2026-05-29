@@ -373,6 +373,7 @@ TIMESTAMP=$(date +%s)
 SUFFIX="cap-${TIMESTAMP}"
 REAL_NODE_ID="${LIVEMASK_SMOKE_NODE_ID:-}"
 REAL_NODE_SECRET_HASH="${LIVEMASK_SMOKE_NODE_SECRET_HASH:-}"
+SMOKE_NODE_NAME="${LIVEMASK_SMOKE_NODE_NAME:-local-nodeagent}"
 
 # Collected responses for secret leak scan
 ALL_RESPONSES=()
@@ -381,6 +382,56 @@ collect_response() {
   local label="$1"
   local json="$2"
   ALL_RESPONSES+=("${label}##${json}")
+}
+
+resolve_real_node_id_from_admin() {
+  if [[ -z "${ADMIN_TOKEN:-}" ]]; then
+    echo ""
+    return 0
+  fi
+  local _pick_node_py
+  _pick_node_py='
+import json, os, sys
+needle = os.environ.get("SMOKE_NODE_NAME", "local-nodeagent").lower()
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("")
+    raise SystemExit(0)
+candidates = []
+def collect_lists(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, list) and k in ("nodes", "items", "data", "list", "rows", "results"):
+                candidates.extend(v)
+            elif isinstance(v, dict):
+                collect_lists(v)
+collect_lists(data)
+items = candidates
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    name = str(item.get("name") or item.get("node_name") or "").lower()
+    if name == needle:
+        print(item.get("id") or item.get("node_id") or "")
+        raise SystemExit(0)
+for item in items:
+    if not isinstance(item, dict):
+        continue
+    name = str(item.get("name") or item.get("node_name") or "").lower()
+    if needle in name:
+        print(item.get("id") or item.get("node_id") or "")
+        raise SystemExit(0)
+print("")
+'
+  local node_id
+  node_id=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes?search=${SMOKE_NODE_NAME}&page=1&page_size=50" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | SMOKE_NODE_NAME="${SMOKE_NODE_NAME}" python3 -c "${_pick_node_py}" 2>/dev/null || echo "")
+  if [[ -z "${node_id}" ]]; then
+    node_id=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes?page=1&page_size=200" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | SMOKE_NODE_NAME="${SMOKE_NODE_NAME}" python3 -c "${_pick_node_py}" 2>/dev/null || echo "")
+  fi
+  echo "${node_id}"
 }
 
 # ── Built-in / reserved / seed protocol names ──────────────────────────────
@@ -614,24 +665,22 @@ if [[ -n "${REAL_NODE_ID}" ]]; then
   if [[ -z "${NODE_SECRET_HASH}" ]]; then
     fail "Using real node ${NODE_ID} but node_secret_hash unavailable; set LIVEMASK_SMOKE_NODE_SECRET_HASH or ensure DB probe access"
   fi
-  pass "Using real smoke node: id=${NODE_ID} status=${NODE_STATUS:-unknown}"
+  pass "Using real smoke node (${SMOKE_NODE_NAME}): id=${NODE_ID} status=${NODE_STATUS:-unknown}"
 else
-  echo "  Registering smoke node..."
-  NODE_REG=$(curl -sS --max-time 5 -X POST "${API_BASE}/internal/agent/register" \
-    -H "Content-Type: application/json" \
-    -d "{\"node_name\":\"cap-smoke-node-${SUFFIX}\",\"agent_version\":\"smoke-1.0.0\"}") || true
-  NODE_ID=$(echo "${NODE_REG}" | quiet_json "node_id")
-  NODE_SECRET=$(echo "${NODE_REG}" | quiet_json "node_secret")
-  NODE_STATUS=$(echo "${NODE_REG}" | quiet_json "status")
-  if [[ -z "${NODE_ID}" || -z "${NODE_SECRET}" ]]; then
-    fail "Node registration — no node_id/node_secret"
-    NODE_ID=""
-    NODE_SECRET=""
+  NODE_ID="$(resolve_real_node_id_from_admin)"
+  if [[ -z "${NODE_ID}" ]]; then
+    fail "Real node '${SMOKE_NODE_NAME}' not found (or set LIVEMASK_SMOKE_NODE_ID). If creation is required, provision a real NodeAgent container (scale nodeagent service), run smoke, then clean it up."
   else
-    pass "Node registered: id=${NODE_ID} status=${NODE_STATUS}"
-  fi
-  if [[ -n "${NODE_SECRET}" ]]; then
-    NODE_SECRET_HASH=$(echo -n "${NODE_SECRET}" | sha256sum | cut -d' ' -f1)
+    NODE_STATUS=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/nodes/${NODE_ID}" \
+      -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | quiet_json "status" || true)
+    NODE_SECRET_HASH="${REAL_NODE_SECRET_HASH}"
+    if [[ -z "${NODE_SECRET_HASH}" ]]; then
+      NODE_SECRET_HASH=$(pg_exec -c "SELECT node_secret_hash FROM nodes WHERE id='${NODE_ID}' LIMIT 1" | tr -d '[:space:]' || true)
+    fi
+    if [[ -z "${NODE_SECRET_HASH}" ]]; then
+      fail "Using real node ${NODE_ID} but node_secret_hash unavailable; set LIVEMASK_SMOKE_NODE_SECRET_HASH or ensure DB probe access"
+    fi
+    pass "Using real smoke node (${SMOKE_NODE_NAME}): id=${NODE_ID} status=${NODE_STATUS:-unknown}"
   fi
 fi
 
@@ -2118,11 +2167,38 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "--- Cleanup ---"
-cleanup_pg "DELETE FROM nodes WHERE node_name LIKE 'cap-smoke-node%'"
 cleanup_pg "DELETE FROM users WHERE email='${APP_EMAIL}'"
 cleanup_pg "DELETE FROM users WHERE email='${AUDITOR_EMAIL}'"
 echo "  Cleaned up: smoke nodes + test users"
 echo "  Kept seed users: admin@livemask.dev"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# [18] Runtime log sanity check (backend + nodeagent)
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [18] Runtime Log Sanity Check ---"
+BACKEND_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E 'livemask-local-backend-1|backend' | head -n1 || true)
+NODEAGENT_CONTAINER=$(docker ps --format '{{.Names}}' | grep -E 'livemask-local-nodeagent-1|nodeagent' | head -n1 || true)
+LOG_PATTERN='panic|fatal|segmentation fault|traceback|runtime error:'
+
+scan_container_for_fatal() {
+  local container="$1"
+  local label="$2"
+  if [[ -z "${container}" ]]; then
+    skip "${label} logs: container not found"
+    return 0
+  fi
+  local fatal_count
+  fatal_count=$(docker logs --tail 400 "${container}" 2>&1 | grep -Eic "${LOG_PATTERN}" || true)
+  if [[ "${fatal_count}" -gt 0 ]]; then
+    fail "${label} logs: found ${fatal_count} high-severity error lines (panic/fatal/traceback)"
+  else
+    pass "${label} logs: no high-severity errors in tail(400)"
+  fi
+}
+
+scan_container_for_fatal "${BACKEND_CONTAINER}" "backend"
+scan_container_for_fatal "${NODEAGENT_CONTAINER}" "nodeagent"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Summary
