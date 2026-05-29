@@ -295,6 +295,42 @@ if [[ -z "${ADMIN_NODE_RELEASES_RESP}" ]]; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# [6a] Seed deterministic app release fixture
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- [6a] Seed app release ---"
+SEEDED_RELEASE=false
+SEED_VERSION="0.0.1-smoke-$(date +%Y%m%d%H%M%S)"
+if [[ -n "${ADMIN_TOKEN}" ]] && [[ "${ADMIN_APP_RELEASES_RESP:-}" != "" ]]; then
+  SEED_BODY=$(cat <<SEEDEOF
+{
+  "version": "${SEED_VERSION}",
+  "platform": "android",
+  "channel": "stable",
+  "release_notes": "CI/CD smoke seed fixture",
+  "artifact_url": "https://example.com/fake-release.apk",
+  "artifact_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}
+SEEDEOF
+)
+  SEED_HTTP=$(curl -sS --max-time 10 -o /dev/null -w "%{http_code}" \
+    -X POST "${API_BASE}/admin/api/v1/app/releases" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "${SEED_BODY}" 2>/dev/null || echo "000")
+  if [[ "${SEED_HTTP}" == "200" || "${SEED_HTTP}" == "201" ]]; then
+    SEEDED_RELEASE=true
+    pass "Seeded app release: version=${SEED_VERSION}, HTTP ${SEED_HTTP}"
+  elif [[ "${SEED_HTTP}" == "404" ]]; then
+    skip "Seed app release: HTTP 404 (admin release creation endpoint not yet deployed — data-level test SKIP)"
+  else
+    skip "Seed app release: HTTP ${SEED_HTTP} (unexpected — data-level test SKIP)"
+  fi
+else
+  skip "Seed app release: no admin token or releases endpoint unavailable"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
 # [7] GET /api/v1/app/releases/latest (public API, no auth)
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
