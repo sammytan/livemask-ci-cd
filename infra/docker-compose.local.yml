@@ -123,6 +123,7 @@ services:
       BACKEND_BASE_URL: "${BACKEND_BASE_URL:-http://backend:8080}"
       BACKEND_CONFIG_URL: "${BACKEND_CONFIG_URL:-http://backend:8080/internal/agent/config}"
       NODE_NAME: "${NODE_NAME:-local-nodeagent}"
+      NODE_COUNTRY_CODE: "${NODE_COUNTRY_CODE:-US}"
       IDENTITY_PATH: /workspace/.state/identity.json
       AGENT_VERSION: "${AGENT_VERSION:-dev-local}"
       CONFIG_CACHE_PATH: /workspace/.state/nodeagent-config-cache.json
