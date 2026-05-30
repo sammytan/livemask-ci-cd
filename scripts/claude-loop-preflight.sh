@@ -89,6 +89,43 @@ for ISSUE_REPO in "MyAiDevs/livemask-docs:62" "MyAiDevs/livemask-ci-cd:14"; do
   esac
 done
 
+# ── Channel 5: CI/CD status ────────────────────────────────────────────────
+echo "--- Channel 5: CI/CD ---"
+for CI_REPO in "MyAiDevs/livemask-docs" "MyAiDevs/livemask-ci-cd"; do
+  CI_RUNS=$(gh run list --repo "${CI_REPO}" --branch dev --limit 3 --json status,conclusion,workflowName,headSha,url 2>&1) || CI_RC=$?
+  CI_RC=${CI_RC:-0}
+  if [[ "${CI_RC}" -ne 0 ]]; then
+    block "CI: ${CI_REPO} gh run list failed (exit=${CI_RC})"
+    continue
+  fi
+  FAILURES=$(echo "${CI_RUNS}" | python3 -c "
+import json,sys
+runs=json.load(sys.stdin)
+for r in runs:
+    if r.get('conclusion') in ('failure','cancelled','timed_out'):
+        print(f\"{r['workflowName']}|{r['conclusion']}|{r['url']}|{r.get('headSha','?')[:7]}\")
+" 2>/dev/null || echo "")
+  IN_PROGRESS=$(echo "${CI_RUNS}" | python3 -c "
+import json,sys
+runs=json.load(sys.stdin)
+for r in runs:
+    if r.get('status') in ('queued','in_progress','waiting','pending'):
+        print(f\"{r['workflowName']}|{r['status']}\")
+" 2>/dev/null || echo "")
+  if [[ -n "${IN_PROGRESS}" ]]; then
+    while IFS='|' read -r wf status; do
+      [[ -n "${wf}" ]] && REASONS+=("WAIT_CI: ${CI_REPO} ${wf} is ${status}")
+    done <<< "${IN_PROGRESS}"
+  fi
+  if [[ -n "${FAILURES}" ]]; then
+    while IFS='|' read -r wf conclusion url sha; do
+      [[ -n "${wf}" ]] && block "CI: ${CI_REPO} ${wf} ${conclusion} at ${sha} — ${url}"
+    done <<< "${FAILURES}"
+  else
+    echo "  ${CI_REPO}: no failures (${CI_RUNS:+runs found})"
+  fi
+done
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "============================================"
