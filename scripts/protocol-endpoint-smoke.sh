@@ -204,7 +204,7 @@ except:
     fi
     # Fallback: direct DB lookup when admin API returns no match.
     if [[ "${DB_SERVICE_REACHABLE}" == "true" || -n "${DB_CONTAINER_NAME}" ]]; then
-      node_id=$(pg_exec -c "SELECT id FROM nodes WHERE name ILIKE '%${SMOKE_NODE_NAME}%' LIMIT 1" 2>/dev/null | head -1 | tr -d ' \t' || echo "")
+      node_id=$(pg_exec -c "SELECT id FROM nodes WHERE node_name ILIKE '%${SMOKE_NODE_NAME}%' LIMIT 1" 2>/dev/null | head -1 | tr -d ' \t' || echo "")
       if [[ -n "${node_id}" ]]; then
         echo "  [retry] Node '${SMOKE_NODE_NAME}' found via DB fallback: id=${node_id}" >&2
         echo "${node_id}"
