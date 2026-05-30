@@ -32,7 +32,7 @@ VERBOSE=false
 [[ "${1:-}" == "--verbose" ]] && VERBOSE=true
 
 FAILED=0; PASS_COUNT=0; SKIP_COUNT=0; FAIL_COUNT=0; SUMMARY_LINES=()
-declare -a LEAKED_ENDPOINTS
+LEAKED_ENDPOINTS=()
 
 fail()    { local m="$1"; echo "  FAIL: ${m}"; SUMMARY_LINES+=("FAIL: ${m}"); FAIL_COUNT=$((FAIL_COUNT+1)); FAILED=1; }
 pass()    { local m="$1"; echo "  PASS: ${m}"; SUMMARY_LINES+=("PASS: ${m}"); PASS_COUNT=$((PASS_COUNT+1)); }
