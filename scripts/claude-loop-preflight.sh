@@ -64,12 +64,20 @@ for ISSUE in "MyAiDevs/livemask-docs:62" "MyAiDevs/livemask-ci-cd:14"; do
   REPO="${ISSUE%%:*}"
   NUM="${ISSUE##*:}"
   ISSUE_STATE=$(gh issue view "${NUM}" --repo "${REPO}" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+  ISSUE_RC=$?
   echo "  ${REPO}#${NUM}: ${ISSUE_STATE}"
-  if [[ "${ISSUE_STATE}" == "OPEN" ]]; then
-    block "GitHub: ${REPO}#${NUM} is OPEN — must read and acknowledge"
-  else
-    idle_ok "GitHub: ${REPO}#${NUM} is closed"
-  fi
+  case "${ISSUE_STATE}" in
+    OPEN)
+      block "GitHub: ${REPO}#${NUM} is OPEN — must read and acknowledge"
+      ;;
+    CLOSED)
+      idle_ok "GitHub: ${REPO}#${NUM} is closed"
+      ;;
+    *)
+      # UNKNOWN, command failure, auth failure, network failure, or any other state
+      block "GitHub: ${REPO}#${NUM} is ${ISSUE_STATE} (not CLOSED — gh exit=${ISSUE_RC}) — blocking idle"
+      ;;
+  esac
 done
 
 # Summary
