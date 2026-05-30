@@ -67,6 +67,8 @@ services:
       JOB_SERVICE_INTERNAL_URL: "${JOB_SERVICE_INTERNAL_URL:-http://job-service:19191}"
       JOB_SERVICE_AUTH_MODE: "${JOB_SERVICE_AUTH_MODE:-none}"
       JOB_SERVICE_TIMEOUT_SEC: "${JOB_SERVICE_TIMEOUT_SEC:-30}"
+      NODEAGENT_CONTROL_URL: "${NODEAGENT_CONTROL_URL:-http://nodeagent:9100}"
+      NODEAGENT_CONTROL_NODE_NAME: "${NODEAGENT_CONTROL_NODE_NAME:-local-nodeagent}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,6 +110,40 @@ services:
     networks:
       - livemask-staging
 
+  nodeagent:
+    build:
+      context: .
+      dockerfile: Dockerfile.nodeagent
+    restart: unless-stopped
+    ports:
+      - "${LIVEMASK_NODEAGENT_PORT:-19090}:9100"
+    environment:
+      BACKEND_BASE_URL: "http://backend:8080"
+      BACKEND_CONFIG_URL: "http://backend:8080/internal/agent/config"
+      NODE_NAME: "${NODE_NAME:-local-nodeagent}"
+      NODE_COUNTRY_CODE: "${NODE_COUNTRY_CODE:-US}"
+      IDENTITY_PATH: /var/lib/livemask-nodeagent/identity.json
+      CREDENTIAL_PATH: /var/lib/livemask-nodeagent/credentials.json
+      AGENT_VERSION: "${NODEAGENT_VERSION:-dev}"
+      CONFIG_CACHE_PATH: /var/lib/livemask-nodeagent/runtime_config.json
+      LISTEN_ADDR: ":9100"
+      NODEAGENT_PORT: "9100"
+      POLL_INTERVAL_SEC: "${POLL_INTERVAL_SEC:-30}"
+      LOG_UPLOAD_ENABLED: "${LOG_UPLOAD_ENABLED:-true}"
+      GEOIP_ENABLED: "${GEOIP_ENABLED:-true}"
+      GEOIP_PROFILE: "${GEOIP_PROFILE:-country}"
+      GEOIP_FORMAT: "${GEOIP_FORMAT:-geoip2-cn-mmdb}"
+      NODEAGENT_GEOIP_PROFILE: "${NODEAGENT_GEOIP_PROFILE:-country}"
+      NODEAGENT_GEOIP_FORMAT: "${NODEAGENT_GEOIP_FORMAT:-geoip2-cn-mmdb}"
+      GEOIP_CHECK_INTERVAL_SEC: "${GEOIP_CHECK_INTERVAL_SEC:-300}"
+    volumes:
+      - livemask-staging-nodeagent:/var/lib/livemask-nodeagent
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - livemask-staging
+
   job-service:
     build:
       context: .
@@ -137,3 +173,6 @@ services:
 networks:
   livemask-staging:
     driver: bridge
+
+volumes:
+  livemask-staging-nodeagent:

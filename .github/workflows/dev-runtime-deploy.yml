@@ -21,10 +21,12 @@ jobs:
       JOB_SERVICE_REF: dev
       ADMIN_REF: dev
       WEBSITE_REF: dev
+      NODEAGENT_REF: dev
       LIVEMASK_STACK_NAME: livemask-dev
       LIVEMASK_BACKEND_HTTP_PORT: "18080"
       LIVEMASK_ADMIN_PORT: "3001"
       LIVEMASK_WEBSITE_PORT: "3002"
+      LIVEMASK_NODEAGENT_PORT: "19090"
       LIVEMASK_JOB_SERVICE_PORT: "19191"
       POSTGRES_PORT: "15432"
       REDIS_PORT: "16379"
@@ -71,6 +73,14 @@ jobs:
           path: infra/_build_deps/website
           token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
 
+      - name: Checkout nodeagent source into build context
+        uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-nodeagent
+          ref: ${{ env.NODEAGENT_REF }}
+          path: infra/_build_deps/nodeagent
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+
       - name: Prepare dev runtime build context
         run: bash scripts/prepare-staging-build-context.sh --ci
 
@@ -80,6 +90,7 @@ jobs:
           echo "  host 18080 -> backend container 8080"
           echo "  host 3001 -> admin container 3000"
           echo "  host 3002 -> website container 3000"
+          echo "  host 19090 -> nodeagent container 9100"
           echo "  host 19191 -> job-service container 19191"
           echo "  host 15432 -> postgres container 5432"
           echo "  host 16379 -> redis container 6379"

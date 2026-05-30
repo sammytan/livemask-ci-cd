@@ -30,10 +30,12 @@ jobs:
       JOB_SERVICE_REF: dev
       ADMIN_REF: dev
       WEBSITE_REF: dev
+      NODEAGENT_REF: dev
       LIVEMASK_STACK_NAME: livemask-smoke
       LIVEMASK_BACKEND_HTTP_PORT: "28080"
       LIVEMASK_ADMIN_PORT: "23001"
       LIVEMASK_WEBSITE_PORT: "23002"
+      LIVEMASK_NODEAGENT_PORT: "29090"
       LIVEMASK_JOB_SERVICE_PORT: "29191"
       POSTGRES_PORT: "25432"
       REDIS_PORT: "26379"
@@ -101,6 +103,13 @@ jobs:
           repository: MyAiDevs/livemask-website
           ref: ${{ env.WEBSITE_REF }}
           path: infra/_build_deps/website
+          token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
+      - name: Checkout nodeagent source into build context
+        uses: actions/checkout@v4
+        with:
+          repository: MyAiDevs/livemask-nodeagent
+          ref: ${{ env.NODEAGENT_REF }}
+          path: infra/_build_deps/nodeagent
           token: ${{ secrets.LIVEMASK_BOT_TOKEN || github.token }}
       - name: Prepare staging build context
         run: bash scripts/prepare-staging-build-context.sh --ci
