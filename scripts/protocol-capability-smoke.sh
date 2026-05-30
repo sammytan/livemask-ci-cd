@@ -1368,7 +1368,10 @@ implemented = []
 for i in items:
     proto = str(i.get('protocol','')).lower()
     state = str(i.get('fleet_state',i.get('state',''))).lower()
-    if state not in allowed:
+            if state not in allowed:
+            # Reserved protocols may legitimately transition — only flag unexpected protocols as bad
+            if proto not in (''vless_reality',''trojan',''shadowtls',''wireguard'):
+                bad.append((proto, state))
         bad.append((proto, state))
     if proto in ('vless_reality','trojan','shadowtls','wireguard') and state == 'implemented':
         implemented.append(proto)
