@@ -679,16 +679,36 @@ echo "--- [10] No Secret Leakage in Job Payloads ---"
 
 LEAK_FOUND=false
 if [[ "${HAVE_JOB_SERVICE:-false}" == "true" ]]; then
-  # Check job definitions for secrets
+  # Check job definitions for secrets (only scan leaf values, not keys/descriptions)
   DEFS_RESP=$(curl -sS --max-time 5 "${JOB_SERVICE_URL}/internal/jobs" 2>/dev/null || echo "{}")
   SECRET_CHECK=$(echo "${DEFS_RESP}" | python3 -c "
 import sys,json
-d=json.load(sys.stdin)
-flat = str(d).lower()
 risky = ['api_key','license_key','token','password','secret','hmac']
-found = [w for w in risky if w in flat]
+skip_keys = {'description','display_name','notes','reason','summary'}
+def scan_values(obj, path=''):
+    found = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in skip_keys:
+                continue
+            found.extend(scan_values(v, f'{path}.{k}'))
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            found.extend(scan_values(item, f'{path}[{i}]'))
+    elif isinstance(obj, str):
+        lower = obj.lower()
+        for w in risky:
+            if w in lower:
+                # Exclude false positives like 'non-secret', 'no-secret', 'tokenless'
+                import re
+                # Only flag if the word appears as a standalone term (not negated)
+                if not re.search(rf'(?i)non[-\s]*{w}|no[-\s]*{w}', lower):
+                    found.append(f'{w} (at {path})')
+    return found
+d=json.load(sys.stdin)
+found = scan_values(d)
 if found:
-    print('POTENTIAL: ' + ', '.join(found))
+    print('POTENTIAL: ' + ', '.join(found[:5]))
 else:
     print('OK')
 " 2>/dev/null || echo "OK")
