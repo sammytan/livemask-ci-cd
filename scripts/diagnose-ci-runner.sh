@@ -15,9 +15,18 @@ echo "=== Systemd runner services ==="
 systemctl list-units '*actions*' --type=service --no-pager 2>&1 || echo "(systemctl not available)"
 echo ""
 
+sudo_noninteractive() {
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"
+    return $?
+  fi
+  echo "(sudo unavailable without password; skipped: $*)"
+  return 0
+}
+
 for svc in actions.runner.MyAiDevs.livemask-ci-runner-01.service actions.runner.MyAiDevs.livemask-staging-runner-01.service; do
-  echo "--- sudo systemctl status ${svc} (last 20 lines) ---"
-  sudo systemctl status "${svc}" --no-pager -l 2>&1 | tail -20 || echo "(unable to check ${svc})"
+  echo "--- systemctl status ${svc} (last 20 lines) ---"
+  sudo_noninteractive systemctl status "${svc}" --no-pager -l 2>&1 | tail -20 || echo "(unable to check ${svc})"
   echo ""
 done
 

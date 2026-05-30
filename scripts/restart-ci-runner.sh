@@ -7,6 +7,15 @@ set -euo pipefail
 
 CI_SERVICE="actions.runner.MyAiDevs.livemask-ci-runner-01.service"
 
+sudo_noninteractive() {
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n "$@"
+    return $?
+  fi
+  echo "SKIP: sudo unavailable without password; not running: $*"
+  return 125
+}
+
 echo "============================================"
 echo " CI Runner Restart"
 echo " $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -14,17 +23,26 @@ echo "============================================"
 
 echo ""
 echo "=== Step 1: Check current state ==="
-sudo systemctl status "${CI_SERVICE}" --no-pager -l 2>&1 | head -30 || true
+sudo_noninteractive systemctl status "${CI_SERVICE}" --no-pager -l 2>&1 | head -30 || true
 
 echo ""
 echo "=== Step 2: Restart service ==="
-sudo systemctl restart "${CI_SERVICE}" 2>&1
-echo "Restart command completed with exit code: $?"
+if sudo_noninteractive systemctl restart "${CI_SERVICE}" 2>&1; then
+  echo "Restart command completed."
+else
+  rc=$?
+  if [[ "${rc}" -eq 125 ]]; then
+    echo "Restart skipped because non-interactive sudo is unavailable."
+    exit 0
+  fi
+  echo "Restart command failed with exit code: ${rc}"
+  exit "${rc}"
+fi
 
 echo ""
 echo "=== Step 3: Verify new state ==="
 sleep 3
-sudo systemctl status "${CI_SERVICE}" --no-pager -l 2>&1 | head -30
+sudo_noninteractive systemctl status "${CI_SERVICE}" --no-pager -l 2>&1 | head -30 || true
 
 echo ""
 echo "=== Step 4: Check GitHub API runner status (will be checked from workflow) ==="
