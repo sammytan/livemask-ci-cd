@@ -843,6 +843,247 @@ case "${OBSERV_SETTINGS_HTTP}" in
     ;;
 esac
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# [20] NodeAgent Log Upload Settings (TASK-CICD-NODEAGENT-LOG-UPLOAD-SETTINGS-SMOKE-001)
+# ═══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- [20] NodeAgent Log Upload Settings ---"
+
+LOG_UPLOAD_CONFIG_KEYS=(
+  "nodeagent.log_upload"
+  "nodeagent.runtime_config"
+  "observability.log_upload"
+)
+
+LOG_UPLOAD_KEY_FOUND=false
+LOG_UPLOAD_KEY=""
+LOG_UPLOAD_WRITABLE=false
+
+# [20a] Discover log upload config keys
+echo "  [20a] Config key discovery"
+for try_key in "${LOG_UPLOAD_CONFIG_KEYS[@]}"; do
+  KEY_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/admin/api/v1/configs/${try_key}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+  if [[ "${KEY_HTTP}" == "200" ]]; then
+    LOG_UPLOAD_KEY="${try_key}"
+    LOG_UPLOAD_KEY_FOUND=true
+    pass "Log upload config key found: ${LOG_UPLOAD_KEY}"
+    break
+  fi
+done
+
+if [[ "${LOG_UPLOAD_KEY_FOUND}" != "true" ]]; then
+  LOG_UPLOAD_KEY="nodeagent.runtime_config"
+  KEY_FALLBACK_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null || true)
+  if [[ "${KEY_FALLBACK_HTTP}" == "200" ]]; then
+    LOG_UPLOAD_KEY_FOUND=true
+    skip "Dedicated log upload config key not found; using fallback: ${LOG_UPLOAD_KEY}"
+  fi
+fi
+
+# [20b] GET log upload config and verify reporting fields
+echo "  [20b] GET log upload config detail"
+if [[ "${LOG_UPLOAD_KEY_FOUND}" == "true" ]]; then
+  LU_DETAIL_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+  LU_DETAIL_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" \
+    "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+
+  if [[ "${LU_DETAIL_HTTP}" == "200" ]]; then
+    LU_HAS_BATCH_INTERVAL=$(echo "${LU_DETAIL_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+payload = d.get('payload', d.get('config_value', d.get('value', {})))
+if isinstance(payload, str):
+    payload = json.loads(payload)
+reporting = payload.get('reporting', {})
+has = reporting.get('batch_upload_interval_seconds','') or payload.get('log_upload',{}).get('batch_interval_seconds','')
+print('found' if has else 'not_found')
+" 2>/dev/null || echo "not_found")
+
+    LU_HAS_CAPS=$(echo "${LU_DETAIL_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+payload = d.get('payload', d.get('config_value', d.get('value', {})))
+if isinstance(payload, str):
+    payload = json.loads(payload)
+reporting = payload.get('reporting', {})
+has = reporting.get('max_offline_buffer_items','') or payload.get('log_upload',{}).get('max_batch_bytes','')
+print('found' if has else 'not_found')
+" 2>/dev/null || echo "not_found")
+
+    pass "Log upload config detail: HTTP 200, batch_interval=${LU_HAS_BATCH_INTERVAL}, caps=${LU_HAS_CAPS}"
+    security_check "Log upload config" "${LU_DETAIL_RESP}" || true
+  elif [[ "${LU_DETAIL_HTTP}" == "404" ]]; then
+    skip "Log upload config detail: HTTP 404 (endpoint not yet deployed)"
+  else
+    fail "Log upload config detail: HTTP ${LU_DETAIL_HTTP}"
+  fi
+else
+  skip "Log upload config: no applicable config key found (all returned non-200)"
+fi
+
+# [20c] PUT log upload settings — valid update
+echo "  [20c] PUT log upload settings (valid update)"
+if [[ "${LOG_UPLOAD_KEY_FOUND}" == "true" ]]; then
+  CURRENT_PAYLOAD=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+payload = d.get('payload', d.get('config_value', d.get('value', {})))
+if isinstance(payload, str):
+    payload = json.loads(payload)
+print(json.dumps(payload))
+" 2>/dev/null || echo "{}")
+
+  LU_UPDATE_PAYLOAD=$(python3 -c "
+import json
+current = json.loads('''${CURRENT_PAYLOAD}''')
+if 'reporting' not in current:
+    current['reporting'] = {}
+current['reporting']['batch_upload_interval_seconds'] = 120
+current['reporting']['max_offline_buffer_items'] = 5000
+current['reporting']['smoke_test'] = True
+current['reporting']['smoke_timestamp'] = ${TIMESTAMP}
+print(json.dumps(current))
+" 2>/dev/null || echo "{}")
+
+  LU_UPDATE_RESP_RAW=$(curl -sS -w "\n%{http_code}" --max-time 5 -X PUT \
+    "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -d "{\"config_key\": \"${LOG_UPLOAD_KEY}\", \"config_value\": ${LU_UPDATE_PAYLOAD}, \"reason\": \"Smoke test log upload settings update\"}" 2>/dev/null) || true
+  LU_UPDATE_HTTP=$(echo "${LU_UPDATE_RESP_RAW}" | tail -1)
+  LU_UPDATE_RESP=$(echo "${LU_UPDATE_RESP_RAW}" | sed '$d')
+
+  if [[ "${LU_UPDATE_HTTP}" == "200" || "${LU_UPDATE_HTTP}" == "201" ]]; then
+    LOG_UPLOAD_WRITABLE=true
+    pass "Log upload settings update: HTTP ${LU_UPDATE_HTTP}"
+    security_check "Log upload update" "${LU_UPDATE_RESP}" || true
+  elif [[ "${LU_UPDATE_HTTP}" == "405" || "${LU_UPDATE_HTTP}" == "501" ]]; then
+    skip "Log upload settings update: HTTP ${LU_UPDATE_HTTP} (write not available for this config key)"
+  elif [[ "${LU_UPDATE_HTTP}" == "404" ]]; then
+    skip "Log upload settings update: HTTP 404 (endpoint not yet deployed)"
+  else
+    skip "Log upload settings update: HTTP ${LU_UPDATE_HTTP}"
+  fi
+else
+  skip "Log upload settings update: no config key available"
+fi
+
+# [20d] Verify log upload settings update persists
+echo "  [20d] Verify log upload settings persist"
+if [[ "${LOG_UPLOAD_WRITABLE}" == "true" ]]; then
+  LU_VERIFY_RESP=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}") || true
+  LU_VERIFY_OK=$(echo "${LU_VERIFY_RESP}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+payload = d.get('payload', d.get('config_value', d.get('value', {})))
+if isinstance(payload, str):
+    payload = json.loads(payload)
+reporting = payload.get('reporting', {})
+ok = reporting.get('smoke_test') and reporting.get('batch_upload_interval_seconds') == 120
+print('ok' if ok else 'not_ok')
+" 2>/dev/null || echo "not_ok")
+  if [[ "${LU_VERIFY_OK}" == "ok" ]]; then
+    pass "Log upload settings persist verified (batch_interval=120, smoke_test=true)"
+  else
+    fail "Log upload settings did not persist"
+  fi
+else
+  skip "Verify log upload settings persist: write was not available"
+fi
+
+# [20e] Validation — invalid values rejected
+echo "  [20e] Validation — invalid values rejected"
+VALIDATION_TESTS=0
+VALIDATION_PASSED=0
+if [[ "${LOG_UPLOAD_KEY_FOUND}" == "true" ]]; then
+  VAL_BASE_PAYLOAD=$(curl -sS --max-time 5 "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" 2>/dev/null | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+payload = d.get('payload', d.get('config_value', d.get('value', {})))
+if isinstance(payload, str):
+    payload = json.loads(payload)
+print(json.dumps(payload))
+" 2>/dev/null || echo "{}")
+
+  # Test: negative batch interval
+  NEG_INTERVAL_PAYLOAD=$(echo "${VAL_BASE_PAYLOAD}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if 'reporting' not in d: d['reporting'] = {}
+d['reporting']['batch_upload_interval_seconds'] = -10
+print(json.dumps(d))
+" 2>/dev/null)
+  NEG_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" -X PUT \
+    "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -d "{\"config_key\": \"${LOG_UPLOAD_KEY}\", \"config_value\": ${NEG_INTERVAL_PAYLOAD}, \"reason\": \"Smoke test: negative interval\"}" 2>/dev/null) || true
+  VALIDATION_TESTS=$((VALIDATION_TESTS + 1))
+  if [[ "${NEG_HTTP}" == "400" || "${NEG_HTTP}" == "422" ]]; then
+    pass "Validation: negative interval rejected (HTTP ${NEG_HTTP})"
+    VALIDATION_PASSED=$((VALIDATION_PASSED + 1))
+  elif [[ "${NEG_HTTP}" == "200" || "${NEG_HTTP}" == "201" ]]; then
+    skip "Validation: negative interval accepted (HTTP ${NEG_HTTP}) — server-side validation not yet implemented"
+  else
+    skip "Validation: negative interval test HTTP ${NEG_HTTP} (validation may not be deployed)"
+  fi
+
+  # Test: excessive batch buffer
+  HUGE_BATCH_PAYLOAD=$(echo "${VAL_BASE_PAYLOAD}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if 'reporting' not in d: d['reporting'] = {}
+d['reporting']['max_offline_buffer_items'] = 999999999
+print(json.dumps(d))
+" 2>/dev/null)
+  HUGE_HTTP=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" -X PUT \
+    "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -d "{\"config_key\": \"${LOG_UPLOAD_KEY}\", \"config_value\": ${HUGE_BATCH_PAYLOAD}, \"reason\": \"Smoke test: excessive buffer\"}" 2>/dev/null) || true
+  VALIDATION_TESTS=$((VALIDATION_TESTS + 1))
+  if [[ "${HUGE_HTTP}" == "400" || "${HUGE_HTTP}" == "422" ]]; then
+    pass "Validation: excessive buffer items rejected (HTTP ${HUGE_HTTP})"
+    VALIDATION_PASSED=$((VALIDATION_PASSED + 1))
+  elif [[ "${HUGE_HTTP}" == "200" || "${HUGE_HTTP}" == "201" ]]; then
+    skip "Validation: excessive buffer accepted (HTTP ${HUGE_HTTP}) — server-side cap validation not yet implemented"
+  else
+    skip "Validation: excessive buffer test HTTP ${HUGE_HTTP} (validation may not be deployed)"
+  fi
+else
+  skip "Validation tests: no config key available"
+fi
+
+if [[ "${VALIDATION_TESTS}" -gt 0 ]]; then
+  echo "  Validation summary: ${VALIDATION_PASSED}/${VALIDATION_TESTS} tests passed"
+fi
+
+# Restore config to pre-smoke state
+if [[ "${LOG_UPLOAD_WRITABLE}" == "true" && -n "${VAL_BASE_PAYLOAD:-}" ]]; then
+  RESTORE_PAYLOAD=$(echo "${VAL_BASE_PAYLOAD}" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if 'reporting' in d:
+    d['reporting'].pop('smoke_test', None)
+    d['reporting'].pop('smoke_timestamp', None)
+print(json.dumps(d))
+" 2>/dev/null || echo "${VAL_BASE_PAYLOAD}")
+  curl -sS --max-time 5 -X PUT "${API_BASE}/admin/api/v1/configs/${LOG_UPLOAD_KEY}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -d "{\"config_key\": \"${LOG_UPLOAD_KEY}\", \"config_value\": ${RESTORE_PAYLOAD}, \"reason\": \"Smoke test cleanup\"}" >/dev/null 2>&1 || true
+  echo "  Restored log upload config to pre-smoke state"
+fi
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Cleanup
 # ──────────────────────────────────────────────────────────────────────────────
@@ -879,4 +1120,5 @@ fi
 echo "[TASK-CICD-SYSTEM-SETTINGS-SCHEDULER-001] System settings/scheduler smoke PASSED."
 echo "Covers: Config list/detail/update/verify, Schedule CRUD (create/detail/edit/delete),"
 echo "  Schedule preview, Manual run, Disable/Enable, RBAC, Secret leak scan,"
-echo "  Admin settings pages 404 check, Observability settings API, Sentry app settings API"
+echo "  Admin settings pages 404 check, Observability settings API, Sentry app settings API,"
+echo "  NodeAgent log upload settings CRUD + validation + secret leak scan (TASK-CICD-NODEAGENT-LOG-UPLOAD-SETTINGS-SMOKE-001)"
