@@ -38,6 +38,7 @@ backend|livemask-backend
 admin|livemask-admin
 website|livemask-website
 job-service|livemask-job-service
+nodeagent|livemask-nodeagent
 "
 
 # ============================================================
@@ -93,10 +94,19 @@ printf "%s" "${REPO_ROWS}" | while IFS='|' read -r dir_name repo_name; do
   ws_repo="${WORKSPACE_ROOT}/${repo_name}"
   if [[ -d "${ws_repo}" ]]; then
     echo "[prepare]  [workspace] ${ws_repo} → ${target}"
-    rm -rf "${target}"
     mkdir -p "${target}"
-    # Use rsync or cp to copy source, excluding .git
-    rsync -a --exclude='.git' "${ws_repo}/" "${target}/" 2>/dev/null || \
+    # Use rsync or cp to copy source, excluding VCS/dependency/build caches.
+    # Do not rm -rf the target first: local Docker builds may have left
+    # root-owned cache directories under infra/_build_deps.
+    rsync -a --delete \
+      --exclude='.git' \
+      --exclude='.cache' \
+      --exclude='.gomodcache' \
+      --exclude='node_modules' \
+      --exclude='.next' \
+      --exclude='dist' \
+      --exclude='build' \
+      "${ws_repo}/" "${target}/" 2>/dev/null || \
       cp -a "${ws_repo}/" "${target}/"
     touch "${target}/.exists"
   else

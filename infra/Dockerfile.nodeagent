@@ -1,0 +1,27 @@
+# stage 1: build
+ARG GO_IMAGE_TAG=1.26-alpine
+FROM golang:${GO_IMAGE_TAG} AS builder
+
+# Source is provisioned by scripts/prepare-staging-build-context.sh
+# into infra/_build_deps/nodeagent/, which is in the build context.
+COPY _build_deps/nodeagent/ /src/
+
+RUN if [ ! -f /src/go.mod ]; then \
+      echo "FATAL: No go.mod found in /src/." >&2; \
+      echo "Run scripts/prepare-staging-build-context.sh before docker compose build." >&2; \
+      exit 1; \
+    fi
+
+WORKDIR /src
+RUN go mod download
+RUN CGO_ENABLED=0 go build -o /out/nodeagent ./cmd/nodeagent
+
+# stage 2: runtime
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates curl tar wget
+WORKDIR /app
+COPY --from=builder /out/nodeagent .
+COPY _build_deps/nodeagent/scripts/install-singbox.sh /usr/local/bin/install-singbox.sh
+RUN sh /usr/local/bin/install-singbox.sh /usr/local/bin
+EXPOSE 9100
+CMD ["./nodeagent"]
