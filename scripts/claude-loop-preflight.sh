@@ -75,16 +75,21 @@ for ISSUE_REPO in "MyAiDevs/livemask-docs:68" "MyAiDevs/livemask-ci-cd:14"; do
   ISSUE_OUT=$(gh issue view "${NUM}" --repo "${REPO}" --json state --jq '.state' 2>&1) || ISSUE_RC=$?
   ISSUE_RC=${ISSUE_RC:-0}
   ISSUE_STATE="${ISSUE_OUT:-UNKNOWN}"
+  # #14 and #68 are PERMANENT control channels (per supervisor rules Section 1A).
+  # They are designed to stay OPEN indefinitely. Being OPEN is normal state,
+  # not a blocker. Only actionable keyword content in comments triggers work.
   echo "  ${REPO}#${NUM}: ${ISSUE_STATE} (gh exit=${ISSUE_RC})"
   case "${ISSUE_STATE}" in
     OPEN)
-      block "GitHub: ${REPO}#${NUM} is OPEN — must read and acknowledge"
+      idle_ok "GitHub: ${REPO}#${NUM} is OPEN (permanent channel — expected)"
       ;;
     CLOSED)
-      idle_ok "GitHub: ${REPO}#${NUM} is closed"
+      warn_msg="GitHub: ${REPO}#${NUM} is CLOSED — permanent channel should not be closed"
+      REASONS+=("ADVISORY: ${warn_msg}")
+      echo "  ADVISORY: ${warn_msg}"
       ;;
     *)
-      block "GitHub: ${REPO}#${NUM} state=${ISSUE_STATE} (gh exit=${ISSUE_RC}) — not CLOSED, blocking idle"
+      block "GitHub: ${REPO}#${NUM} state=${ISSUE_STATE} (gh exit=${ISSUE_RC}) — cannot verify channel state"
       ;;
   esac
 
