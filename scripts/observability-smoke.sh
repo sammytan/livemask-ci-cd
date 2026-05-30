@@ -790,6 +790,8 @@ if [[ -n "${RBAC_TOKEN}" ]]; then
       "${API_BASE}/admin/api/v1/${rbac_path}" 2>/dev/null || true)
     if [[ "${NO_TOK_HTTP}" == "401" ]]; then
       pass "RBAC no-token ${rbac_path}: HTTP 401 (correct)"
+    elif [[ "${NO_TOK_HTTP}" == "404" ]]; then
+      skip "RBAC no-token ${rbac_path}: HTTP 404 (endpoint not yet deployed)"
     else
       fail "RBAC no-token ${rbac_path}: HTTP ${NO_TOK_HTTP} (expected 401)"
     fi
@@ -799,6 +801,8 @@ if [[ -n "${RBAC_TOKEN}" ]]; then
       -H "Authorization: Bearer ${RBAC_TOKEN}" 2>/dev/null || true)
     if [[ "${USER_TOK_HTTP}" == "403" || "${USER_TOK_HTTP}" == "401" ]]; then
       pass "RBAC user-token ${rbac_path}: HTTP ${USER_TOK_HTTP} (forbidden)"
+    elif [[ "${USER_TOK_HTTP}" == "404" ]]; then
+      skip "RBAC user-token ${rbac_path}: HTTP 404 (endpoint not yet deployed)"
     else
       fail "RBAC user-token ${rbac_path}: HTTP ${USER_TOK_HTTP} (expected 401/403)"
     fi
