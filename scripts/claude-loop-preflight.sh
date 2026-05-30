@@ -22,7 +22,7 @@ echo "=== Claude Loop Multi-Channel Preflight ==="
 # ── Channel 1: SAP active blockers ──────────────────────────────────────────
 echo "--- Channel 1: SAP ---"
 SAP_OUT=$("${SUPERVISOR_CLI}" list --active-blockers --blocks-loop true 2>&1 || true)
-SAP_COUNT=$(echo "${SAP_OUT}" | grep -cE "^(open|ack) " 2>/dev/null || echo "0")
+SAP_COUNT=$(echo "${SAP_OUT}" | grep -cE "^(open|ack) " 2>/dev/null; true)
 if [[ "${SAP_COUNT}" -gt 0 ]]; then
   block "SAP: ${SAP_COUNT} active blocking packet(s)"
   echo "${SAP_OUT}"
