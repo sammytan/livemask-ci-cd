@@ -1090,9 +1090,9 @@ print(sig)
     -d '{"public_endpoint_host":"vless.example.com","public_endpoint_port":443,"transport":"tcp","sni":"vless.example.com","alpn":"h2","protocol_profile":"vless_reality","profile_config":{},"enabled":true}' >/dev/null 2>&1 || true
   echo "       Node3 endpoint set to protocol_profile=vless_reality"
 
-  # --- [38] Create session → profile_type=vless_reality, client.protocol=singbox, warning ---
+  # --- [38] Create session -> profile_type=vless_reality, client.protocol=vless_reality ---
   echo ""
-  echo "--- [38] POST Connect Session (vless_reality fallback) ---"
+  echo "--- [38] POST Connect Session (vless_reality profile) ---"
   pg_exec -c "DELETE FROM connect_sessions WHERE user_id='${USER_ID}'" 2>/dev/null || true
   pg_exec -c "DELETE FROM user_devices WHERE user_id='${USER_ID}'" 2>/dev/null || true
   VLESS_SESSION_RESP=$(curl -sS --max-time 5 -X POST "${API_BASE}/api/v1/connect/session" \
@@ -1111,12 +1111,8 @@ print(sig)
     skip "[TASK-CICD-PROTOCOL-SMOKE-001] Vless_reality session skipped: DEVICE_LIMIT_EXCEEDED for current plan tier"
   else
     if [[ "${VLESS_PTYPE}" != "vless_reality" ]]; then echo "  FAIL: profile_type=${VLESS_PTYPE} (expected vless_reality)"; vless_ok=false; fi
-    if [[ "${VLESS_CLIENT_PROTO}" != "singbox" ]]; then echo "  FAIL: client.protocol=${VLESS_CLIENT_PROTO} (expected singbox fallback)"; vless_ok=false; fi
+    if [[ "${VLESS_CLIENT_PROTO}" != "vless_reality" ]]; then echo "  FAIL: client.protocol=${VLESS_CLIENT_PROTO} (expected vless_reality)"; vless_ok=false; fi
     if [[ "${VLESS_IS_SKEL}" != "False" ]]; then echo "  FAIL: is_skeleton=${VLESS_IS_SKEL} (expected false, has real endpoint)"; vless_ok=false; fi
-    warn_str=$(echo "${VLESS_WARNINGS}" | python3 -c "import sys,json; print(type(json.load(sys.stdin)).__name__)" 2>/dev/null || echo "")
-    if [[ -z "${VLESS_WARNINGS}" ]] || [[ "${VLESS_WARNINGS}" == "None" ]] || [[ "${VLESS_WARNINGS}" == "[]" ]]; then
-      echo "  INFO: no warnings (backend may not produce for vless_reality)"
-    fi
   fi
 
   # Security check on vless_reality response
