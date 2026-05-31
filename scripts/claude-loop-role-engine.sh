@@ -34,8 +34,12 @@ ARG2="${2:-}"
 # Returns task_id if created, empty string if skipped.
 auto_create_task() {
   local role="$1" check="$2" title="$3" priority="${4:-P1}" repo="${5:-livemask-ci-cd}" body="${6:-}"
-  local slug; slug=$(echo "${title}" | tr 'A-Z ' 'a-z-' | sed 's/[^a-z0-9-]//g' | cut -c1-50)
-  local tid="TASK-AUTO-${slug}"
+  # Generate short, compliant task ID: TASK-AUTO-{repo-short}-{uniq}
+  local repo_short; repo_short=$(echo "${repo}" | sed 's/livemask-//' | cut -c1-8)
+  local uniq; uniq=$(echo "${title}" | tr 'A-Z ' 'a-z-' | sed 's/[^a-z0-9-]//g' | tr '-' '\n' | head -4 | tr '\n' '-' | cut -c1-20)
+  local tid="TASK-AUTO-${repo_short}-${uniq}"
+  tid="${tid%-}"  # strip trailing dash
+  tid=$(echo "${tid}" | cut -c1-60)  # hard cap at 60 chars
 
   # Check if task already exists in ledger
   local exists; exists=$(python3 -c "
@@ -52,43 +56,71 @@ for m in ledger.get('modules',[]):
     return 0
   fi
 
-  # Create task doc
+  # Create task doc with ALL required sections per check-docs.sh schema
   local task_doc="${DOCS_DIR}/docs/development/tasks/${tid}.md"
+  local now_ts; now_ts=$(date -u +%Y-%m-%d)
   cat > "${task_doc}" << TASKDOC
-# ${tid} — Auto-created from role-engine
+# ${tid} — ${title}
 
-> Priority: ${priority}
-> Repo: ${repo}
+Edit provenance:
+- Edited by: Claude Role Engine
+- Window/role: livemask-ci-cd role-engine
+- Date: ${now_ts}
+- TASK ID: ${tid}
+- Reason: auto-created from role-engine finding ${role}/${check}
+
 > Status: ready
-> Source: ${role}/${check}
+> Repository: ${repo}
+> Priority: ${priority}
+> Source: role-engine ${role}/${check}
+> Created: ${now_ts}
 
-## Problem
-${title}
+## 1. Background
 
-## Context
+Role-engine ${role}/${check} detected an actionable gap: ${title}
+
 ${body}
 
-## Acceptance Criteria
-- [ ] Issue resolved per role-engine finding
-- [ ] Evidence recorded in task doc and ledger
+## 2. Scope
 
-## Validation
+### In Scope
+- Address the root cause identified by role-engine finding
+- Implement the fix or improvement described above
+
+### Out of Scope
+- Unrelated refactoring or feature additions
+
+## 3. Acceptance Criteria
+- [ ] Root cause verified and addressed
+- [ ] Implementation validated with appropriate evidence
+- [ ] No regression in existing functionality
+
+## 4. Cross-Repo Impact
+
+This task affects **${repo}**. Downstream repos to verify:
+$(python3 -c "
+repo='${repo}'
+impacts = {'livemask-backend': '- Admin UI, App client, NodeAgent, Job Service, Website, CI/CD smoke', 'livemask-admin': '- CI/CD admin smoke tests', 'livemask-app': '- CI/CD app build/release smoke', 'livemask-nodeagent': '- Backend internal API, CI/CD node smoke', 'livemask-job-service': '- Backend executor endpoints, CI/CD job smoke', 'livemask-ci-cd': '- All repos (CI/CD script changes affect all)', 'livemask-docs': '- All repos (contract/rule changes need implementation)'}
+print(impacts.get(repo, '- Related repos as identified during implementation'))
+" 2>/dev/null)
+
+## 5. Validation
 - check-docs.sh PASS
 - git diff --check PASS
+- CI/CD pipeline green for affected repos
 TASKDOC
 
-  # Add to ledger
+  # Add to ledger with valid field types
   python3 -c "
 import json, pathlib
 ledger_path = pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json')
 ledger = json.loads(ledger_path.read_text())
-# Find or create auto-tasks module
 module = None
 for m in ledger.get('modules',[]):
     if m.get('module_id') == 'auto-tasks':
         module = m; break
 if not module:
-    module = {'module_id': 'auto-tasks', 'overall_status': 'partial', 'owner_repo': '${repo}', 'tasks': []}
+    module = {'module_id': 'auto-tasks', 'overall_status': 'partial', 'owner_repo': '${repo}', 'tasks': [], 'open_gaps': []}
     ledger['modules'].append(module)
 module['tasks'].append({
     'task_id': '${tid}',
@@ -97,7 +129,11 @@ module['tasks'].append({
     'status': 'ready',
     'priority': '${priority}',
     'task_doc': 'docs/development/tasks/${tid}.md',
-    'notes': 'Auto-created: ${role}/${check} — ${title}'
+    'issue': '',
+    'validation': '',
+    'blocked_by': [],
+    'unlocks': [],
+    'notes': 'Auto-created by role-engine ${role}/${check}'
 })
 ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False))
 " 2>/dev/null
