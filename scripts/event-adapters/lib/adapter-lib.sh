@@ -43,6 +43,7 @@ CURSOR_SCHEMA="${CI_CD_DIR}/scripts/schemas/adapter-cursors-schema-v1.json"
 ROLE_CACHE_DIR="${HOME}/.claude/role-cache"
 FINDINGS_FILE="${ROLE_CACHE_DIR}/findings.jsonl"
 PM_LEASE_FILE="${ROLE_CACHE_DIR}/pm-lease.json"
+PROJECT_MEMORY_FILE="${ROLE_CACHE_DIR}/project-memory.jsonl"
 DOCS_REPO_DIR="${LIVEMASK_ROOT}/livemask-docs"
 DOCS_DIR="${DOCS_REPO_DIR}/docs"
 DOCS_DEVELOPMENT_DIR="${DOCS_DIR}/development"
@@ -481,7 +482,7 @@ sap_glob = "docs/development/supervisor-actions/**/*"
 
 # Include role-engine findings, dispatch packet, SAPs, PM lease
 findings = []
-findings_file_path = pathlib.Path.home() / ".claude/role-cache/findings.jsonl"
+findings_file_path = Path.home() / ".claude/role-cache/findings.jsonl"
 if findings_file_path.exists():
     try:
         with open(findings_file_path) as f:
@@ -510,7 +511,7 @@ if sap_dir.exists():
         except: pass
 
 pm_lease = None
-lease_file = pathlib.Path.home() / ".claude/role-cache/pm-lease.json"
+lease_file = Path.home() / ".claude/role-cache/pm-lease.json"
 if lease_file.exists():
     try: pm_lease = json.loads(lease_file.read_text())
     except: pass
@@ -906,6 +907,105 @@ print(json.dumps(d))
 " 2>/dev/null || echo "${CURSOR_DATA}")
 }
 
+# ── adapter_memory_add ─────────────────────────────────────────────────────────
+# Append a lightweight local memory event. This is an accelerator only; docs,
+# ledger, GitHub Issues/comments, SAPs, dispatch packets, and CI remain authority.
+adapter_memory_add() {
+  local source="${1:-}"
+  local task_id="${2:-}"
+  local repo="${3:-}"
+  local summary="${4:-}"
+  local context_path="${5:-}"
+
+  if [[ -z "${source}" || -z "${summary}" ]]; then
+    echo "ERROR: memory-add requires source task_id repo summary [context_path]" >&2
+    return 2
+  fi
+
+  mkdir -p "${ROLE_CACHE_DIR}"
+  python3 - "${PROJECT_MEMORY_FILE}" "${source}" "${task_id}" "${repo}" "${summary}" "${context_path}" <<'PY'
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+source, task_id, repo, summary, context_path = sys.argv[2:7]
+tokens = []
+for token in re.findall(r"[A-Za-z0-9_.:/#-]{3,}", " ".join([source, task_id, repo, summary, context_path])):
+    low = token.lower()
+    if low not in tokens:
+        tokens.append(low)
+
+entry = {
+    "schema_version": 1,
+    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "source": source,
+    "task_id": task_id,
+    "repo": repo,
+    "summary": summary[:1200],
+    "context_path": context_path,
+    "tokens": tokens[:40],
+    "authority_note": "Local memory is an accelerator only; verify against docs, ledger, GitHub, SAPs, dispatch packets, and CI before acting.",
+}
+with path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+print(json.dumps({"memory_file": str(path), "written": True, "task_id": task_id, "repo": repo}, ensure_ascii=False))
+PY
+}
+
+# ── adapter_memory_search ──────────────────────────────────────────────────────
+# Search local loop memory by TASK-ID, repo, issue number, or keyword.
+adapter_memory_search() {
+  local query="${1:-}"
+  local limit="${2:-10}"
+
+  mkdir -p "${ROLE_CACHE_DIR}"
+  if [[ ! -f "${PROJECT_MEMORY_FILE}" ]]; then
+    echo '{"matches":[],"total":0,"note":"no local project memory yet"}'
+    return 0
+  fi
+
+  python3 - "${PROJECT_MEMORY_FILE}" "${query}" "${limit}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+query = sys.argv[2].lower()
+limit = int(sys.argv[3])
+matches = []
+
+for line in path.read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    try:
+        entry = json.loads(line)
+    except Exception:
+        continue
+    haystack = " ".join([
+        entry.get("source", ""),
+        entry.get("task_id", ""),
+        entry.get("repo", ""),
+        entry.get("summary", ""),
+        entry.get("context_path", ""),
+        " ".join(entry.get("tokens", [])),
+    ]).lower()
+    if not query or query in haystack:
+        matches.append(entry)
+
+matches = matches[-limit:][::-1]
+print(json.dumps({
+    "memory_file": str(path),
+    "query": query,
+    "matches": matches,
+    "total": len(matches),
+    "authority_note": "Memory results are hints only; verify authoritative project state before editing or dispatching.",
+}, ensure_ascii=False, indent=2))
+PY
+}
+
 adapter_usage() {
   cat <<'USAGE'
 Usage:
@@ -942,6 +1042,12 @@ Commands:
   dispatch-status [TASK-ID]
       Show dispatch packet status. No arg lists all packets. With TASK-ID
       shows that specific packet.
+
+  memory-add <source> <TASK-ID> <repo> <summary> [context_path]
+      Append a local project memory hint. This is never authoritative.
+
+  memory-search [TASK-ID|repo|keyword] [limit]
+      Search local project memory hints from prior startup/role-engine cycles.
 
   task-context <TASK-ID>
       Print a JSON context bundle: required first reads, domain roots,
@@ -981,6 +1087,12 @@ adapter_main() {
       ;;
     dispatch-status)
       adapter_dispatch_status "$@"
+      ;;
+    memory-add)
+      adapter_memory_add "$@"
+      ;;
+    memory-search)
+      adapter_memory_search "$@"
       ;;
     ""|-h|--help|help)
       adapter_usage

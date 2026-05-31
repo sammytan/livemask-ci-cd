@@ -84,6 +84,8 @@ ledger_entry = load_json_text(run(["bash", adapter, "task-ledger-entry", task_id
 dispatch_status = load_json_text(run(["bash", adapter, "dispatch-status", task_id]), {})
 findings = load_json_text(run(["bash", adapter, "findings-search", task_id]), {"findings": []})
 pm_status = load_json_text(run(["bash", adapter, "pm-status"]), {})
+task_memory = load_json_text(run(["bash", adapter, "memory-search", task_id, "8"]), {"matches": []})
+repo_memory = load_json_text(run(["bash", adapter, "memory-search", repo, "5"]), {"matches": []})
 planner = load_json_text(run(["python3", str(docs / "scripts/plan-next-tasks.py"), "--format", "json"]), {})
 
 issue = str(ledger_entry.get("issue") or "")
@@ -151,6 +153,11 @@ summary = {
     "dispatch_status": dispatch_status,
     "role_engine_findings": findings.get("findings", []),
     "pm_status": pm_status,
+    "local_memory": {
+        "task_matches": task_memory.get("matches", []),
+        "repo_matches": repo_memory.get("matches", []),
+        "authority_note": "Memory matches are hints only; verify authoritative sources before acting.",
+    },
     "github_issue": issue_context,
     "knowledge_search_terms": terms,
     "knowledge_hits": knowledge_hits,
@@ -170,6 +177,7 @@ print(json.dumps({
     "knowledge_terms": terms,
     "findings": len(summary["role_engine_findings"]),
     "knowledge_hit_groups": len(knowledge_hits),
+    "memory_matches": len(summary["local_memory"]["task_matches"]) + len(summary["local_memory"]["repo_matches"]),
     "planner_rows": len(summary["related_planner_rows"]),
 }, ensure_ascii=False))
 PY
@@ -542,10 +550,21 @@ print(f\"  path:              {d.get('path','?')}\")
 print(f\"  linked issue:      {d.get('issue') or 'none'}\")
 print(f\"  knowledge terms:   {', '.join(d.get('knowledge_terms', [])[:8]) or 'none'}\")
 print(f\"  docs hit groups:   {d.get('knowledge_hit_groups', 0)}\")
+print(f\"  memory matches:    {d.get('memory_matches', 0)}\")
 print(f\"  role findings:     {d.get('findings', 0)}\")
 print(f\"  planner rows:      {d.get('planner_rows', 0)}\")
 " 2>/dev/null || echo "  ${intelligence_summary}"
-    echo "  NEXT READ: python3 -m json.tool $(echo "${intelligence_summary}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('path',''))" 2>/dev/null)"
+    local intelligence_path
+    intelligence_path=$(echo "${intelligence_summary}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('path',''))" 2>/dev/null || echo "")
+    echo "  NEXT READ: python3 -m json.tool ${intelligence_path}"
+    local memory_summary
+    memory_summary=$(echo "${intelligence_summary}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(f\"startup context: issue={d.get('issue') or 'none'} docs_hit_groups={d.get('knowledge_hit_groups',0)} memory_matches={d.get('memory_matches',0)} findings={d.get('findings',0)} planner_rows={d.get('planner_rows',0)} terms={','.join(d.get('knowledge_terms',[])[:6])}\")
+" 2>/dev/null || echo "startup context generated")
+    bash "${ADAPTER_LIB}" memory-add "startup" "${task_id}" "${repo}" "${memory_summary}" "${intelligence_path}" >/dev/null 2>&1 || true
+    echo "  memory:          bash ${ADAPTER_LIB} memory-search ${task_id}"
   else
     warn "startup intelligence pack unavailable"
   fi

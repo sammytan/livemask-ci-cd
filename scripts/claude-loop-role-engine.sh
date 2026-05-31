@@ -269,6 +269,9 @@ PY
   duplicate_blocker=$(python3 -c "import json; d=json.load(open('${intelligence_file}')); print('yes' if d.get('duplicate_blocker') else '')" 2>/dev/null || echo "")
   if [[ -n "${duplicate_blocker}" ]]; then
     echo "    (duplicate task signal found — skip creating ${tid}; see ${intelligence_file})"
+    bash "${ADAPTER_LIB}" memory-add "role-engine-duplicate-skip" "${tid}" "${repo}" \
+      "auto-create skipped because intelligence pack found duplicate signals for ${title}" \
+      "${intelligence_file}" >/dev/null 2>&1 || true
     return 0
   fi
 
@@ -449,6 +452,9 @@ pathlib.Path('${dp_file}').write_text(json.dumps(dp, indent=2))
 
   AUTO_CREATED_TASKS="${AUTO_CREATED_TASKS} ${tid}"
   echo -e "  ${GREEN}[CREATE]${RESET} ${tid}: ${title}"
+  bash "${ADAPTER_LIB}" memory-add "role-engine-auto-create" "${tid}" "${repo}" \
+    "auto-created task from ${role}/${check}; context_pack=${intelligence_file}; title=${title}" \
+    "${intelligence_file}" >/dev/null 2>&1 || true
 
   # Immediately commit + push so task is available to planner (don't wait for end of cycle)
   cd "${DOCS_DIR}"
@@ -1984,6 +1990,15 @@ run_all() {
   echo ""
   echo -e "${BOLD}${CYAN}═══ PM Decision Summary ═══${RESET}"
   write_decision_summary || true
+  if [[ -f "${ROLE_CACHE_DIR}/decision-summary.json" ]]; then
+    local decision_memory
+    decision_memory=$(python3 -c "
+import json
+d=json.load(open('${ROLE_CACHE_DIR}/decision-summary.json'))
+print(f\"classification={d.get('classification')} next_actor={d.get('next_required_actor')} counts={d.get('counts')}\")
+" 2>/dev/null || echo "role-engine decision summary")
+    bash "${ADAPTER_LIB}" memory-add "role-engine-decision" "" "livemask-docs" "${decision_memory}" "${ROLE_CACHE_DIR}/decision-summary.json" >/dev/null 2>&1 || true
+  fi
 
   echo ""
   echo -e "${BOLD}${CYAN}═══ Safe Diagnostic Actions ═══${RESET}"
