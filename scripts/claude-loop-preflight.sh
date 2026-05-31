@@ -320,6 +320,105 @@ else
   echo "  Cursor state: not yet initialized"
 fi
 
+# ── Channel 7: Role-engine findings consumption ──────────────────────────────
+echo "--- Channel 7: Role-Engine Findings ---"
+FINDINGS_FILE="${HOME}/.claude/role-cache/findings.jsonl"
+FINDINGS_BLOCKER=0
+FINDINGS_WARNING=0
+if [[ -f "${FINDINGS_FILE}" ]]; then
+  FINDINGS_AGE_MIN=999
+  if [[ "$(uname)" == "Darwin" ]]; then
+    FINDINGS_MTIME=$(stat -f %m "${FINDINGS_FILE}" 2>/dev/null || echo "0")
+  else
+    FINDINGS_MTIME=$(stat -c %Y "${FINDINGS_FILE}" 2>/dev/null || echo "0")
+  fi
+  NOW_EPOCH=$(date +%s)
+  FINDINGS_AGE_MIN=$(( (NOW_EPOCH - FINDINGS_MTIME) / 60 ))
+
+  if [[ "${FINDINGS_AGE_MIN}" -gt 120 ]]; then
+    echo "  Findings file is ${FINDINGS_AGE_MIN} min stale — skipping (too old to be actionable)"
+    idle_ok "Findings: stale (${FINDINGS_AGE_MIN} min)"
+  else
+    FINDINGS_BLOCKER=$(python3 -c "
+import json
+count = 0
+try:
+    with open('${FINDINGS_FILE}') as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            d = json.loads(line)
+            if d.get('severity') == 'blocker': count += 1
+except: pass
+print(count)
+" 2>/dev/null || echo "0")
+    FINDINGS_WARNING=$(python3 -c "
+import json
+count = 0
+try:
+    with open('${FINDINGS_FILE}') as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            d = json.loads(line)
+            if d.get('severity') == 'warning': count += 1
+except: pass
+print(count)
+" 2>/dev/null || echo "0")
+
+    FINDINGS_TOTAL=$((FINDINGS_BLOCKER + FINDINGS_WARNING))
+    echo "  Role-engine findings: ${FINDINGS_BLOCKER} blocker, ${FINDINGS_WARNING} warning (age=${FINDINGS_AGE_MIN}min)"
+
+    if [[ "${FINDINGS_BLOCKER}" -gt 0 ]]; then
+      # Show top blockers
+      python3 -c "
+import json
+blockers = []
+try:
+    with open('${FINDINGS_FILE}') as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            d = json.loads(line)
+            if d.get('severity') == 'blocker':
+                blockers.append(d)
+except: pass
+for b in blockers[:3]:
+    print(f\"  BLOCKER: [{b.get('role','?')}-{b.get('check','?')}] {b.get('finding','?')[:150]}\")
+    if b.get('cmd'): print(f\"    cmd: {b.get('cmd')}\")
+" 2>/dev/null
+      block "Role-engine: ${FINDINGS_BLOCKER} blocker finding(s) — must resolve before idle"
+    fi
+
+    if [[ "${FINDINGS_WARNING}" -gt 0 ]]; then
+      python3 -c "
+import json
+warnings = []
+try:
+    with open('${FINDINGS_FILE}') as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            d = json.loads(line)
+            if d.get('severity') == 'warning':
+                warnings.append(d)
+except: pass
+for w in warnings[:3]:
+    print(f\"  WARNING: [{w.get('role','?')}-{w.get('check','?')}] {w.get('finding','?')[:150]}\")
+" 2>/dev/null
+      work "Role-engine: ${FINDINGS_WARNING} warning finding(s) — review before declaring idle"
+    fi
+
+    if [[ "${FINDINGS_TOTAL}" -eq 0 ]]; then
+      echo "  Role-engine: no actionable findings"
+      idle_ok "Role-engine: no findings"
+    fi
+  fi
+else
+  echo "  Role-engine findings: no file (role-engine not yet run or first cycle)"
+  idle_ok "Role-engine: not yet run"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "============================================"
@@ -346,6 +445,12 @@ if [[ "${REVIEW_COUNT}" -gt 0 ]]; then
 fi
 if [[ "${RECONCILE_COUNT}" -gt 0 ]]; then
   echo "SIGNAL: RECONCILE_REQUIRED=${RECONCILE_COUNT} ledger/task-doc entries need reconciliation"
+fi
+if [[ "${FINDINGS_BLOCKER}" -gt 0 ]]; then
+  echo "SIGNAL: FINDINGS_BLOCKER=${FINDINGS_BLOCKER} blocker(s) from role-engine — must resolve"
+fi
+if [[ "${FINDINGS_WARNING}" -gt 0 ]]; then
+  echo "SIGNAL: FINDINGS_WARNING=${FINDINGS_WARNING} warning(s) from role-engine — review recommended"
 fi
 
 [[ "${BLOCKED}" -eq 1 ]] && exit 2

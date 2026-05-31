@@ -207,10 +207,40 @@ run_preflight() {
 build_task_context() {
   header "Step 3: Task Context"
 
-  info "getting top dispatchable task from planner..."
-  local top_task
-  top_task=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
-    python3 -c "
+  # 3a. Check dispatch packets first (Codex-assigned tasks)
+  info "checking dispatch packets..."
+  local dispatch_task=""
+  local dp_dir="${DOCS_DIR}/docs/development/dispatch-packets"
+  if [[ -d "${dp_dir}" ]]; then
+    for dp in "${dp_dir}"/TASK-*.json; do
+      [[ -f "${dp}" ]] || continue
+      local dp_task dp_repo dp_assigned
+      read -r dp_task dp_repo dp_assigned <<< "$(python3 -c "
+import json
+d = json.load(open('${dp}'))
+print(d.get('task_id',''), d.get('repo',''), d.get('assigned_to',''))
+" 2>/dev/null || echo "? ? ?")"
+      # Check if not already leased
+      if ! python3 "${DOCS_DIR}/scripts/check-task-leases.py" 2>/dev/null | grep -q "${dp_task}"; then
+        if [[ -n "${dp_task}" ]]; then
+          dispatch_task="${dp_task}|${dp_repo}|dispatch_packet|P1"
+          ok "found dispatch packet: ${dp_task} (${dp_repo}) assigned to ${dp_assigned}"
+          break
+        fi
+      fi
+    done
+  fi
+
+  if [[ -z "${dispatch_task}" ]]; then
+    echo "  no unleased dispatch packets — falling back to planner"
+  fi
+
+  # 3b. Get top task (dispatch packet first, then planner fallback)
+  local top_task="${dispatch_task}"
+  if [[ -z "${top_task}" ]]; then
+    info "planner fallback..."
+    top_task=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
+      python3 -c "
 import json,sys
 d = json.load(sys.stdin)
 tasks = [t for t in d.get('global_next',[]) if t.get('readiness') == 'dispatch_now']
@@ -220,6 +250,7 @@ if tasks:
 else:
     print('NONE')
 " 2>/dev/null || echo "NONE")
+  fi
 
   if [[ "${top_task}" == "NONE" ]]; then
     warn "no dispatch_now tasks — checking for dispatch_for_evidence..."

@@ -13,7 +13,7 @@ set -euo pipefail
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
 DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
 CI_CD_DIR="${LIVEMASK_ROOT}/livemask-ci-cd"
-ROLE_CACHE_DIR="${LIVEMASK_ROOT}/.claude/role-cache"
+ROLE_CACHE_DIR="${HOME}/.claude/role-cache"
 FINDINGS_FILE="${ROLE_CACHE_DIR}/findings.jsonl"
 AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 LEASE_FILE="${DOCS_DIR}/docs/development/leases/task-leases.json"
