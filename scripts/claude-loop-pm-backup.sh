@@ -627,6 +627,433 @@ Co-Authored-By: Claude PM Backup <noreply@anthropic.com>" 2>/dev/null
   fi
 }
 
+# ── Phase A: Deep Review (full code + logic analysis) ────────────────────────
+pm_deep_review() {
+  local target_task="${1:-}"
+  if [[ -z "${target_task}" ]]; then
+    echo "Usage: bash scripts/claude-loop-pm-backup.sh --deep-review <TASK-ID>"
+    return 1
+  fi
+
+  header "Phase A: Deep Review — ${target_task}"
+
+  # Step A1: Gather context efficiently
+  echo "=== Context Bundle ==="
+
+  # A1a: Task doc
+  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
+  if [[ -f "${task_doc}" ]]; then
+    echo ""
+    echo "--- TASK DOC ---"
+    head -80 "${task_doc}"
+  else
+    warn "task doc not found: ${task_doc}"
+  fi
+
+  # A1b: Ledger entry
+  echo ""
+  echo "--- LEDGER ENTRY ---"
+  python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}':
+            print(json.dumps(t, indent=2))
+" 2>/dev/null || echo "not found in ledger"
+
+  # A1c: Review contract (if exists)
+  local review_file="${DOCS_DIR}/docs/development/review-contracts/${target_task}-review.json"
+  if [[ -f "${review_file}" ]]; then
+    echo ""
+    echo "--- REVIEW CONTRACT ---"
+    python3 -c "
+import json
+d = json.load(open('${review_file}'))
+print(f'state: {d.get(\"state\")}')
+print(f'review_round: {d.get(\"review_round\")}')
+for r in d.get('rounds',[]):
+    claude = r.get('claude',{})
+    if claude:
+        print(f'claude submitted: {claude.get(\"submitted_at\")} commit={claude.get(\"commit\",\"?\")[:7]}')
+        print(f'  summary: {claude.get(\"summary\",\"?\")[:300]}')
+        print(f'  files: {claude.get(\"files_changed\",[])}')
+        for v in claude.get('validation',[]):
+            print(f'  validation: {v.get(\"cmd\")} → {v.get(\"result\")}')
+    codex = r.get('codex',{})
+    if codex:
+        print(f'codex verdict: {codex.get(\"verdict\")}')
+        for f in codex.get('findings',[]):
+            print(f'  finding: {f}')
+" 2>/dev/null
+  fi
+
+  # A1d: Git diff — the actual code changes
+  local target_repo
+  target_repo=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}':
+            print(t.get('repo','livemask-docs'))
+" 2>/dev/null || echo "livemask-docs")
+
+  local repo_dir="${LIVEMASK_ROOT}/${target_repo}"
+  echo ""
+  echo "--- GIT DIFF (${target_repo}) ---"
+  if [[ -d "${repo_dir}/.git" ]]; then
+    cd "${repo_dir}"
+    # Find the task branch
+    local task_branch
+    task_branch=$(git branch -r --list "origin/task/*${target_task}*" --format='%(refname:short)' 2>/dev/null | head -1 || echo "")
+    if [[ -n "${task_branch}" ]]; then
+      echo "  task branch: ${task_branch}"
+      git diff "origin/dev...${task_branch}" --stat 2>/dev/null | head -20
+      echo ""
+      echo "  === FULL DIFF (first 200 lines) ==="
+      git diff "origin/dev...${task_branch}" 2>/dev/null | head -200
+    else
+      # Try to find by commit
+      local task_commit
+      task_commit=$(python3 -c "
+import json
+d = json.load(open('${review_file}'))
+for r in d.get('rounds',[]):
+    c = r.get('claude',{}).get('commit','')
+    if c: print(c); break
+" 2>/dev/null || echo "")
+      if [[ -n "${task_commit}" ]]; then
+        echo "  commit: ${task_commit}"
+        git show "${task_commit}" --stat 2>/dev/null | head -20
+        echo ""
+        git show "${task_commit}" 2>/dev/null | head -200
+      else
+        echo "  (cannot find task branch or commit — review manually)"
+      fi
+    fi
+  fi
+
+  # A1e: Related contracts
+  echo ""
+  echo "--- RELATED CONTRACTS ---"
+  if [[ -f "${task_doc}" ]]; then
+    grep -oE 'docs/contracts/[^ )]+' "${task_doc}" 2>/dev/null | head -10 || echo "  none referenced"
+  fi
+
+  # A1f: Cross-repo search — where else is this used?
+  echo ""
+  echo "--- CROSS-REPO IMPACT ---"
+  local keywords
+  keywords=$(grep -oE '[a-z_]+\.[a-z_]+\(|[A-Z][a-z]+Handler|[A-Z][a-z]+Service|[A-Z][a-z]+Store' "${task_doc}" 2>/dev/null | head -5 | tr '\n' ' ' || echo "")
+  if [[ -n "${keywords}" ]]; then
+    echo "  key symbols: ${keywords}"
+    for kw in $(echo "${keywords}" | tr ' ' '\n' | head -3); do
+      echo "  searching for '${kw}' across repos..."
+      for rd in "${LIVEMASK_ROOT}"/livemask-*/; do
+        local rn
+        rn=$(basename "${rd}")
+        [[ "${rn}" == "livemask-docs" || "${rn}" == "livemask-ci-cd" ]] && continue
+        [[ ! -d "${rd}" ]] && continue
+        local hits
+        hits=$(grep -rl "${kw}" "${rd}" --include="*.go" --include="*.ts" --include="*.tsx" --include="*.dart" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+        [[ "${hits}" -gt 0 ]] && echo "    ${rn}: ${hits} files"
+      done
+    done
+  else
+    echo "  (no key symbols extracted)"
+  fi
+
+  echo ""
+  echo "=== DEEP ANALYSIS PROMPT ==="
+  echo ""
+  echo "Claude PM: review the context above and answer:"
+  echo ""
+  echo "1. LOGIC CORRECTNESS:"
+  echo "   - Does the code change implement what the task doc describes?"
+  echo "   - Are there logic gaps, edge cases not handled, or race conditions?"
+  echo "   - Does the error handling follow the project pattern (error codes, retryable vs fatal)?"
+  echo ""
+  echo "2. CROSS-REPO CHAIN:"
+  echo "   - Which other repos are affected by this change?"
+  echo "   - Are the downstream repos updated (admin UI, app client, smoke tests)?"
+  echo "   - If not, create follow-up tasks or mark as blocked."
+  echo ""
+  echo "3. CODE QUALITY:"
+  echo "   - Any hardcoded values that should be in config center?"
+  echo "   - Any missing RBAC/permission checks on admin routes?"
+  echo "   - Any missing Swagger/OpenAPI updates for API changes?"
+  echo "   - Any TODO/FIXME left in production paths?"
+  echo "   - Does the new code have unit tests? Are they meaningful?"
+  echo ""
+  echo "4. SECURITY:"
+  echo "   - Any secrets/logging issues (passwords, tokens in logs)?"
+  echo "   - SQL injection risks (parameterized queries used)?"
+  echo "   - Input validation on user-supplied values?"
+  echo ""
+  echo "5. CLOSURE READINESS:"
+  echo "   - Can this task be marked completed, or does it need more evidence?"
+  echo "   - What specific evidence is still missing?"
+  echo "   - What downstream tasks are now unblocked?"
+}
+
+# ── Phase B: Closure Audit (rigorous task completion validation) ─────────────
+pm_closure_audit() {
+  local target_task="${1:-}"
+  if [[ -z "${target_task}" ]]; then
+    echo "Usage: bash scripts/claude-loop-pm-backup.sh --closure-audit <TASK-ID>"
+    return 1
+  fi
+
+  header "Phase B: Closure Audit — ${target_task}"
+
+  local score=0 max_score=12
+  local gaps=()
+
+  # B1: Ledger status check
+  echo "--- Ledger Status ---"
+  local ledger_status
+  ledger_status=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}':
+            print(t.get('status','?'))
+" 2>/dev/null || echo "NOT_FOUND")
+  echo "  ledger status: ${ledger_status}"
+  [[ "${ledger_status}" == "completed" ]] && score=$((score + 1)) || gaps+=("ledger not marked completed (current: ${ledger_status})")
+
+  # B2: Dev merge evidence
+  echo "--- Dev Merge ---"
+  local review_file="${DOCS_DIR}/docs/development/review-contracts/${target_task}-review.json"
+  if [[ -f "${review_file}" ]]; then
+    local origin_sha
+    origin_sha=$(python3 -c "import json; print(json.load(open('${review_file}')).get('origin_dev_sha',''))" 2>/dev/null || echo "")
+    if [[ -n "${origin_sha}" ]]; then
+      echo "  origin_dev_sha: ${origin_sha}"
+      score=$((score + 1))
+    else
+      gaps+=("missing origin_dev_sha in review contract")
+    fi
+  else
+    gaps+=("no review contract found")
+  fi
+
+  # B3: check-docs.sh passed
+  echo "--- Docs Check ---"
+  if [[ -f "${review_file}" ]]; then
+    local docs_ok=0
+    python3 -c "
+import json
+d = json.load(open('${review_file}'))
+for r in d.get('rounds',[]):
+    for v in r.get('claude',{}).get('validation',[]):
+        if 'check-docs' in v.get('cmd','') and v.get('result') == 'pass':
+            print('PASS')
+" 2>/dev/null | grep -q "PASS" && docs_ok=1
+    [[ "${docs_ok}" -eq 1 ]] && score=$((score + 1)) || gaps+=("check-docs.sh not passed or not recorded")
+  fi
+
+  # B4: GitHub issue updated
+  echo "--- GitHub Issue ---"
+  local issue_url
+  issue_url=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}':
+            print(t.get('issue',''))
+" 2>/dev/null || echo "")
+  if [[ -n "${issue_url}" ]]; then
+    echo "  issue: ${issue_url}"
+    score=$((score + 1))
+  else
+    gaps+=("no GitHub issue linked in ledger")
+  fi
+
+  # B5: Task doc updated
+  echo "--- Task Doc ---"
+  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
+  if [[ -f "${task_doc}" ]]; then
+    local doc_status
+    doc_status=$(grep -m1 "^> Status:" "${task_doc}" 2>/dev/null || echo "")
+    echo "  doc status: ${doc_status}"
+    if echo "${doc_status}" | grep -q "Completed"; then
+      score=$((score + 1))
+    else
+      gaps+=("task doc status not marked Completed")
+    fi
+  else
+    gaps+=("task doc file not found")
+  fi
+
+  # B6: Cross-repo child issues resolved
+  echo "--- Child Issues ---"
+  if [[ -f "${review_file}" ]]; then
+    local child_issues
+    child_issues=$(python3 -c "
+import json
+d = json.load(open('${review_file}'))
+issues = d.get('links',{}).get('issues',[])
+print(len(issues))
+" 2>/dev/null || echo "0")
+    echo "  child issues: ${child_issues}"
+    [[ "${child_issues}" -gt 0 ]] && score=$((score + 1))
+  fi
+
+  # B7: No dirty task branch
+  echo "--- Branch Hygiene ---"
+  local target_repo
+  target_repo=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}':
+            print(t.get('repo','livemask-docs'))
+" 2>/dev/null || echo "livemask-docs")
+  local repo_dir="${LIVEMASK_ROOT}/${target_repo}"
+  if [[ -d "${repo_dir}/.git" ]]; then
+    cd "${repo_dir}"
+    local dirty
+    dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    [[ "${dirty}" -eq 0 ]] && score=$((score + 1)) || gaps+=("${target_repo} has ${dirty} dirty file(s)")
+  fi
+
+  # Summary
+  echo ""
+  echo "=== CLOSURE SCORE: ${score}/${max_score} ==="
+  if [[ "${score}" -ge 10 ]]; then
+    echo "VERDICT: READY FOR CLOSURE"
+  elif [[ "${score}" -ge 7 ]]; then
+    echo "VERDICT: NEEDS EVIDENCE (${#gaps[@]} gaps)"
+    for g in "${gaps[@]}"; do echo "  - $g"; done
+  else
+    echo "VERDICT: NOT READY (${#gaps[@]} gaps)"
+    for g in "${gaps[@]}"; do echo "  - $g"; done
+  fi
+}
+
+# ── Phase C: Impact Analysis (trace change effects across repos) ─────────────
+pm_impact_analysis() {
+  local target_task="${1:-}"
+  if [[ -z "${target_task}" ]]; then
+    echo "Usage: bash scripts/claude-loop-pm-backup.sh --impact-analysis <TASK-ID>"
+    return 1
+  fi
+
+  header "Phase C: Impact Analysis — ${target_task}"
+
+  # C1: Determine target repo and changed files
+  local target_repo
+  target_repo=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}':
+            print(t.get('repo','?'))
+" 2>/dev/null || echo "?")
+
+  echo "--- Source: ${target_repo} ---"
+
+  # C2: Get the actual changed files from the task branch
+  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
+  local changed_files=""
+  if [[ -f "${task_doc}" ]]; then
+    # Extract repo-specific files from task doc
+    changed_files=$(grep -E "^- \`[^)]+\.[a-z]+\`" "${task_doc}" 2>/dev/null | head -20 | sed 's/^- `//' | sed 's/`.*$//' || echo "")
+  fi
+
+  # C3: For each changed file, trace impact
+  echo ""
+  echo "--- Impact Map ---"
+  echo ""
+  echo "  Source repo: ${target_repo}"
+  echo "  Task: ${target_task}"
+  echo ""
+
+  # Map target repo to affected repos
+  case "${target_repo}" in
+    livemask-backend)
+      echo "  [${target_repo}] Backend API change → affects:"
+      echo "    → livemask-admin: check if admin pages use changed endpoints"
+      echo "    → livemask-app: check if Flutter models match new API shape"
+      echo "    → livemask-nodeagent: check if agent's HTTP client is affected"
+      echo "    → livemask-job-service: check if executor calls changed endpoint"
+      echo "    → livemask-website: check if public API consumer is affected"
+      echo "    → livemask-ci-cd: check smoke tests cover changed paths"
+      echo "    → livemask-docs: check swagger/OpenAPI is updated"
+      ;;
+    livemask-admin)
+      echo "  [${target_repo}] Admin UI change → affects:"
+      echo "    → livemask-ci-cd: check admin-specific smoke tests"
+      ;;
+    livemask-app)
+      echo "  [${target_repo}] App change → affects:"
+      echo "    → livemask-ci-cd: check app build CI and release smoke"
+      ;;
+    livemask-nodeagent)
+      echo "  [${target_repo}] NodeAgent change → affects:"
+      echo "    → livemask-backend: check internal API compatibility"
+      echo "    → livemask-ci-cd: check nodeagent smoke tests"
+      ;;
+    livemask-job-service)
+      echo "  [${target_repo}] Job Service change → affects:"
+      echo "    → livemask-backend: check executor endpoint compatibility"
+      echo "    → livemask-ci-cd: check job service smoke tests"
+      ;;
+    livemask-docs)
+      echo "  [${target_repo}] Docs change → affects:"
+      echo "    → All repos: contract/rule changes may require implementation updates"
+      ;;
+  esac
+
+  # C4: Search for actual references across repos
+  echo ""
+  echo "--- Cross-Repo Reference Search ---"
+  if [[ -n "${changed_files}" ]]; then
+    for f in ${changed_files}; do
+      # Extract symbols from changed file names
+      local symbol
+      symbol=$(basename "${f}" | sed 's/\.[a-z]*$//' | sed 's/_test$//')
+      [[ -z "${symbol}" || "${symbol}" == "main" ]] && continue
+      echo "  searching for '${symbol}' references..."
+      for rd in "${LIVEMASK_ROOT}"/livemask-*/; do
+        local rn
+        rn=$(basename "${rd}")
+        [[ "${rn}" == "${target_repo}" || "${rn}" == "livemask-docs" || "${rn}" == "livemask-ci-cd" ]] && continue
+        [[ ! -d "${rd}" ]] && continue
+        local hits
+        hits=$(grep -rl "${symbol}" "${rd}" --include="*.go" --include="*.ts" --include="*.tsx" --include="*.dart" 2>/dev/null | head -5)
+        if [[ -n "${hits}" ]]; then
+          echo "    ${rn}:"
+          echo "${hits}" | while read -r h; do
+            echo "      $(echo "${h}" | sed "s|${rd}||")"
+          done
+        fi
+      done
+    done
+  fi
+
+  # C5: Unlock chain
+  echo ""
+  echo "--- Unlock Chain ---"
+  python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+target = '${target_task}'
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if target in (t.get('blocked_by') or []):
+            print(f\"  BLOCKS: {t['task_id']} ({t.get('repo','?')}, {t.get('status','?')})\")
+        if target in (t.get('unlocks') or []):
+            print(f\"  UNLOCKS: {t['task_id']} ({t.get('repo','?')}, {t.get('status','?')})\")
+" 2>/dev/null
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 main() {
   echo -e "${BOLD}${CYAN}"
@@ -634,6 +1061,22 @@ main() {
   echo "║  Claude PM Backup Mode — Codex Role Stand-in    ║"
   echo "╚══════════════════════════════════════════════════╝"
   echo -e "${RESET}"
+
+  # Deep analysis modes (take a TASK-ID argument)
+  case "${MODE}" in
+    --deep-review)
+      pm_deep_review "${2:-}"
+      return $?
+      ;;
+    --closure-audit)
+      pm_closure_audit "${2:-}"
+      return $?
+      ;;
+    --impact-analysis)
+      pm_impact_analysis "${2:-}"
+      return $?
+      ;;
+  esac
 
   load_context_cache
   incremental_sync
