@@ -485,15 +485,22 @@ print('auto-reconciled: ${tid} → ${target_status}')
     echo ""
   done <<< "${pm2_conflicts}"
 
-  # Push auto-reconciled changes immediately (evidence-based, safe to auto-push)
+  # Push auto-reconciled changes via proper task branch flow
   if [[ -n "${AUTO_FIXED_TASKS:-}" ]]; then
     cd "${DOCS_DIR}"
     local auto_count; auto_count=$(echo "${AUTO_FIXED_TASKS}" | wc -w | tr -d ' ')
+    local auto_br="task/pm-auto-reconcile-$(date -u +%Y%m%d-%H%M%S)"
+    git checkout -b "${auto_br}" 2>/dev/null
     git add docs/development/task-state-ledger.json docs/development/tasks/ 2>/dev/null
-    git commit -m "pm-auto-reconcile: sync ${auto_count} task(s) to completed (dev merge evidence)
+    git commit -m "docs: auto-reconcile ${auto_count} task(s) to completed (dev merge evidence)
 $(echo ${AUTO_FIXED_TASKS} | tr ' ' '\n' | sed 's/^/  - /')
 Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
-    git push origin dev 2>/dev/null && OK "auto-pushed ${auto_count} reconciled task(s) to origin/dev" || WARN "auto-push failed — changes saved locally, will retry next cycle"
+    # Merge to dev via dev-merge-guard
+    if bash "${CI_CD_DIR}/scripts/dev-merge-guard.sh" "${auto_br}" 2>/dev/null; then
+      git push origin dev 2>/dev/null && OK "auto-pushed ${auto_count} reconciled task(s) via task branch flow" || WARN "push failed"
+    else
+      WARN "dev-merge-guard failed — changes saved on ${auto_br}, manual merge needed"
+    fi
     AUTO_FIXED_TASKS=""
   fi
 
