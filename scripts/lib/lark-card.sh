@@ -85,16 +85,15 @@ body = {
     "card": card
 }
 
-# Sign
-ts_epoch = str(int(time.time()))
-sign_str = f"{ts_epoch}\n{secret}"
-sign = base64.b64encode(hmac.new(secret.encode(), sign_str.encode(), hashlib.sha256).digest()).decode()
-
 data = json.dumps(body).encode()
 req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json"})
 try:
     resp = urllib.request.urlopen(req, timeout=5)
-    print(f"  [lark] sent: {title} ({resp.status})")
+    result = json.loads(resp.read().decode())
+    if result.get("code") == 0:
+        print(f"  [lark] sent: {title}")
+    else:
+        print(f"  [lark] error: {result.get('msg','?')} (code={result.get('code','?')})")
 except Exception as e:
     print(f"  [lark] send failed: {e}")
 PY
@@ -144,14 +143,15 @@ card = {
 }
 
 body = {"msg_type": "interactive", "card": card}
-ts_epoch = str(int(time.time()))
-sign_str = f"{ts_epoch}\n{secret}"
-sign = base64.b64encode(hmac.new(secret.encode(), sign_str.encode(), hashlib.sha256).digest()).decode()
 data = json.dumps(body).encode()
 req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json"})
 try:
     resp = urllib.request.urlopen(req, timeout=5)
-    print(f"  [lark] batch sent: {title} ({resp.status})")
+    result = json.loads(resp.read().decode())
+    if result.get("code") == 0:
+        print(f"  [lark] batch sent: {title}")
+    else:
+        print(f"  [lark] batch error: {result.get('msg','?')}")
 except Exception as e:
     print(f"  [lark] batch failed: {e}")
 PY
