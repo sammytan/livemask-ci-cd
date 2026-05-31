@@ -14,10 +14,12 @@ LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
 DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
 CI_CD_DIR="${LIVEMASK_ROOT}/livemask-ci-cd"
 ROLE_CACHE_DIR="${LIVEMASK_ROOT}/.claude/role-cache"
+FINDINGS_FILE="${ROLE_CACHE_DIR}/findings.jsonl"
 ROLE="${1:-pm}"
 ARG2="${2:-}"
 
 mkdir -p "${ROLE_CACHE_DIR}"
+: > "${FINDINGS_FILE}"  # truncate for this cycle
 
 BOLD="\033[1m" GREEN="\033[32m" YELLOW="\033[33m" RED="\033[31m" CYAN="\033[36m" RESET="\033[0m"
 H1() { echo -e "\n${BOLD}${CYAN}═══ $* ═══${RESET}"; }
@@ -26,6 +28,58 @@ WARN(){ echo -e "  ${YELLOW}[WARN]${RESET} $*"; }
 ACT() { echo -e "  ${RED}[ACT]${RESET} $*"; }
 ASK() { echo -e "  ${BOLD}[REASON]${RESET} $*"; }
 NEXT(){ echo -e "  ${BOLD}${GREEN}[NEXT]${RESET} $*"; }
+
+# ── Shared: findings recording (machine-readable output) ──────────────────────
+# Severity: blocker (must fix) > warning (should fix) > info (FYI)
+record_finding() {
+  local role="$1" severity="$2" task_id="${3:-}" check="$4" finding="$5" next="${6:-}" cmd="${7:-}"
+  python3 -c "
+import json, pathlib
+f = {
+    'role': '${role}',
+    'severity': '${severity}',
+    'task_id': '${task_id}',
+    'check': '${check}',
+    'finding': '${finding}',
+    'next': '${next}',
+    'cmd': '${cmd}'
+}
+with open('${FINDINGS_FILE}', 'a') as fh:
+    fh.write(json.dumps(f, ensure_ascii=False) + '\n')
+" 2>/dev/null
+}
+
+print_top_actions() {
+  local count="${1:-3}"
+  echo ""
+  echo -e "${BOLD}${CYAN}═══ Top-${count} Priority Actions ═══${RESET}"
+
+  if [[ ! -f "${FINDINGS_FILE}" ]] || [[ $(wc -l < "${FINDINGS_FILE}" 2>/dev/null || echo "0") -eq 0 ]]; then
+    OK "no findings — system appears healthy"
+    return 0
+  fi
+
+  # Sort by severity (blocker > warning > info), print top N
+  python3 -c "
+import json
+severity_order = {'blocker': 0, 'warning': 1, 'info': 2}
+findings = []
+with open('${FINDINGS_FILE}') as f:
+    for line in f:
+        line = line.strip()
+        if line: findings.append(json.loads(line))
+findings.sort(key=lambda f: severity_order.get(f.get('severity','info'), 3))
+
+for i, f in enumerate(findings[:${count}]):
+    sev = f['severity'].upper()
+    print(f\"{i+1}. [{sev}] [{f['role']}-{f['check']}] {f['finding']}\")
+    if f.get('task_id'): print(f\"   task: {f['task_id']}\")
+    if f.get('next'): print(f\"   next: {f['next']}\")
+    if f.get('cmd'): print(f\"   cmd: {f['cmd']}\")
+    print()
+print(f'Total findings: {len(findings)} (${FINDINGS_FILE})')
+" 2>/dev/null
+}
 
 # ── Shared: sync and cache ──────────────────────────────────────────────────
 sync_all() {
@@ -157,6 +211,7 @@ print(f\"      review: state={d.get('state')} actor={d.get('next_required_actor'
           blocked)
             ASK "→ ${blocker} itself is blocked — this is a CHAIN. Find the root blocker and fix it first."
             NEXT "Action: trace dependency chain to root → fix root → chain unblocks"
+            record_finding "pm" "warning" "${tid}" "PM-1" "chain-blocked: ${blocker} is itself blocked" "trace to root blocker" ""
             ;;
           partial|evidence_missing)
             ASK "→ ${blocker} is ${b_status} — implementation exists but evidence is missing. WHY is evidence missing?"
@@ -164,12 +219,14 @@ print(f\"      review: state={d.get('state')} actor={d.get('next_required_actor'
             ASK "   IF nobody collected it → create evidence-collection subtask"
             ASK "   IF evidence exists but not recorded → update ledger/task doc"
             NEXT "Action: diagnose evidence gap, create collection task or update records"
+            record_finding "pm" "warning" "${tid}" "PM-1" "blocker ${blocker} is ${b_status} — evidence missing" "diagnose evidence gap for ${blocker}" "bash scripts/claude-loop-role-engine.sh --closure-audit ${blocker}"
             ;;
           ready|in_progress|implementing)
             ASK "→ ${blocker} is ${b_status} — it's in progress but not done. WHY is it stalled?"
             ASK "   IF Claude picked it up and stalled → check agent-state.json for recovery"
             ASK "   IF never dispatched → check dispatch queue priority"
             NEXT "Action: check agent state, bump dispatch priority, or create reminder SAP"
+            record_finding "pm" "info" "${tid}" "PM-1" "blocker ${blocker} is ${b_status} — stalled" "check agent-state.json or bump dispatch" ""
             ;;
           *)
             ASK "→ ${blocker} status=${b_status} — unexpected state. Investigate."
@@ -884,7 +941,11 @@ run_all() {
   role_product
   role_tech
   role_qa
+  print_top_actions 5
   push_changes "role-engine: full cycle $(date -u +%Y-%m-%dT%H:%MZ)"
+  echo ""
+  echo -e "  Machine-readable findings: ${FINDINGS_FILE}"
+  echo "  Consume: tail -1 ~/.claude/role-cache/findings.jsonl | python3 -m json.tool"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
