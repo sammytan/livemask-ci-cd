@@ -1386,16 +1386,19 @@ if not blocks and not unlocks: print('  (no dependency chain recorded in ledger)
 # ══════════════════════════════════════════════════════════════════════════════
 
 run_all() {
-  role_pm
-  role_product
-  role_tech
-  role_qa
+  role_pm || true
+  role_product || true
+  role_tech || true
+  role_qa || true
+
+  set +e  # don't let Lark or print failures kill the cycle
   print_top_actions 5
 
   # Lark: aggregate summary card
   local total_findings; total_findings=$(wc -l < "${FINDINGS_FILE}" 2>/dev/null | tr -d ' ' || echo "0")
   lark_card_batch "Role Engine All — $(date -u +%H:%M)Z" \
     "[{\"emoji\":\"📋\",\"label\":\"PM\",\"value\":\"${total_findings} findings\"},{\"emoji\":\"🎯\",\"label\":\"Product\",\"value\":\"MVP audit done\"},{\"emoji\":\"🔧\",\"label\":\"Tech\",\"value\":\"Swagger/DB/API check\"},{\"emoji\":\"🔍\",\"label\":\"QA\",\"value\":\"Evidence + bugs verified\"}]" 2>/dev/null || true
+  set -e
 
   push_changes "role-engine: full cycle $(date -u +%Y-%m-%dT%H:%MZ)"
   echo ""
