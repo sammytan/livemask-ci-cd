@@ -23,9 +23,105 @@ AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 LEASE_FILE="${DOCS_DIR}/docs/development/leases/task-leases.json"
 DISPATCH_DIR="${DOCS_DIR}/docs/development/dispatch-packets"
 AUTO_FIXED_TASKS=""
+AUTO_CREATED_TASKS=""
 PM_SKIP=0
 ROLE="${1:-pm}"
 ARG2="${2:-}"
+
+# ── Auto-create task from finding (therapeutic layer) ────────────────────────
+# Only creates if finding is actionable AND no existing task covers it.
+# Returns task_id if created, empty string if skipped.
+auto_create_task() {
+  local role="$1" check="$2" title="$3" priority="${4:-P1}" repo="${5:-livemask-ci-cd}" body="${6:-}"
+  local slug; slug=$(echo "${title}" | tr 'A-Z ' 'a-z-' | sed 's/[^a-z0-9-]//g' | cut -c1-50)
+  local tid="TASK-AUTO-${slug}"
+
+  # Check if task already exists in ledger
+  local exists; exists=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if '${tid}' in t.get('task_id',''): print('yes'); break
+" 2>/dev/null || echo "")
+  [[ -n "${exists}" ]] && { echo "    (task ${tid} already exists — skip)"; return 0; }
+
+  # Check for duplicate in this cycle
+  if echo "${AUTO_CREATED_TASKS}" | grep -q "${tid}"; then
+    return 0
+  fi
+
+  # Create task doc
+  local task_doc="${DOCS_DIR}/docs/development/tasks/${tid}.md"
+  cat > "${task_doc}" << TASKDOC
+# ${tid} — Auto-created from role-engine
+
+> Priority: ${priority}
+> Repo: ${repo}
+> Status: ready
+> Source: ${role}/${check}
+
+## Problem
+${title}
+
+## Context
+${body}
+
+## Acceptance Criteria
+- [ ] Issue resolved per role-engine finding
+- [ ] Evidence recorded in task doc and ledger
+
+## Validation
+- check-docs.sh PASS
+- git diff --check PASS
+TASKDOC
+
+  # Add to ledger
+  python3 -c "
+import json, pathlib
+ledger_path = pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json')
+ledger = json.loads(ledger_path.read_text())
+# Find or create auto-tasks module
+module = None
+for m in ledger.get('modules',[]):
+    if m.get('module_id') == 'auto-tasks':
+        module = m; break
+if not module:
+    module = {'module_id': 'auto-tasks', 'overall_status': 'partial', 'owner_repo': '${repo}', 'tasks': []}
+    ledger['modules'].append(module)
+module['tasks'].append({
+    'task_id': '${tid}',
+    'repo': '${repo}',
+    'module_id': 'auto-tasks',
+    'status': 'ready',
+    'priority': '${priority}',
+    'task_doc': 'docs/development/tasks/${tid}.md',
+    'notes': 'Auto-created: ${role}/${check} — ${title}'
+})
+ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False))
+" 2>/dev/null
+
+  # Create dispatch packet
+  local dp_file="${DOCS_DIR}/docs/development/dispatch-packets/${tid}.json"
+  python3 -c "
+import json, pathlib
+dp = {
+    'schema_version': 1,
+    'task_id': '${tid}',
+    'repo': '${repo}',
+    'priority': '${priority}',
+    'assigned_to': 'claude',
+    'assigned_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+    'assigned_by': 'Claude-Role-Engine',
+    'reason': '${role}/${check}: ${title}'
+}
+pathlib.Path('${dp_file}').write_text(json.dumps(dp, indent=2))
+" 2>/dev/null
+
+  AUTO_CREATED_TASKS="${AUTO_CREATED_TASKS} ${tid}"
+  echo -e "  ${GREEN}[CREATE]${RESET} ${tid}: ${title}"
+  return 0
+}
 
 mkdir -p "${ROLE_CACHE_DIR}"
 : > "${FINDINGS_FILE}"  # truncate for this cycle
@@ -586,6 +682,25 @@ Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
     AUTO_FIXED_TASKS=""
   fi
 
+  # Push auto-created tasks
+  if [[ -n "${AUTO_CREATED_TASKS:-}" ]]; then
+    local created_count; created_count=$(echo "${AUTO_CREATED_TASKS}" | wc -w | tr -d ' ')
+    cd "${DOCS_DIR}"
+    git add docs/development/tasks/ docs/development/dispatch-packets/ docs/development/task-state-ledger.json 2>/dev/null
+    if git diff --cached --quiet 2>/dev/null; then
+      :
+    else
+      local cr_br="task/auto-create-$(date -u +%Y%m%d-%H%M%S)"
+      git checkout -b "${cr_br}" 2>/dev/null
+      git commit -m "role-engine: auto-create ${created_count} task(s) from findings
+$(echo ${AUTO_CREATED_TASKS} | tr ' ' '\n' | sed 's/^/  - /')
+Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
+      git checkout dev 2>/dev/null && git merge "${cr_br}" --no-edit 2>/dev/null && git push origin dev 2>/dev/null && \
+        OK "auto-created + pushed ${created_count} task(s) to origin/dev" || WARN "auto-create push failed — saved on ${cr_br}"
+    fi
+    AUTO_CREATED_TASKS=""
+  fi
+
   [[ "${conflicts_found}" -eq 0 ]] && OK "all doc/ledger statuses consistent"
 
   # ── PM-3: WHY is the dispatch queue empty? What's the bottleneck? ──────────
@@ -623,6 +738,7 @@ for s,c in statuses.most_common(8): print(f'{s}: {c}')
 
       NEXT "Action: if MVP complete → mark milestone. If tasks stuck → diagnose each stuck status. If no tasks → trigger Product decomposition."
       record_finding "pm" "warning" "" "PM-3" "dispatch queue empty (candidate_count=0)" "run product decomposition or audit backlog" "bash scripts/claude-loop-role-engine.sh product"
+      auto_create_task "pm" "PM-3" "Decompose Ready contracts into implementation tasks (planner queue empty, no blocked tasks)" "P0" "livemask-docs" "Planner queue is empty with no blocked tasks blocking dispatch. Read contract-index.md for Ready contracts without implementation tasks, generate TASK stubs, create dispatch packets."
     else
       ASK "→ ${blocked} tasks are blocked — the queue IS the blocker list. Resolve root blockers to unblock candidates."
       NEXT "Action: run PM-1 blocker analysis for each blocked task"
@@ -839,6 +955,7 @@ role_tech() {
       ASK "   IF route is internal only (/internal/) → may not need public Swagger, document internally"
       NEXT "Action: create TASK-BACKEND-SWAGGER-SYNC listing exact missing routes"
       record_finding "tech" "warning" "TASK-BACKEND-SWAGGER-SYNC" "TECH-1" "${diff} routes may be missing from Swagger" "create swagger sync task" ""
+      auto_create_task "tech" "TECH-1" "Sync Swagger/OpenAPI specs: ${diff} routes missing documentation" "P1" "livemask-backend" "${diff} API routes in main.go have no corresponding Swagger/OpenAPI path definition. List exact missing routes, add to internal/swagger/ YAML files, verify with OpenAPI validator."
     else
       OK "Swagger coverage matches or exceeds routes"
     fi
@@ -1057,6 +1174,9 @@ for m in ledger.get('modules',[]):
       ASK "→ Smoke coverage for '${area}': ${smoke_coverage} scripts — IF 0, high regression risk"
 
       NEXT "Action: IF no smoke coverage → create targeted smoke test. IF churn is feature work → prioritize completion. IF bug fixes → verify each fix has a regression test."
+      if [[ "${change_count}" -ge 5 && "${smoke_coverage}" -lt 5 ]]; then
+        auto_create_task "qa" "QA-3" "Add regression smoke tests for high-churn area: ${area} (${change_count} changes in 7 days, ${smoke_coverage} smoke scripts)" "P1" "livemask-ci-cd" "The ${area} module has ${change_count} changes in 7 days with only ${smoke_coverage} smoke scripts covering it. High regression risk. Create targeted smoke tests for the changed paths."
+      fi
       echo ""
     fi
   done
