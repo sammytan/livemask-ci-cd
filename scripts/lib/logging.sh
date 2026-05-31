@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Shared logging library for all Claude loop scripts.
-# Source this at script start to enable file + memory logging.
+# Shared logging + workspace guard for all Claude loop scripts.
+# Source this at script start for file logging AND automatic dev-branch cleanup.
 #
 # Usage:
 #   source "${SCRIPT_DIR}/lib/logging.sh"
-#   log_setup "script-name"   # Call once at start
+#   log_setup "script-name"
 #
 # Output:
 #   /tmp/claude/<name>-<timestamp>.log   Full run log
 #   /tmp/claude/latest-<name>.log        Symlink to latest
-#   /tmp/claude/last-run.json            Summary metrics (memory)
+#   /tmp/claude/last-run-<name>.json     Summary metrics
+#
+# Workspace guard (automatic via EXIT trap):
+#   - Switches livemask-docs AND livemask-ci-cd back to dev
+#   - Stashes uncommitted changes if stuck on task branch
+#   - Deletes leftover pm-auto-reconcile/auto-create/role/fallback-sap branches
 #
 # Debug: tail -f /tmp/claude/latest-*.log
 set -euo pipefail
@@ -17,10 +22,33 @@ set -euo pipefail
 LOG_DIR="/tmp/claude"
 LOG_MAX_FILES=20
 
+# ── Workspace guard: NEVER leave repos on a non-dev branch ──────────────────
+_workspace_guard() {
+  local exit_code=$?
+  for repo in "/Users/sammytan/Developer/LiveMask/livemask-docs" \
+              "/Users/sammytan/Developer/LiveMask/livemask-ci-cd"; do
+    [[ ! -d "${repo}/.git" ]] && continue
+    cd "${repo}" 2>/dev/null || continue
+    local br; br=$(git branch --show-current 2>/dev/null || echo "")
+    if [[ -n "${br}" && "${br}" != "dev" ]]; then
+      git stash --include-untracked -m "auto-stash: workspace guard $(date -u +%Y%m%d-%H%M%S)" 2>/dev/null || true
+      git checkout dev 2>/dev/null || true
+    fi
+  done
+  for repo in "/Users/sammytan/Developer/LiveMask/livemask-docs" \
+              "/Users/sammytan/Developer/LiveMask/livemask-ci-cd"; do
+    [[ ! -d "${repo}/.git" ]] && continue
+    cd "${repo}" 2>/dev/null || continue
+    for br in $(git branch --list "task/pm-auto-*" "task/auto-create-*" "task/role-*" "task/fallback-sap-*" --format='%(refname:short)' 2>/dev/null); do
+      git branch -D "${br}" 2>/dev/null || true
+    done
+  done
+  exit ${exit_code}
+}
+
 log_setup() {
   local name="${1:-unknown}"
-  local ts
-  ts=$(date -u +%Y%m%d-%H%M%S)
+  local ts; ts=$(date -u +%Y%m%d-%H%M%S)
   mkdir -p "${LOG_DIR}"
 
   LOG_FILE="${LOG_DIR}/${name}-${ts}.log"
@@ -28,16 +56,12 @@ log_setup() {
   LOG_SUMMARY="${LOG_DIR}/last-run-${name}.json"
   LOG_START_EPOCH=$(date +%s)
 
-  # Rotate: keep only last N log files per script
   local count; count=$(find "${LOG_DIR}" -maxdepth 1 -name "${name}-*.log" 2>/dev/null | wc -l | tr -d ' ')
   if [[ "${count}" -gt "${LOG_MAX_FILES}" ]]; then
     find "${LOG_DIR}" -maxdepth 1 -name "${name}-*.log" -type f | sort | head -n "-${LOG_MAX_FILES}" | xargs rm -f 2>/dev/null || true
   fi
 
-  # Start logging: tee output to both stdout and log file
   exec > >(tee -a "${LOG_FILE}") 2>&1
-
-  # Update symlink to latest
   ln -sf "$(basename "${LOG_FILE}")" "${LOG_LATEST}" 2>/dev/null || true
 
   echo "═══════════════════════════════════════════"
@@ -46,6 +70,9 @@ log_setup() {
   echo "  LATEST: ${LOG_LATEST}"
   echo "═══════════════════════════════════════════"
   echo ""
+
+  # EVERY script that calls log_setup gets automatic workspace cleanup on exit
+  trap _workspace_guard EXIT
 }
 
 # Write structured summary for quick memory lookup
