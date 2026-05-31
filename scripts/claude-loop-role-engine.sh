@@ -10,6 +10,10 @@
 # Usage: bash scripts/claude-loop-role-engine.sh <role> [TASK-ID]
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
+log_setup "role-engine" 2>/dev/null || true
+
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
 DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
 CI_CD_DIR="${LIVEMASK_ROOT}/livemask-ci-cd"
@@ -1204,3 +1208,6 @@ case "${ROLE}" in
     exit 1
     ;;
 esac
+
+log_summary "role-engine" 0 "${ROLE}" 2>/dev/null || true
+log_debug_info 2>/dev/null || true

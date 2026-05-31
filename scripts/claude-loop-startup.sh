@@ -9,6 +9,10 @@
 #   bash scripts/claude-loop-startup.sh --quick      # skip preflight, use cached state
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
+log_setup "startup" 2>/dev/null || true
+
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
 DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
 CI_CD_DIR="${LIVEMASK_ROOT}/livemask-ci-cd"
@@ -742,6 +746,7 @@ case "${MODE}" in
       echo ""
       echo -e "${BOLD}${RED}BLOCKED — resolve the blockers listed above before accepting tasks.${RESET}"
       decision_summary 2 "${review_signal_count}" "${reconcile_signal_count}"
+      log_summary "startup" 2 "BLOCKED" 2>/dev/null || true
       exit 2
     fi
 
@@ -757,6 +762,7 @@ case "${MODE}" in
 
     # If IDLE (exit 0), enter active polling instead of passive sleep
     if [[ "${preflight_rc}" -eq 0 ]]; then
+      log_summary "startup" 0 "IDLE → active poll" 2>/dev/null || true
       active_idle_poll 120 30 || {
         # active_idle_poll returned 1 = work detected during polling
         echo ""

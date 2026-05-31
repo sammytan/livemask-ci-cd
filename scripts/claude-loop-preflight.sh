@@ -4,6 +4,10 @@
 # Output: BLOCKED | WORK_AVAILABLE | IDLE with explicit reasons.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
+log_setup "preflight" 2>/dev/null || true
+
 DOCS_DIR="/Users/sammytan/Developer/LiveMask/livemask-docs"
 CI_CD_DIR="/Users/sammytan/Developer/LiveMask/livemask-ci-cd"
 SUPERVISOR_CLI="${DOCS_DIR}/scripts/supervisor-action.py"
@@ -523,6 +527,13 @@ if [[ "${FINDINGS_WARNING}" -gt 0 ]]; then
   echo "SIGNAL: FINDINGS_WARNING=${FINDINGS_WARNING} warning(s) from role-engine — review recommended"
 fi
 
-[[ "${BLOCKED}" -eq 1 ]] && exit 2
-[[ "${WORK}" -eq 1 ]] && exit 1
-exit 0
+if [[ "${BLOCKED}" -eq 1 ]]; then
+  log_summary "preflight" 2 "BLOCKED" 2>/dev/null || true
+  exit 2
+elif [[ "${WORK}" -eq 1 ]]; then
+  log_summary "preflight" 1 "WORK_AVAILABLE" 2>/dev/null || true
+  exit 1
+else
+  log_summary "preflight" 0 "IDLE" 2>/dev/null || true
+  exit 0
+fi
