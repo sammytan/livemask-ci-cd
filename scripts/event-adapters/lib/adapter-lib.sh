@@ -40,11 +40,17 @@ EVENT_CACHE_DIR="${HOME}/.claude/event-cache"
 EVENT_CACHE_FILE="${EVENT_CACHE_DIR}/event-cache.jsonl"
 EVENT_SCHEMA="${CI_CD_DIR}/scripts/schemas/event-schema-v1.json"
 CURSOR_SCHEMA="${CI_CD_DIR}/scripts/schemas/adapter-cursors-schema-v1.json"
+ROLE_CACHE_DIR="${HOME}/.claude/role-cache"
+FINDINGS_FILE="${ROLE_CACHE_DIR}/findings.jsonl"
+PM_LEASE_FILE="${ROLE_CACHE_DIR}/pm-lease.json"
 DOCS_REPO_DIR="${LIVEMASK_ROOT}/livemask-docs"
 DOCS_DIR="${DOCS_REPO_DIR}/docs"
 DOCS_DEVELOPMENT_DIR="${DOCS_DIR}/development"
 TASK_LEDGER_FILE="${DOCS_DEVELOPMENT_DIR}/task-state-ledger.json"
 REVIEW_CONTRACTS_DIR="${DOCS_DEVELOPMENT_DIR}/review-contracts"
+DISPATCH_PACKETS_DIR="${DOCS_DEVELOPMENT_DIR}/dispatch-packets"
+SUPERVISOR_ACTIONS_DIR="${DOCS_DEVELOPMENT_DIR}/supervisor-actions"
+AGENT_STATE_FILE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 
 # Project knowledge sources are authoritative search roots for Claude loop,
 # event pollers, and preflight helpers. The local event cache can point to work,
@@ -158,7 +164,7 @@ adapter_print_repo_doc_hints() {
 }
 
 # ── adapter_search_knowledge ──────────────────────────────────────────────────
-# Search LiveMask docs and knowledge files with rg.
+# Search LiveMask docs and knowledge files. Uses rg with grep fallback.
 # Usage: adapter_search_knowledge "TASK-ID|route|table|keyword" [limit]
 adapter_search_knowledge() {
   local query="${1:-}"
@@ -170,17 +176,121 @@ adapter_search_knowledge() {
   fi
   adapter_require_docs_repo || return 1
 
-  if ! command -v rg &>/dev/null; then
-    echo "ERROR: rg is required for project knowledge search" >&2
-    return 1
+  if command -v rg &>/dev/null; then
+    rg -n --hidden --glob '!**/.git/**' --glob '!**/.DS_Store' \
+      --glob '!docs/development/completion-reports/*.json' \
+      --glob '!docs/development/automation-runs/*.md' \
+      "${query}" \
+      "${DOCS_DIR}" \
+      | head -n "${limit}" || true
+  else
+    # Fallback to grep when rg is not available
+    grep -rn --include="*.md" --include="*.json" --include="*.yml" \
+      --exclude-dir=".git" --exclude-dir="completion-reports" --exclude-dir="automation-runs" \
+      "${query}" "${DOCS_DIR}" 2>/dev/null | head -n "${limit}" || true
+  fi
+}
+
+# ── adapter_findings_search ───────────────────────────────────────────────────
+# Search role-engine findings for a specific task or keyword.
+# Usage: adapter_findings_search [TASK-ID|keyword] [limit]
+adapter_findings_search() {
+  local query="${1:-}"
+  local limit="${2:-20}"
+
+  if [[ ! -f "${FINDINGS_FILE}" ]]; then
+    echo '{"findings":[],"note":"findings.jsonl not found — role-engine may not have run yet"}'
+    return 0
   fi
 
-  rg -n --hidden --glob '!**/.git/**' --glob '!**/.DS_Store' \
-    --glob '!docs/development/completion-reports/*.json' \
-    --glob '!docs/development/automation-runs/*.md' \
-    "${query}" \
-    "${DOCS_DIR}" \
-    | head -n "${limit}" || true
+  if [[ -z "${query}" ]]; then
+    # Show all findings, most recent first
+    python3 -c "
+import json
+findings = []
+with open('${FINDINGS_FILE}') as f:
+    for line in f:
+        line = line.strip()
+        if line: findings.append(json.loads(line))
+findings.reverse()
+print(json.dumps({'findings': findings[:${limit}], 'total': len(findings)}, ensure_ascii=False, indent=2))
+" 2>/dev/null
+  else
+    # Filter by task_id or keyword in finding/next
+    python3 -c "
+import json
+findings = []
+with open('${FINDINGS_FILE}') as f:
+    for line in f:
+        line = line.strip()
+        if not line: continue
+        d = json.loads(line)
+        tid = d.get('task_id','')
+        finding = d.get('finding','')
+        nxt = d.get('next','')
+        combined = f\"{tid} {finding} {nxt}\"
+        if '${query}' in combined:
+            findings.append(d)
+findings.reverse()
+print(json.dumps({'findings': findings[:${limit}], 'matching': len(findings)}, ensure_ascii=False, indent=2))
+" 2>/dev/null
+  fi
+}
+
+# ── adapter_pm_status ─────────────────────────────────────────────────────────
+# Show PM mutual exclusion status — who is running, what phase, when.
+# Usage: adapter_pm_status
+adapter_pm_status() {
+  if [[ ! -f "${PM_LEASE_FILE}" ]]; then
+    echo '{"pm_lease":"none","note":"No PM cycle running. Both Claude and Codex are free to start."}'
+    return 0
+  fi
+
+  python3 - "${PM_LEASE_FILE}" <<'PY'
+import json, time, sys
+d = json.load(open(sys.argv[1]))
+age_sec = time.time() - d.get('started_at_epoch', 0)
+age_min = age_sec / 60
+ttl_min = 15
+d['age_min'] = round(age_min, 1)
+d['status'] = 'active' if age_min < ttl_min else 'stale'
+agent = d.get('agent','?')
+phase = d.get('phase','?')
+if age_min < ttl_min:
+    d['note'] = f"Agent '{agent}' is running PM (phase={phase}, {round(age_min,1)}min ago)."
+else:
+    d['note'] = f"Lease is stale ({round(age_min,1)}min > {ttl_min}min TTL). Safe to take over."
+print(json.dumps(d, indent=2, ensure_ascii=False))
+PY
+}
+
+# ── adapter_dispatch_status ──────────────────────────────────────────────────
+# Show dispatch packet status for a task or all packets.
+# Usage: adapter_dispatch_status [TASK-ID]
+adapter_dispatch_status() {
+  local tid="${1:-}"
+  if [[ ! -d "${DISPATCH_PACKETS_DIR}" ]]; then
+    echo '{"packets":[],"note":"dispatch-packets dir not found"}'
+    return 0
+  fi
+
+  if [[ -n "${tid}" ]]; then
+    local dp="${DISPATCH_PACKETS_DIR}/${tid}.json"
+    if [[ -f "${dp}" ]]; then
+      python3 -c "import json; print(json.dumps(json.load(open('${dp}')), indent=2, ensure_ascii=False))" 2>/dev/null
+    else
+      echo "{\"task_id\":\"${tid}\",\"packet\":\"none\"}"
+    fi
+  else
+    python3 -c "
+import json, pathlib, os
+packets = []
+for f in sorted(pathlib.Path('${DISPATCH_PACKETS_DIR}').glob('TASK-*.json')):
+    d = json.loads(f.read_text())
+    packets.append({'task_id': d.get('task_id'), 'assigned_to': d.get('assigned_to'), 'assigned_at': d.get('assigned_at'), 'repo': d.get('repo')})
+print(json.dumps({'packets': packets, 'total': len(packets)}, indent=2, ensure_ascii=False))
+" 2>/dev/null
+  fi
 }
 
 # ── adapter_knowledge_inventory ───────────────────────────────────────────────
@@ -369,9 +479,51 @@ review_contract = f"docs/development/review-contracts/{task_id}-review.json"
 completion_glob = f"docs/development/completion-reports/*{task_id}*.json"
 sap_glob = "docs/development/supervisor-actions/**/*"
 
+# Include role-engine findings, dispatch packet, SAPs, PM lease
+findings = []
+findings_file_path = pathlib.Path.home() / ".claude/role-cache/findings.jsonl"
+if findings_file_path.exists():
+    try:
+        with open(findings_file_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                d = json.loads(line)
+                if task_id in (d.get('task_id','') or ''):
+                    findings.append({"severity": d.get('severity'), "check": d.get('check'), "finding": d.get('finding'), "next": d.get('next'), "cmd": d.get('cmd')})
+    except: pass
+
+dispatch = None
+dp_file = docs_repo / f"docs/development/dispatch-packets/{task_id}.json"
+if dp_file.exists():
+    try: dispatch = json.loads(dp_file.read_text())
+    except: pass
+
+saps = []
+sap_dir = docs_repo / "docs/development/supervisor-actions"
+if sap_dir.exists():
+    for sf in sorted(sap_dir.glob("SAP-*.json")):
+        try:
+            sap = json.loads(sf.read_text())
+            if task_id in (sap.get('task_id','') or ''):
+                saps.append({"file": sf.name, "action": sap.get('action'), "status": sap.get('status'), "severity": sap.get('severity')})
+        except: pass
+
+pm_lease = None
+lease_file = pathlib.Path.home() / ".claude/role-cache/pm-lease.json"
+if lease_file.exists():
+    try: pm_lease = json.loads(lease_file.read_text())
+    except: pass
+
 bundle = {
     "task_id": task_id,
     "knowledge_contract": "Read these docs before implementation, before review submission, and before closure. GitHub comments are evidence only; ledger and task docs remain authoritative.",
+    "system_state": {
+        "role_engine_findings": findings,
+        "dispatch_packet": dispatch,
+        "active_saps": saps,
+        "pm_lease": pm_lease,
+    },
     "required_first_reads": [
         maybe("docs/development/AI_PROJECT_STATUS_ONBOARDING.md", "first-read project status"),
         maybe("docs/development/CLAUDE_LOOP_SUPERVISOR_RULES.md", "current Claude loop hard rules"),
@@ -779,9 +931,22 @@ Commands:
   task-ledger-entry <TASK-ID>
       Print the exact task-state-ledger entry for a TASK-* as JSON.
 
+  findings-search [TASK-ID|keyword] [limit]
+      Search role-engine findings.jsonl. With TASK-ID, filters to that task.
+      With keyword, filters finding/next text. No arg shows all recent.
+
+  pm-status
+      Show PM mutual exclusion lease status — which agent is running PM,
+      what phase, how long ago, whether the lease is active or stale.
+
+  dispatch-status [TASK-ID]
+      Show dispatch packet status. No arg lists all packets. With TASK-ID
+      shows that specific packet.
+
   task-context <TASK-ID>
       Print a JSON context bundle: required first reads, domain roots,
-      evidence roots, recommended searches, and closure reminders.
+      evidence roots, recommended searches, closure reminders, system
+      state (findings, dispatch packet, SAPs, PM lease).
 USAGE
 }
 
@@ -807,6 +972,15 @@ adapter_main() {
       ;;
     task-context)
       adapter_task_context_bundle "$@"
+      ;;
+    findings-search)
+      adapter_findings_search "$@"
+      ;;
+    pm-status)
+      adapter_pm_status
+      ;;
+    dispatch-status)
+      adapter_dispatch_status "$@"
       ;;
     ""|-h|--help|help)
       adapter_usage
