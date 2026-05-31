@@ -598,6 +598,38 @@ print(f\"      review: state={d.get('state')} actor={d.get('next_required_actor'
         echo ""
       done
     done <<< "${pm1_list}"
+
+    # ── Auto-unblock: if ALL blockers are completed, mark task as ready ──────
+    if [[ -n "${blocked_tasks}" ]]; then
+      python3 -c "
+import json, pathlib
+p = pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json')
+d = json.loads(p.read_text())
+done = {'completed','completed_with_skip'}
+unblocked = 0
+for m in d.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('status') != 'blocked': continue
+        blockers = t.get('blocked_by',[])
+        if not blockers: continue
+        # Check if ALL blockers are completed
+        all_done = True
+        for b in blockers:
+            b_done = False
+            for m2 in d.get('modules',[]):
+                for t2 in m2.get('tasks',[]):
+                    if t2.get('task_id') == b and t2.get('status') in done:
+                        b_done = True; break
+            if not b_done: all_done = False; break
+        if all_done:
+            t['status'] = 'ready'
+            t['blocked_by'] = []
+            t['notes'] = t.get('notes','') + ' [auto-unblocked: all blockers completed]'
+            print(f'AUTO-UNBLOCK: {t[\"task_id\"]} blocked→ready')
+            unblocked += 1
+if unblocked: p.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+" 2>/dev/null
+    fi
   fi
 
   # ── PM-2: WHY are there doc/ledger conflicts? ──────────────────────────────
@@ -1518,6 +1550,33 @@ run_all() {
 
   set +e  # don't let Lark or print failures kill the cycle
   print_top_actions 5
+
+  # ── Auto-execute top actionable findings (close the DETECT→ACT loop) ──────
+  echo ""
+  echo -e "${BOLD}${CYAN}═══ Auto-Execute Top Actions ═══${RESET}"
+  local executed=0
+  while IFS=$'\t' read -r sev tid cmd; do
+    [[ -z "${cmd}" ]] && continue
+    [[ "${cmd}" == "bash "* || "${cmd}" == "python3 "* ]] || continue
+    echo "  executing: ${cmd}"
+    eval "${cmd}" 2>&1 | head -5 || true
+    executed=$((executed + 1))
+    [[ "${executed}" -ge 3 ]] && break
+  done < <(python3 -c "
+import json
+severity_order = {'blocker': 0, 'warning': 1, 'info': 2}
+findings = []
+with open('${FINDINGS_FILE}') as f:
+    for line in f:
+        line = line.strip()
+        if line: findings.append(json.loads(line))
+findings.sort(key=lambda f: severity_order.get(f.get('severity','info'), 3))
+for f in findings[:10]:
+    cmd = f.get('cmd','')
+    if cmd and (cmd.startswith('bash ') or cmd.startswith('python3 ')):
+        print(f['severity'] + '\t' + f.get('task_id','') + '\t' + cmd)
+" 2>/dev/null)
+  [[ "${executed}" -gt 0 ]] && echo "  auto-executed ${executed} action(s)" || echo "  no auto-executable actions found"
 
   # Lark: aggregate summary card
   local total_findings; total_findings=$(wc -l < "${FINDINGS_FILE}" 2>/dev/null | tr -d ' ' || echo "0")
