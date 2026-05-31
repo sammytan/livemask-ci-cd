@@ -198,6 +198,20 @@ pathlib.Path('${dp_file}').write_text(json.dumps(dp, indent=2))
 
   AUTO_CREATED_TASKS="${AUTO_CREATED_TASKS} ${tid}"
   echo -e "  ${GREEN}[CREATE]${RESET} ${tid}: ${title}"
+
+  # Immediately commit + push so task is available to planner (don't wait for end of cycle)
+  cd "${DOCS_DIR}"
+  local cr_br="task/auto-create-$(date -u +%Y%m%d-%H%M%S)"
+  local saved_br; saved_br=$(git branch --show-current 2>/dev/null || echo "dev")
+  git checkout -b "${cr_br}" 2>/dev/null
+  git add docs/development/tasks/ docs/development/dispatch-packets/ docs/development/task-state-ledger.json 2>/dev/null
+  if git diff --cached --quiet 2>/dev/null; then
+    git checkout "${saved_br}" 2>/dev/null || true
+  else
+    git commit -m "role-engine: auto-create ${tid}" 2>/dev/null
+    git checkout dev 2>/dev/null && git merge "${cr_br}" --no-edit 2>/dev/null && git push origin dev 2>/dev/null
+    git checkout "${saved_br}" 2>/dev/null || git checkout dev 2>/dev/null
+  fi
   return 0
 }
 
@@ -848,7 +862,35 @@ for s,c in statuses.most_common(8): print(f'{s}: {c}')
 
       NEXT "Action: if MVP complete → mark milestone. If tasks stuck → diagnose each stuck status. If no tasks → trigger Product decomposition."
       record_finding "pm" "warning" "" "PM-3" "dispatch queue empty (candidate_count=0)" "run product decomposition or audit backlog" "bash scripts/claude-loop-role-engine.sh product"
-      auto_create_task "pm" "PM-3" "Decompose Ready contracts into implementation tasks (planner queue empty, no blocked tasks)" "P0" "livemask-docs" "Planner queue is empty with no blocked tasks blocking dispatch. Read contract-index.md for Ready contracts without implementation tasks, generate TASK stubs, create dispatch packets."
+      ACT "PM-3: queue empty, self-decomposing Ready contracts into real tasks..."
+      # Directly create implementation tasks from the first Ready contract gap
+      local gap_info; gap_info=$(python3 -c "
+import json, re
+from pathlib import Path
+docs = Path('${DOCS_DIR}')
+ledger = json.loads((docs / 'docs/development/task-state-ledger.json').read_text())
+all_tasks = set()
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id'): all_tasks.add(t['task_id'])
+ci = docs / 'docs/contracts/contract-index.md'
+if ci.exists():
+    for line in ci.read_text().split('\n'):
+        if '| Ready |' in line and 'TASK-' in line:
+            match = re.search(r'TASK-[A-Z0-9-]+', line)
+            if match and match.group(0) not in all_tasks:
+                parts = [p.strip() for p in line.split('|')]
+                domain = parts[0].strip()[:80] if len(parts) > 0 else 'unknown'
+                repos = parts[4].strip()[:80] if len(parts) > 4 else 'livemask-backend'
+                print(f'{domain}|{repos}|{match.group(0)}')
+                break
+" 2>/dev/null)
+      if [[ -n "${gap_info}" ]]; then
+        local gap_domain gap_repo gap_task
+        gap_domain="${gap_info%%|*}"; gap_info="${gap_info#*|}"
+        gap_repo="${gap_info%%|*}"; gap_task="${gap_info##*|}"
+        auto_create_task "pm" "PM-3" "Implement ${gap_domain} (contract Ready, no implementation task)" "P1" "${gap_repo}" "Ready contract '${gap_domain}' has no implementation task in ledger. Parent task: ${gap_task}. Create implementation across affected repos: ${gap_repo}."
+      fi
     else
       ASK "→ ${blocked} tasks are blocked — the queue IS the blocker list. Resolve root blockers to unblock candidates."
       NEXT "Action: run PM-1 blocker analysis for each blocked task"
