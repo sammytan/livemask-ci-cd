@@ -22,6 +22,9 @@ AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 ADAPTER_LIB="${CI_CD_DIR}/scripts/event-adapters/lib/adapter-lib.sh"
 
 MODE="${1:-full}"
+COORDINATION_DECISION="proceed"
+COORDINATION_NEXT_ACTOR="claude-startup"
+COORDINATION_STATUS_FILE="/tmp/claude/startup-coordination-status.json"
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 BOLD="\033[1m"
@@ -54,7 +57,7 @@ info()    { echo -e "  ${CYAN}[..]${RESET} $*"; }
 collect_startup_intelligence() {
   local task_id="$1" repo="$2"
   local out="${HOME}/.claude/role-cache/startup-context-${task_id}.json"
-  mkdir -p "${HOME}/.claude/role-cache"
+  mkdir -p "$(dirname "${COORDINATION_STATUS_FILE}")"
 
   TASK_ID="${task_id}" TASK_REPO="${repo}" DOCS_DIR="${DOCS_DIR}" CI_CD_DIR="${CI_CD_DIR}" ADAPTER_LIB="${ADAPTER_LIB}" \
     python3 - "${out}" <<'PY' 2>/dev/null || return 1
@@ -84,6 +87,7 @@ ledger_entry = load_json_text(run(["bash", adapter, "task-ledger-entry", task_id
 dispatch_status = load_json_text(run(["bash", adapter, "dispatch-status", task_id]), {})
 findings = load_json_text(run(["bash", adapter, "findings-search", task_id]), {"findings": []})
 pm_status = load_json_text(run(["bash", adapter, "pm-status"]), {})
+coordination_status = load_json_text(run(["bash", adapter, "coordination-status", "claude-startup", task_id]), {})
 task_memory = load_json_text(run(["bash", adapter, "memory-search", task_id, "8"]), {"matches": []})
 repo_memory = load_json_text(run(["bash", adapter, "memory-search", repo, "5"]), {"matches": []})
 planner = load_json_text(run(["python3", str(docs / "scripts/plan-next-tasks.py"), "--format", "json"]), {})
@@ -153,6 +157,7 @@ summary = {
     "dispatch_status": dispatch_status,
     "role_engine_findings": findings.get("findings", []),
     "pm_status": pm_status,
+    "coordination_status": coordination_status,
     "local_memory": {
         "task_matches": task_memory.get("matches", []),
         "repo_matches": repo_memory.get("matches", []),
@@ -176,6 +181,8 @@ print(json.dumps({
     "issue": issue_context.get("url", issue),
     "knowledge_terms": terms,
     "findings": len(summary["role_engine_findings"]),
+    "coordination_decision": coordination_status.get("decision", "unknown"),
+    "coordination_next_actor": coordination_status.get("next_required_actor", "unknown"),
     "knowledge_hit_groups": len(knowledge_hits),
     "memory_matches": len(summary["local_memory"]["task_matches"]) + len(summary["local_memory"]["repo_matches"]),
     "planner_rows": len(summary["related_planner_rows"]),
@@ -211,6 +218,58 @@ read_agent_state() {
   echo "  target_repo:  ${TARGET_REPO:-none}"
   echo "  task_branch:  ${TASK_BRANCH:-none}"
   echo "  last_action:  ${LAST_ACTION:-none}"
+}
+
+# ── Step 0.5: Coordination guard ─────────────────────────────────────────────
+coordination_preflight() {
+  header "Step 0.5: Role Coordination"
+
+  mkdir -p "${HOME}/.claude/role-cache"
+  local task_arg=""
+  [[ "${CURRENT_TASK:-null}" != "null" ]] && task_arg="${CURRENT_TASK}"
+
+  if ! bash "${ADAPTER_LIB}" coordination-status "claude-startup" "${task_arg}" > "${COORDINATION_STATUS_FILE}" 2>/dev/null; then
+    warn "coordination-status unavailable — continuing with legacy guards"
+    COORDINATION_DECISION="proceed"
+    COORDINATION_NEXT_ACTOR="claude-startup"
+    return 0
+  fi
+
+  read -r COORDINATION_DECISION COORDINATION_NEXT_ACTOR <<< "$(python3 - "${COORDINATION_STATUS_FILE}" <<'PY' 2>/dev/null || echo "proceed claude-startup"
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d.get("decision", "proceed"), d.get("next_required_actor", "claude-startup"))
+PY
+)"
+
+  python3 - "${COORDINATION_STATUS_FILE}" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"  decision:     {d.get('decision','?')}")
+print(f"  next_actor:   {d.get('next_required_actor','?')}")
+for reason in d.get("reasons", [])[:5]:
+    print(f"  reason:       {reason}")
+blocked = d.get("blocked_actions") or []
+if blocked:
+    print("  blocked:      " + "; ".join(blocked[:5]))
+print(f"  status_json:  {sys.argv[1]}")
+PY
+
+  case "${COORDINATION_DECISION}" in
+    wait|handoff_wait)
+      warn "coordination says ${COORDINATION_DECISION}; startup will not accept or mutate tasks this cycle"
+      log_summary "startup" 0 "WAIT coordination next=${COORDINATION_NEXT_ACTOR}" 2>/dev/null || true
+      return 20
+      ;;
+    read_only)
+      warn "coordination says read_only; startup may inspect context but must not accept new work"
+      return 0
+      ;;
+    *)
+      ok "coordination clear"
+      return 0
+      ;;
+  esac
 }
 
 # ── Step 1: Recovery check ────────────────────────────────────────────────────
@@ -552,6 +611,7 @@ print(f\"  knowledge terms:   {', '.join(d.get('knowledge_terms', [])[:8]) or 'n
 print(f\"  docs hit groups:   {d.get('knowledge_hit_groups', 0)}\")
 print(f\"  memory matches:    {d.get('memory_matches', 0)}\")
 print(f\"  role findings:     {d.get('findings', 0)}\")
+print(f\"  coordination:      {d.get('coordination_decision', 'unknown')} next={d.get('coordination_next_actor', 'unknown')}\")
 print(f\"  planner rows:      {d.get('planner_rows', 0)}\")
 " 2>/dev/null || echo "  ${intelligence_summary}"
     local intelligence_path
@@ -561,7 +621,7 @@ print(f\"  planner rows:      {d.get('planner_rows', 0)}\")
     memory_summary=$(echo "${intelligence_summary}" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-print(f\"startup context: issue={d.get('issue') or 'none'} docs_hit_groups={d.get('knowledge_hit_groups',0)} memory_matches={d.get('memory_matches',0)} findings={d.get('findings',0)} planner_rows={d.get('planner_rows',0)} terms={','.join(d.get('knowledge_terms',[])[:6])}\")
+print(f\"startup context: issue={d.get('issue') or 'none'} coordination={d.get('coordination_decision','unknown')} next={d.get('coordination_next_actor','unknown')} docs_hit_groups={d.get('knowledge_hit_groups',0)} memory_matches={d.get('memory_matches',0)} findings={d.get('findings',0)} planner_rows={d.get('planner_rows',0)} terms={','.join(d.get('knowledge_terms',[])[:6])}\")
 " 2>/dev/null || echo "startup context generated")
     bash "${ADAPTER_LIB}" memory-add "startup" "${task_id}" "${repo}" "${memory_summary}" "${intelligence_path}" >/dev/null 2>&1 || true
     echo "  memory:          bash ${ADAPTER_LIB} memory-search ${task_id}"
@@ -579,6 +639,11 @@ fallback_task_decomposition() {
   echo ""
   echo -e "  ${BOLD}${YELLOW}Queue is empty. Running autonomous task decomposition...${RESET}"
   echo ""
+
+  if [[ "${COORDINATION_DECISION:-proceed}" != "proceed" ]]; then
+    warn "coordination ${COORDINATION_DECISION}: skip fallback task decomposition; next actor=${COORDINATION_NEXT_ACTOR}"
+    return 0
+  fi
 
   local created=0
 
@@ -901,11 +966,13 @@ decision_summary() {
 case "${MODE}" in
   --recovery)
     read_agent_state
+    coordination_preflight || exit 0
     run_recovery
     decision_summary 0 0 0
     ;;
   --quick)
     read_agent_state
+    coordination_preflight || exit 0
     if [[ "${AGENT_PHASE}" != "idle" && "${AGENT_PHASE}" != "idle_monitor" ]]; then
       run_recovery
       decision_summary 0 0 0
@@ -915,12 +982,24 @@ case "${MODE}" in
     ;;
   *)
     read_agent_state
+    coordination_preflight || exit 0
 
     # If in a non-idle phase, go straight to recovery
     if [[ "${AGENT_PHASE}" != "idle" && "${AGENT_PHASE}" != "idle_monitor" ]]; then
       run_recovery
       decision_summary
       exit $?
+    fi
+
+    if [[ "${COORDINATION_DECISION}" == "read_only" ]]; then
+      echo ""
+      echo -e "${BOLD}${YELLOW}READ_ONLY — coordination guard allows inspection only; no task acceptance this cycle.${RESET}"
+      build_task_context || warn "context build returned non-zero"
+      check_fixed_channels || true
+      check_event_cache || true
+      decision_summary 0 0 0
+      log_summary "startup" 0 "READ_ONLY coordination next=${COORDINATION_NEXT_ACTOR}" 2>/dev/null || true
+      exit 0
     fi
 
     # Full startup: recovery + health pulse + preflight + context + channels + cache

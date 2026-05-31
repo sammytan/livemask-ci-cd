@@ -1006,6 +1006,150 @@ print(json.dumps({
 PY
 }
 
+# ── adapter_coordination_status ────────────────────────────────────────────────
+# Resolve Claude/Codex role conflicts without blocking unrelated progress.
+adapter_coordination_status() {
+  local actor="${1:-claude-startup}"
+  local task_id="${2:-}"
+  adapter_require_docs_repo || return 1
+
+  python3 - "${actor}" "${task_id}" "${PM_LEASE_FILE}" "${AGENT_STATE_FILE}" "${DOCS_REPO_DIR}" "${TASK_LEDGER_FILE}" "${DISPATCH_PACKETS_DIR}" "${DOCS_DEVELOPMENT_DIR}/leases/task-leases.json" <<'PY'
+import json
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+actor, task_id, pm_lease_file, agent_state_file, docs_repo, ledger_file, dispatch_dir, task_lease_file = sys.argv[1:9]
+pm_lease_path = Path(pm_lease_file)
+agent_state_path = Path(agent_state_file)
+docs_repo = Path(docs_repo)
+dispatch_dir = Path(dispatch_dir)
+
+def read_json(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+def git_status(repo):
+    try:
+        out = subprocess.check_output(["git", "-C", str(repo), "status", "--short", "--branch"], text=True, stderr=subprocess.DEVNULL)
+        return out.strip()
+    except Exception:
+        return ""
+
+pm = read_json(pm_lease_path, {})
+now = time.time()
+pm_age_min = None
+pm_status = "none"
+if pm:
+    pm_age_min = round((now - float(pm.get("started_at_epoch", 0) or 0)) / 60, 1)
+    if pm.get("phase") == "complete":
+        pm_status = "complete"
+    elif pm_age_min <= 15:
+        pm_status = "active"
+    else:
+        pm_status = "stale"
+
+agent = read_json(agent_state_path, {})
+current_task = agent.get("current_task") or {}
+claude_task = current_task.get("task_id")
+claude_phase = agent.get("phase") or current_task.get("phase")
+claude_repo = current_task.get("target_repo") or ""
+
+leases = read_json(task_lease_file, {"leases": []})
+active_leases = [l for l in leases.get("leases", []) if l.get("status") == "active"]
+active_task_leases = [l for l in active_leases if not task_id or l.get("task_id") == task_id]
+
+packets = []
+if dispatch_dir.exists():
+    for path in sorted(dispatch_dir.glob("TASK-*.json")):
+        pkt = read_json(path, {})
+        if pkt:
+            packets.append(pkt)
+task_packets = [p for p in packets if not task_id or p.get("task_id") == task_id]
+
+status = git_status(docs_repo)
+dirty_docs = any(line and not line.startswith("## ") for line in status.splitlines())
+
+reasons = []
+decision = "proceed"
+next_actor = actor
+safe_actions = ["read docs", "read ledger", "read GitHub issues/comments", "run adapter knowledge/search commands"]
+blocked_actions = []
+
+if pm_status == "active" and pm.get("agent") and pm.get("agent") != actor:
+    decision = "wait"
+    next_actor = pm.get("agent")
+    reasons.append(f"PM lease active by {pm.get('agent')} ({pm_age_min}min)")
+    blocked_actions.extend(["write control-plane artifacts", "dispatch/decompose", "merge docs/dev"])
+elif dirty_docs and actor.startswith("claude"):
+    decision = "read_only"
+    next_actor = "codex"
+    reasons.append("livemask-docs worktree is dirty; Codex owns control-plane reconciliation")
+    blocked_actions.extend(["edit ledger", "edit TASK docs", "edit dispatch packets", "edit SAPs"])
+
+if claude_phase not in (None, "", "idle", "idle_monitor") and claude_task:
+    if not task_id or task_id == claude_task:
+        if actor.startswith("codex"):
+            decision = "read_only" if decision == "proceed" else decision
+            next_actor = "claude"
+            reasons.append(f"Claude already working {claude_task} phase={claude_phase}")
+            blocked_actions.append("re-dispatch same TASK-ID")
+    elif actor.startswith("claude") and task_id and task_id != claude_task:
+        decision = "wait" if decision == "proceed" else decision
+        next_actor = "claude"
+        reasons.append(f"Claude agent-state has active task {claude_task}; do not switch to {task_id}")
+        blocked_actions.append("accept unrelated task")
+
+if active_task_leases:
+    owners = ",".join(sorted({l.get("lease_owner", "?") for l in active_task_leases}))
+    if actor.startswith("codex"):
+        decision = "read_only" if decision == "proceed" else decision
+        next_actor = "claude"
+        reasons.append(f"active task lease exists for {task_id or 'task'} owner={owners}")
+        blocked_actions.append("duplicate dispatch/decompose")
+
+if task_packets:
+    assigned = ",".join(sorted({p.get("assigned_to", "?") for p in task_packets}))
+    if actor.startswith("codex") and "claude" in assigned:
+        decision = "handoff_wait" if decision == "proceed" else decision
+        next_actor = "claude"
+        reasons.append(f"active dispatch packet already assigns {task_id or 'task'} to Claude")
+        blocked_actions.append("duplicate WAIT_TASK comment")
+
+if not reasons:
+    reasons.append("no role conflict detected")
+
+print(json.dumps({
+    "schema_version": 1,
+    "actor": actor,
+    "task_id": task_id,
+    "decision": decision,
+    "next_required_actor": next_actor,
+    "reasons": reasons,
+    "safe_actions": sorted(set(safe_actions)),
+    "blocked_actions": sorted(set(blocked_actions)),
+    "pm_lease": {"status": pm_status, "agent": pm.get("agent"), "phase": pm.get("phase"), "age_min": pm_age_min},
+    "claude_agent": {"phase": claude_phase, "task_id": claude_task, "repo": claude_repo},
+    "active_task_leases": active_task_leases,
+    "dispatch_packets": task_packets,
+    "docs_status": status,
+    "authority_order": [
+        "PM lease",
+        "active SAP/review contract",
+        "dispatch packet",
+        "task lease",
+        "agent-state",
+        "planner",
+        "role-engine findings",
+        "local memory",
+    ],
+}, ensure_ascii=False, indent=2))
+PY
+}
+
 adapter_usage() {
   cat <<'USAGE'
 Usage:
@@ -1048,6 +1192,11 @@ Commands:
 
   memory-search [TASK-ID|repo|keyword] [limit]
       Search local project memory hints from prior startup/role-engine cycles.
+
+  coordination-status [actor] [TASK-ID]
+      Resolve Claude/Codex role conflicts from PM lease, agent-state,
+      task leases, dispatch packets, and docs worktree state. Prints JSON
+      with decision=proceed|read_only|wait|handoff_wait and next actor.
 
   task-context <TASK-ID>
       Print a JSON context bundle: required first reads, domain roots,
@@ -1093,6 +1242,9 @@ adapter_main() {
       ;;
     memory-search)
       adapter_memory_search "$@"
+      ;;
+    coordination-status)
+      adapter_coordination_status "$@"
       ;;
     ""|-h|--help|help)
       adapter_usage

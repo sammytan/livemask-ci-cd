@@ -28,6 +28,9 @@ ADAPTER_LIB="${CI_CD_DIR}/scripts/event-adapters/lib/adapter-lib.sh"
 AUTO_FIXED_TASKS=""
 AUTO_CREATED_TASKS=""
 PM_SKIP=0
+COORDINATION_DECISION="proceed"
+COORDINATION_NEXT_ACTOR="claude-role-engine"
+COORDINATION_STATUS_FILE="/tmp/claude/role-engine-coordination-status.json"
 ROLE="${1:-pm}"
 ARG2="${2:-}"
 
@@ -83,6 +86,15 @@ auto_create_task() {
   tid="${tid%-}"  # strip trailing dash
   tid=$(echo "${tid}" | cut -c1-60)  # hard cap at 60 chars
 
+  if [[ "${COORDINATION_DECISION:-proceed}" != "proceed" ]]; then
+    echo "    (coordination ${COORDINATION_DECISION}: skip creating ${tid}; next actor=${COORDINATION_NEXT_ACTOR})"
+    record_finding "${role}" "info" "${tid}" "${check}" \
+      "auto-create skipped by coordination guard (${COORDINATION_DECISION})" \
+      "wait for ${COORDINATION_NEXT_ACTOR} or rerun after active work completes" \
+      "bash ${ADAPTER_LIB} coordination-status claude-role-engine ${tid}"
+    return 0
+  fi
+
   # Check if task already exists in ledger
   local exists; exists=$(python3 -c "
 import json
@@ -99,7 +111,7 @@ for m in ledger.get('modules',[]):
   fi
 
   local intelligence_file="${ROLE_CACHE_DIR}/task-intelligence-${tid}.json"
-  mkdir -p "${ROLE_CACHE_DIR}"
+  mkdir -p "${ROLE_CACHE_DIR}" "$(dirname "${COORDINATION_STATUS_FILE}")"
   TASK_ID="${tid}" TASK_TITLE="${title}" TASK_BODY="${body}" TASK_REPO="${repo}" \
     TASK_ROLE="${role}" TASK_CHECK="${check}" DOCS_DIR="${DOCS_DIR}" python3 - "${intelligence_file}" <<'PY' 2>/dev/null || true
 import json, os, re, subprocess, sys
@@ -772,6 +784,44 @@ preflight_context() {
   sync_all
   echo "  docs_head: ${NOW_SHA}"
 
+  mkdir -p "${ROLE_CACHE_DIR}"
+  local coord_task="${ARG2:-}"
+  if ! bash "${ADAPTER_LIB}" coordination-status "${pm_agent}" "${coord_task}" > "${COORDINATION_STATUS_FILE}" 2>/dev/null; then
+    WARN "coordination-status unavailable — continuing with PM lease only"
+    COORDINATION_DECISION="proceed"
+    COORDINATION_NEXT_ACTOR="claude-role-engine"
+  else
+    read -r COORDINATION_DECISION COORDINATION_NEXT_ACTOR <<< "$(python3 - "${COORDINATION_STATUS_FILE}" <<'PY' 2>/dev/null || echo "proceed claude-role-engine"
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d.get("decision", "proceed"), d.get("next_required_actor", "claude-role-engine"))
+PY
+)"
+    python3 - "${COORDINATION_STATUS_FILE}" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"  coordination: {d.get('decision','?')} next={d.get('next_required_actor','?')}")
+for reason in d.get("reasons", [])[:4]:
+    print(f"    reason: {reason}")
+blocked = d.get("blocked_actions") or []
+if blocked:
+    print("    blocked: " + "; ".join(blocked[:5]))
+PY
+  fi
+
+  if [[ "${COORDINATION_DECISION}" == "wait" || "${COORDINATION_DECISION}" == "handoff_wait" ]]; then
+    record_finding "shared" "info" "${coord_task:-}" "COORDINATION" \
+      "role-engine waiting because coordination=${COORDINATION_DECISION}" \
+      "next actor: ${COORDINATION_NEXT_ACTOR}" \
+      "bash ${ADAPTER_LIB} coordination-status claude-role-engine ${coord_task}"
+    PM_SKIP=1
+    return 1
+  fi
+
+  if [[ "${COORDINATION_DECISION}" == "read_only" ]]; then
+    WARN "coordination read_only — diagnostics may run, but role-engine will not mutate control-plane artifacts"
+  fi
+
   # Claude agent state (read-only)
   if [[ -f "${AGENT_STATE}" ]]; then
     python3 -c "
@@ -886,6 +936,10 @@ pathlib.Path('${ROLE_CACHE_DIR}/${role_name}-cache.json').write_text(json.dumps(
 
 push_changes() {
   local msg="${1:-role-engine cycle}"
+  if [[ "${COORDINATION_DECISION:-proceed}" == "read_only" ]]; then
+    WARN "coordination read_only — not staging, committing, or pushing control-plane artifacts"
+    return 0
+  fi
   cd "${DOCS_DIR}"
   if [[ -z "$(git status --porcelain 2>/dev/null)" ]]; then
     echo "  (no changes to push)"
@@ -1902,6 +1956,11 @@ if not blocks and not unlocks: print('  (no dependency chain recorded in ledger)
 # ── Self-healing: clean up artifacts that the role-engine itself created ─────
 self_heal_clean_state() {
   H1 "Self-Heal: Clean State"
+
+  if [[ "${COORDINATION_DECISION:-proceed}" == "read_only" ]]; then
+    WARN "coordination read_only — skipping self-heal writes"
+    return 0
+  fi
 
   local healed=0
 
