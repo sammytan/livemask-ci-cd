@@ -481,50 +481,21 @@ print(f'  missing_issue: {len(gaps.get(\"missing_issue\",[]))}')
 print(f'  needs_runtime_evidence: {len(gaps.get(\"needs_runtime_evidence\",[]))}')
 " 2>/dev/null || true
 
-  # 3. If there are gaps, create a SAP to notify Codex
+  # 3. §0.2: fallback SAP/inbox artifacts are obsolete. Role-engine PM-3
+  # creates real TASK/ledger/dispatch packets instead of delegating back to Codex.
   if echo "${CONTRACT_COUNT}" | grep -q "GAP:"; then
     echo ""
-    info "creating SAP to notify Codex of new task candidates..."
-    SAP_OUT=$(python3 "${DOCS_DIR}/scripts/supervisor-action.py" create \
-      --task-id "TASK-DOCS-AUTO-DECOMPOSE-FALLBACK" \
-      --action ACTION_NEEDED \
-      --target-agent Codex \
-      --severity warning \
-      --blocks-loop false \
-      --repo livemask-docs \
-      --reason "Claude queue is empty. Auto-decomposition found Ready contracts without implementation tasks. Codex: review and approve task candidates, or Claude will self-dispatch in next cycle." \
-      --supervisor "Claude-Fallback" 2>&1)
-    SAP_ID=$(echo "${SAP_OUT}" | grep -oE 'SAP-ACTION-NEEDED-[0-9]+-[0-9]+' || echo "unknown")
-    echo "  SAP created: ${SAP_ID}"
+    info "Ready gaps detected; §0.2 requires role-engine PM-3 self-decomposition."
+    echo "  No fallback SAP or requirements-inbox file was created."
+    echo "  Next actor: claude-pm-backup role-engine PM-3"
     created=1
   fi
 
-  # 4. Create requirements-inbox candidates for the top gap
-  if echo "${CONTRACT_COUNT}" | grep -q "GAP:"; then
-    info "writing task candidates to requirements-inbox..."
-    TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
-    CANDIDATE_FILE="${DOCS_DIR}/docs/development/requirements-inbox/auto-decompose-${TIMESTAMP}.json"
-
-    python3 -c "
-import json, pathlib
-candidate = {
-    'generated_at': '${TIMESTAMP}',
-    'generated_by': 'Claude-Fallback',
-    'reason': 'Planner queue empty, autonomous decomposition',
-    'action': 'Codex review or Claude self-dispatch on next cycle'
-}
-pathlib.Path('${CANDIDATE_FILE}').write_text(json.dumps(candidate, indent=2))
-print(f'candidate written: ${CANDIDATE_FILE}')
-" 2>/dev/null || true
-    echo "  candidate: ${CANDIDATE_FILE}"
-    created=1
-  fi
-
-  # 5. Summary
+  # 4. Summary
   echo ""
   if [[ "${created}" -eq 1 ]]; then
-    echo -e "  ${BOLD}${YELLOW}Task decomposition complete. New candidates staged for review.${RESET}"
-    echo "  If Codex does not respond within 2 cycles, Claude will self-dispatch."
+    echo -e "  ${BOLD}${YELLOW}Fallback meta-artifact creation skipped by design.${RESET}"
+    echo "  PM-3 must create real task docs, ledger entries, and dispatch packets."
   else
     echo "  No actionable gaps found. System may be fully built or require manual planning."
   fi

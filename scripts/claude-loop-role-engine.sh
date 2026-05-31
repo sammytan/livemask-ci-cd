@@ -182,16 +182,30 @@ ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False))
   # Create dispatch packet
   local dp_file="${DOCS_DIR}/docs/development/dispatch-packets/${tid}.json"
   python3 -c "
-import json, pathlib
+import json, pathlib, datetime
+now = datetime.datetime.now(datetime.timezone.utc)
 dp = {
     'schema_version': 1,
     'task_id': '${tid}',
     'repo': '${repo}',
     'priority': '${priority}',
+    'readiness': 'ready',
     'assigned_to': 'claude',
-    'assigned_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+    'assigned_at': now.strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'expires_at': (now + datetime.timedelta(hours=2)).strftime('%Y-%m-%dT%H:%M:%SZ'),
     'assigned_by': 'Claude-Role-Engine',
-    'reason': '${role}/${check}: ${title}'
+    'reason': '${role}/${check}: ${title}',
+    'why_now': ['${role}/${check}: ${title}'],
+    'context': {
+        'generated_by': 'Claude-Role-Engine',
+        'source': 'role-engine PM-3 auto_create_task',
+        'task_doc': 'docs/development/tasks/${tid}.md'
+    },
+    'acceptance': {
+        'task_doc_exists': 'docs/development/tasks/${tid}.md',
+        'ledger_status': 'dispatched',
+        'evidence_required': True
+    }
 }
 pathlib.Path('${dp_file}').write_text(json.dumps(dp, indent=2))
 " 2>/dev/null
@@ -1559,21 +1573,16 @@ pathlib.Path('${sf}').write_text(json.dumps(d, indent=2))
     done
   fi
 
-  # 3. Clean up untracked SAP/requirement files from previous incomplete cycles
+  # 3. Clean up obsolete untracked fallback artifacts from previous incomplete cycles
   cd "${DOCS_DIR}" 2>/dev/null || true
-  local untracked; untracked=$(git ls-files --others --exclude-standard 2>/dev/null | grep -E "supervisor-actions/SAP|requirements-inbox/" | head -5)
+  local untracked; untracked=$(git ls-files --others --exclude-standard 2>/dev/null | grep -E "supervisor-actions/SAP|requirements-inbox/auto-decompose-" | head -5)
   if [[ -n "${untracked}" ]]; then
     while read -r f; do
       [[ -z "${f}" ]] && continue
-      # Check if this is a transient artifact (not committed)
       if [[ -f "${f}" ]]; then
-        local br; br=$(git branch --show-current 2>/dev/null)
-        if [[ "${br}" == "dev" ]]; then
-          git add "${f}" 2>/dev/null
-          git commit -m "self-heal: commit untracked control-plane artifact $(basename ${f})" 2>/dev/null
-          ACT "SELF-HEAL: committed untracked file: ${f}"
-          healed=$((healed + 1))
-        fi
+        rm -f -- "${f}"
+        ACT "SELF-HEAL: removed obsolete untracked fallback artifact: ${f}"
+        healed=$((healed + 1))
       fi
     done <<< "${untracked}"
   fi
