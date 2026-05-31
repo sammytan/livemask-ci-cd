@@ -11,6 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/lark-card.sh" 2>/dev/null || true
 log_setup "startup" 2>/dev/null || true
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
@@ -759,6 +760,10 @@ case "${MODE}" in
 
     # HARD GATE: if preflight_rc != 0, decision_summary enforces action (never monitoring)
     decision_summary "${preflight_rc}" "${review_signal_count}" "${reconcile_signal_count}"
+
+    # Lark notification
+    lark_card_preflight "${preflight_rc}" "${pf_label:-IDLE}" "${candidate_count:-0}" "${blocked_count:-0}" \
+      "${FINDINGS_WARNING:-0}" "${ci_status:-?}" "${review_signal_count}" "${reconcile_signal_count}" 2>/dev/null || true
 
     # If IDLE (exit 0), enter active polling instead of passive sleep
     if [[ "${preflight_rc}" -eq 0 ]]; then

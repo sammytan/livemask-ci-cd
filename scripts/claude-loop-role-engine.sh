@@ -12,6 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/lark-card.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
@@ -1354,6 +1355,12 @@ run_all() {
   role_tech
   role_qa
   print_top_actions 5
+
+  # Lark: aggregate summary card
+  local total_findings; total_findings=$(wc -l < "${FINDINGS_FILE}" 2>/dev/null | tr -d ' ' || echo "0")
+  lark_card_batch "Role Engine All — $(date -u +%H:%M)Z" \
+    "[{\"emoji\":\"📋\",\"label\":\"PM\",\"value\":\"${total_findings} findings\"},{\"emoji\":\"🎯\",\"label\":\"Product\",\"value\":\"MVP audit done\"},{\"emoji\":\"🔧\",\"label\":\"Tech\",\"value\":\"Swagger/DB/API check\"},{\"emoji\":\"🔍\",\"label\":\"QA\",\"value\":\"Evidence + bugs verified\"}]" 2>/dev/null || true
+
   push_changes "role-engine: full cycle $(date -u +%Y-%m-%dT%H:%MZ)"
   echo ""
   echo -e "  Machine-readable findings: ${FINDINGS_FILE}"
