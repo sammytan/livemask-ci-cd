@@ -65,6 +65,16 @@ if [[ -d "${DISPATCH_DIR}" ]]; then
 fi
 echo "  Dispatch packets: ${DISPATCH_COUNT}"
 if [[ "${DISPATCH_COUNT}" -gt 0 ]]; then
+  LEDGER_TASKS=$(python3 -c "
+import json
+from pathlib import Path
+ledger = json.load(open(Path('${DOCS_DIR}') / 'docs/development/task-state-ledger.json'))
+for module in ledger.get('modules', []):
+    for task in module.get('tasks', []):
+        tid = task.get('task_id')
+        if tid:
+            print(tid)
+" 2>/dev/null || true)
   while IFS= read -r dp; do
     [[ -f "${dp}" ]] || continue
     dp_info=$(python3 -c "
@@ -75,6 +85,10 @@ print('|'.join([d.get('task_id','?'), d.get('repo','?'), d.get('assigned_to','?'
     dp_task="${dp_info%%|*}"
     dp_rest="${dp_info#*|}"
     dp_repo="${dp_rest%%|*}"
+    if ! grep -Fxq "${dp_task}" <<< "${LEDGER_TASKS}"; then
+      reconcile_req "Dispatch packet ${dp_task} has no current ledger task; remove stale packet"
+      continue
+    fi
     work "Dispatch packet: ${dp_task} (${dp_repo})"
   done < <(find "${DISPATCH_DIR}" -maxdepth 1 -type f -name 'TASK-*.json' ! -name '.gitkeep' 2>/dev/null | sort)
 else
@@ -282,29 +296,62 @@ done
 # ── Channel 5: CI/CD status ────────────────────────────────────────────────
 echo "--- Channel 5: CI/CD ---"
 for CI_REPO in "MyAiDevs/livemask-docs" "MyAiDevs/livemask-ci-cd" "MyAiDevs/livemask-backend" "MyAiDevs/livemask-admin"; do
-  CI_RUNS=$(gh run list --repo "${CI_REPO}" --branch dev --limit 3 --json status,conclusion,workflowName,headSha,url 2>&1) || CI_RC=$?
+  CI_HEAD_SHA=$(gh api "repos/${CI_REPO}/branches/dev" --jq '.commit.sha' 2>/dev/null || true)
+  if [[ -z "${CI_HEAD_SHA}" ]]; then
+    block "CI: ${CI_REPO} could not determine dev head"
+    continue
+  fi
+  CI_RUNS=$(gh run list --repo "${CI_REPO}" --branch dev --limit 20 --json status,conclusion,workflowName,headSha,url,createdAt 2>&1) || CI_RC=$?
   CI_RC=${CI_RC:-0}
   if [[ "${CI_RC}" -ne 0 ]]; then
     block "CI: ${CI_REPO} gh run list failed (exit=${CI_RC})"
     continue
   fi
-  FAILURES=$(echo "${CI_RUNS}" | python3 -c "
+  CI_LATEST_BY_WORKFLOW=$(echo "${CI_RUNS}" | python3 -c "
 import json,sys
+head = sys.argv[1]
 runs=json.load(sys.stdin)
+seen=set()
 for r in runs:
-    if r.get('conclusion') in ('failure','cancelled','timed_out'):
-        print(f\"{r['workflowName']}|{r['conclusion']}|{r['url']}|{r.get('headSha','?')[:7]}\")
+    if r.get('headSha') != head:
+        continue
+    wf = r.get('workflowName') or '?'
+    if wf in seen:
+        continue
+    seen.add(wf)
+    print('|'.join([
+        wf,
+        r.get('status') or '',
+        r.get('conclusion') or '',
+        r.get('url') or '',
+        (r.get('headSha') or '?')[:7],
+    ]))
+" "${CI_HEAD_SHA}" 2>/dev/null || echo "")
+  if [[ -z "${CI_LATEST_BY_WORKFLOW}" ]]; then
+    WORK=1
+    REASONS+=("WAIT_CI: ${CI_REPO} has no workflow run yet for ${CI_HEAD_SHA:0:7}")
+    continue
+  fi
+  FAILURES=$(echo "${CI_LATEST_BY_WORKFLOW}" | python3 -c "
+import sys
+for line in sys.stdin:
+    wf,status,conclusion,url,sha = line.rstrip('\n').split('|', 4)
+    if conclusion in ('failure','cancelled','timed_out'):
+        print(f\"{wf}|{conclusion}|{url}|{sha}\")
 " 2>/dev/null || echo "")
-  IN_PROGRESS=$(echo "${CI_RUNS}" | python3 -c "
-import json,sys
-runs=json.load(sys.stdin)
-for r in runs:
-    if r.get('status') in ('queued','in_progress','waiting','pending'):
-        print(f\"{r['workflowName']}|{r['status']}\")
+  IN_PROGRESS=$(echo "${CI_LATEST_BY_WORKFLOW}" | python3 -c "
+import sys
+for line in sys.stdin:
+    wf,status,conclusion,url,sha = line.rstrip('\n').split('|', 4)
+    if status in ('queued','in_progress','waiting','pending'):
+        print(f\"{wf}|{status}\")
 " 2>/dev/null || echo "")
   if [[ -n "${IN_PROGRESS}" ]]; then
     while IFS='|' read -r wf status; do
-      [[ -n "${wf}" ]] && REASONS+=("WAIT_CI: ${CI_REPO} ${wf} is ${status}")
+      if [[ -n "${wf}" ]]; then
+        WORK=1
+        REASONS+=("WAIT_CI: ${CI_REPO} ${wf} is ${status}")
+      fi
     done <<< "${IN_PROGRESS}"
   fi
   if [[ -n "${FAILURES}" ]]; then
