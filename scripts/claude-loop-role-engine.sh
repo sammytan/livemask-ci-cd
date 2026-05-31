@@ -24,6 +24,7 @@ FINDINGS_FILE="${ROLE_CACHE_DIR}/findings.jsonl"
 AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 LEASE_FILE="${DOCS_DIR}/docs/development/leases/task-leases.json"
 DISPATCH_DIR="${DOCS_DIR}/docs/development/dispatch-packets"
+ADAPTER_LIB="${CI_CD_DIR}/scripts/event-adapters/lib/adapter-lib.sh"
 AUTO_FIXED_TASKS=""
 AUTO_CREATED_TASKS=""
 PM_SKIP=0
@@ -247,7 +248,30 @@ record_finding() {
   FINDINGS_FILE="${FINDINGS_FILE}" NOW_SHA_FULL="${NOW_SHA_FULL:-}" python3 - \
     "${role}" "${severity}" "${task_id}" "${check}" "${finding}" "${next}" "${cmd}" <<'PY'
 import json, os, sys
+from datetime import datetime, timezone
 role, severity, task_id, check, finding, nxt, cmd = sys.argv[1:8]
+lower_next = (nxt or "").lower()
+lower_cmd = (cmd or "").lower()
+if "human" in lower_next or severity == "blocker" and not cmd:
+    actor = "human"
+elif "codex" in lower_next:
+    actor = "codex"
+elif cmd or "claude" in lower_next or role in ("pm", "product", "tech", "qa"):
+    actor = "claude"
+else:
+    actor = "claude"
+
+if not cmd:
+    action_type = "manual_review"
+elif "adapter-lib.sh" in lower_cmd or "plan-next-tasks.py" in lower_cmd or "claude-loop-preflight.sh" in lower_cmd:
+    action_type = "diagnose"
+elif "claude-loop-startup.sh" in lower_cmd or "claude-loop-role-engine.sh" in lower_cmd:
+    action_type = "dispatch_or_analyze"
+elif "dev-merge-guard" in lower_cmd or "git " in lower_cmd:
+    action_type = "mutating"
+else:
+    action_type = "manual_review"
+
 entry = {
     "role": role,
     "severity": severity,
@@ -256,12 +280,131 @@ entry = {
     "finding": finding,
     "next": nxt,
     "cmd": cmd,
+    "actor_hint": actor,
+    "action_type": action_type,
+    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "docs_head": os.environ.get("NOW_SHA_FULL", ""),
 }
 path = os.environ["FINDINGS_FILE"]
 with open(path, "a", encoding="utf-8") as fh:
     fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 PY
+}
+
+write_decision_summary() {
+  local out="${ROLE_CACHE_DIR}/decision-summary.json"
+  python3 - "${FINDINGS_FILE}" "${out}" <<'PY'
+import json, sys
+from collections import Counter
+from pathlib import Path
+
+findings_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+severity_order = {"blocker": 0, "warning": 1, "info": 2}
+seen = set()
+findings = []
+if findings_path.exists():
+    for line in findings_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        f = json.loads(line)
+        key = (f.get("role"), f.get("check"), f.get("task_id"), f.get("finding"))
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append(f)
+
+findings.sort(key=lambda f: (
+    severity_order.get(f.get("severity", "info"), 9),
+    f.get("actor_hint", "claude"),
+    f.get("role", ""),
+    f.get("check", ""),
+))
+
+counts = {
+    "by_severity": Counter(f.get("severity", "info") for f in findings),
+    "by_actor": Counter(f.get("actor_hint", "claude") for f in findings),
+    "by_action_type": Counter(f.get("action_type", "manual_review") for f in findings),
+}
+
+if counts["by_severity"].get("blocker", 0):
+    next_actor = "human" if counts["by_actor"].get("human", 0) else "claude"
+    classification = "blocked"
+elif counts["by_actor"].get("codex", 0):
+    next_actor = "codex"
+    classification = "needs_codex_review"
+elif findings:
+    next_actor = "claude"
+    classification = "work_available"
+else:
+    next_actor = "none"
+    classification = "idle"
+
+summary = {
+    "schema_version": 1,
+    "classification": classification,
+    "next_required_actor": next_actor,
+    "counts": {k: dict(v) for k, v in counts.items()},
+    "top_actions": findings[:8],
+}
+out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+
+print(f"  classification: {classification}")
+print(f"  next_required_actor: {next_actor}")
+print(f"  decision_summary: {out_path}")
+for i, f in enumerate(findings[:5], 1):
+    print(f"  {i}. [{f.get('severity','info').upper()}] actor={f.get('actor_hint','claude')} type={f.get('action_type','manual_review')} {f.get('role','?')}-{f.get('check','?')}: {f.get('finding','')}")
+    if f.get("next"):
+        print(f"     next: {f.get('next')}")
+PY
+}
+
+is_safe_diagnostic_cmd() {
+  local cmd="${1:-}"
+  case "${cmd}" in
+    "bash ${ADAPTER_LIB} pm-status"|\
+    "bash ${ADAPTER_LIB} findings-search"*|\
+    "bash ${ADAPTER_LIB} dispatch-status"*|\
+    "bash ${CI_CD_DIR}/scripts/claude-loop-preflight.sh"|\
+    "python3 ${DOCS_DIR}/scripts/plan-next-tasks.py --format json")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+run_safe_diagnostic_cmd() {
+  local cmd="${1:-}" arg=""
+  case "${cmd}" in
+    "bash ${ADAPTER_LIB} pm-status")
+      bash "${ADAPTER_LIB}" pm-status
+      ;;
+    "bash ${ADAPTER_LIB} findings-search")
+      bash "${ADAPTER_LIB}" findings-search
+      ;;
+    "bash ${ADAPTER_LIB} findings-search "*)
+      arg="${cmd#bash ${ADAPTER_LIB} findings-search }"
+      [[ "${arg}" =~ ^[A-Za-z0-9_.:-]+$ ]] || return 1
+      bash "${ADAPTER_LIB}" findings-search "${arg}"
+      ;;
+    "bash ${ADAPTER_LIB} dispatch-status")
+      bash "${ADAPTER_LIB}" dispatch-status
+      ;;
+    "bash ${ADAPTER_LIB} dispatch-status "*)
+      arg="${cmd#bash ${ADAPTER_LIB} dispatch-status }"
+      [[ "${arg}" =~ ^TASK-[A-Z0-9-]+$ ]] || return 1
+      bash "${ADAPTER_LIB}" dispatch-status "${arg}"
+      ;;
+    "bash ${CI_CD_DIR}/scripts/claude-loop-preflight.sh")
+      bash "${CI_CD_DIR}/scripts/claude-loop-preflight.sh"
+      ;;
+    "python3 ${DOCS_DIR}/scripts/plan-next-tasks.py --format json")
+      python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 print_top_actions() {
@@ -1601,17 +1744,24 @@ run_all() {
   set +e  # don't let Lark or print failures kill the cycle
   print_top_actions 5
 
-  # ── Auto-execute top actionable findings (close the DETECT→ACT loop) ──────
+  # ── PM decision layer: diagnose safely, queue mutating actions for humans/PM ──
   echo ""
-  echo -e "${BOLD}${CYAN}═══ Auto-Execute Top Actions ═══${RESET}"
+  echo -e "${BOLD}${CYAN}═══ PM Decision Summary ═══${RESET}"
+  write_decision_summary || true
+
+  echo ""
+  echo -e "${BOLD}${CYAN}═══ Safe Diagnostic Actions ═══${RESET}"
   local executed=0
   while IFS=$'\t' read -r sev tid cmd; do
     [[ -z "${cmd}" ]] && continue
-    [[ "${cmd}" == "bash "* || "${cmd}" == "python3 "* ]] || continue
-    echo "  executing: ${cmd}"
-    eval "${cmd}" 2>&1 | head -5 || true
-    executed=$((executed + 1))
-    [[ "${executed}" -ge 3 ]] && break
+    if is_safe_diagnostic_cmd "${cmd}"; then
+      echo "  diagnosing: ${cmd}"
+      run_safe_diagnostic_cmd "${cmd}" 2>&1 | head -8 || true
+      executed=$((executed + 1))
+      [[ "${executed}" -ge 3 ]] && break
+    else
+      echo "  queued only: ${cmd}"
+    fi
   done < <(python3 -c "
 import json
 severity_order = {'blocker': 0, 'warning': 1, 'info': 2}
@@ -1626,7 +1776,7 @@ for f in findings[:10]:
     if cmd and (cmd.startswith('bash ') or cmd.startswith('python3 ')):
         print(f['severity'] + '\t' + f.get('task_id','') + '\t' + cmd)
 " 2>/dev/null)
-  [[ "${executed}" -gt 0 ]] && echo "  auto-executed ${executed} action(s)" || echo "  no auto-executable actions found"
+  [[ "${executed}" -gt 0 ]] && echo "  ran ${executed} safe diagnostic action(s)" || echo "  no safe diagnostic actions found"
 
   # Lark: aggregate summary card
   local total_findings; total_findings=$(wc -l < "${FINDINGS_FILE}" 2>/dev/null | tr -d ' ' || echo "0")
@@ -1637,7 +1787,8 @@ for f in findings[:10]:
   push_changes "role-engine: full cycle $(date -u +%Y-%m-%dT%H:%MZ)"
   echo ""
   echo -e "  Machine-readable findings: ${FINDINGS_FILE}"
-  echo "  Consume: tail -1 ~/.claude/role-cache/findings.jsonl | python3 -m json.tool"
+  echo "  Decision summary: ${ROLE_CACHE_DIR}/decision-summary.json"
+  echo "  Consume: bash ${ADAPTER_LIB} findings-search"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
