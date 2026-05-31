@@ -18,6 +18,7 @@ FINDINGS_FILE="${ROLE_CACHE_DIR}/findings.jsonl"
 AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 LEASE_FILE="${DOCS_DIR}/docs/development/leases/task-leases.json"
 DISPATCH_DIR="${DOCS_DIR}/docs/development/dispatch-packets"
+AUTO_FIXED_TASKS=""
 ROLE="${1:-pm}"
 ARG2="${2:-}"
 
@@ -476,10 +477,25 @@ if doc_path.exists():
     doc_path.write_text(content)
 print('auto-reconciled: ${tid} → ${target_status}')
 " 2>/dev/null && OK "auto-reconciled: ${tid} → ${target_status}" || WARN "auto-reconcile failed for ${tid}"
+
+      # Collect auto-reconciled task IDs for batch push
+      AUTO_FIXED_TASKS="${AUTO_FIXED_TASKS} ${tid}"
     fi
 
     echo ""
   done <<< "${pm2_conflicts}"
+
+  # Push auto-reconciled changes immediately (evidence-based, safe to auto-push)
+  if [[ -n "${AUTO_FIXED_TASKS:-}" ]]; then
+    cd "${DOCS_DIR}"
+    local auto_count; auto_count=$(echo "${AUTO_FIXED_TASKS}" | wc -w | tr -d ' ')
+    git add docs/development/task-state-ledger.json docs/development/tasks/ 2>/dev/null
+    git commit -m "pm-auto-reconcile: sync ${auto_count} task(s) to completed (dev merge evidence)
+$(echo ${AUTO_FIXED_TASKS} | tr ' ' '\n' | sed 's/^/  - /')
+Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
+    git push origin dev 2>/dev/null && OK "auto-pushed ${auto_count} reconciled task(s) to origin/dev" || WARN "auto-push failed — changes saved locally, will retry next cycle"
+    AUTO_FIXED_TASKS=""
+  fi
 
   [[ "${conflicts_found}" -eq 0 ]] && OK "all doc/ledger statuses consistent"
 
