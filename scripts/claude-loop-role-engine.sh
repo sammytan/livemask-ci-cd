@@ -1542,20 +1542,19 @@ if removed:
 import json; d=json.load(open('${sf}'))
 print(d.get('task_id',''), d.get('status',''))
 " 2>/dev/null || echo '? ?')"
-      # Resolve duplicate fallback SAPs (keep only the most recent)
+      # Clean up ALL fallback SAPs (self-decompose handles this now, §0.2)
       if [[ "${sap_task}" == "TASK-DOCS-AUTO-DECOMPOSE-FALLBACK" && "${sap_status}" == "open" ]]; then
         sap_count=$((sap_count + 1))
-        if [[ "${sap_count}" -gt 1 ]]; then
-          python3 -c "
+        # Archive it — fallback SAPs are obsolete since self-decompose was implemented
+        python3 -c "
 import json, pathlib
 d = json.load(open('${sf}'))
 d['status'] = 'resolved'
-d['resolution'] = {'by': 'claude-pm-backup', 'how': 'self-heal: duplicate fallback SAP'}
+d['resolution'] = {'by': 'claude-pm-backup', 'how': 'self-heal: fallback SAP obsolete — self-decompose handles this'}
 pathlib.Path('${sf}').write_text(json.dumps(d, indent=2))
 " 2>/dev/null
-          ACT "SELF-HEAL: resolved duplicate fallback SAP: $(basename ${sf})"
-          healed=$((healed + 1))
-        fi
+        ACT "SELF-HEAL: resolved obsolete fallback SAP: $(basename ${sf}) (self-decompose now handles this)"
+        healed=$((healed + 1))
       fi
     done
   fi
