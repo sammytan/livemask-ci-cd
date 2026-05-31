@@ -880,8 +880,8 @@ if ci.exists():
             match = re.search(r'TASK-[A-Z0-9-]+', line)
             if match and match.group(0) not in all_tasks:
                 parts = [p.strip() for p in line.split('|')]
-                domain = parts[0].strip()[:80] if len(parts) > 0 else 'unknown'
-                repos = parts[4].strip()[:80] if len(parts) > 4 else 'livemask-backend'
+                domain = parts[1].strip()[:80] if len(parts) > 1 else 'unknown'
+                repos = parts[5].strip()[:80] if len(parts) > 5 else 'livemask-backend'
                 print(f'{domain}|{repos}|{match.group(0)}')
                 break
 " 2>/dev/null)
