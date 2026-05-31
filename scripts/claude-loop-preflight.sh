@@ -312,13 +312,13 @@ for r in runs:
       [[ -n "${wf}" ]] && block "CI: ${CI_REPO} ${wf} ${conclusion} at ${sha} — ${url}"
 
       # Auto-create CI fix task for repeated failures
-      local ci_fix_key="${CI_REPO}:${wf}"
-      local fail_count
+      ci_fix_key="${CI_REPO}:${wf}"
+      fail_count=
       fail_count=$(echo "${FAILURES}" | grep -c "${wf}" 2>/dev/null || echo "1")
       if [[ "${fail_count}" -ge 2 ]]; then
-        local fix_tid="TASK-CICD-FIX-$(echo "${wf}" | sed 's/[^a-zA-Z0-9]/-/g' | tr '[:upper:]' '[:lower:]' | cut -c1-40)"
+        fix_tid="TASK-CICD-FIX-$(echo "${wf}" | sed 's/[^a-zA-Z0-9]/-/g' | tr '[:upper:]' '[:lower:]' | cut -c1-40)"
         # Check if fix task already exists in ledger
-        local fix_exists; fix_exists=$(python3 -c "
+        fix_exists=$(python3 -c "
 import json
 ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
 for m in ledger.get('modules',[]):
@@ -328,7 +328,7 @@ for m in ledger.get('modules',[]):
         if [[ -z "${fix_exists}" ]]; then
           REASONS+=("AUTO_FIX: CI ${CI_REPO} ${wf} failed ${fail_count} times — auto-creating fix task ${fix_tid}")
           # Create a minimal task stub
-          local fix_doc="${DOCS_DIR}/docs/development/tasks/${fix_tid}.md"
+          fix_doc="${DOCS_DIR}/docs/development/tasks/${fix_tid}.md"
           if [[ ! -f "${fix_doc}" ]]; then
             cat > "${fix_doc}" << TASKDOC
 # ${fix_tid} — Auto-created CI Fix
