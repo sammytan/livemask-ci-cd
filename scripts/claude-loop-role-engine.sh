@@ -13,6 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/lark-card.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/health-check.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
@@ -1541,6 +1542,9 @@ if [[ "${PM_SKIP:-0}" -eq 1 ]]; then
   release_pm_lease 2>/dev/null || true
   exit 0
 fi
+
+# ── Proactive health check: catch problems before they become bugs ─────────
+health_check_all 2>/dev/null || true
 
 case "${ROLE}" in
   pm)
