@@ -12,6 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/lark-card.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/health-check.sh" 2>/dev/null || true
 log_setup "startup" 2>/dev/null || true
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
@@ -176,6 +177,50 @@ run_recovery() {
 
   ok "no recovery needed — agent phase is ${AGENT_PHASE}"
   return 0
+}
+
+# ── Step 1.5: Quick Health Pulse (critical checks only) ──────────────────────
+quick_health_pulse() {
+  echo ""
+  echo -e "  ${CYAN}[..]${RESET} quick health pulse..."
+  local pulse_ok=0
+
+  # Check PM lease (don't start if another agent is working)
+  local lease_file="${HOME}/.claude/role-cache/pm-lease.json"
+  if [[ -f "${lease_file}" ]]; then
+    local holder age; read -r holder age <<< "$(python3 -c "
+import json, time
+d = json.load(open('${lease_file}'))
+age = (time.time() - d.get('started_at_epoch',0)) / 60
+print(d.get('agent','?'), f'{age:.0f}')
+" 2>/dev/null || echo "? 0")"
+    if [[ "${holder}" != "claude-pm-backup" && "${age}" -lt 15 ]]; then
+      echo -e "  ${YELLOW}[WAIT]${RESET} PM lease held by ${holder} (${age}min) — may conflict with PM cycle"
+    else
+      pulse_ok=$((pulse_ok + 1))
+    fi
+  else
+    pulse_ok=$((pulse_ok + 1))
+  fi
+
+  # Check planner anomaly (ready tasks but 0 candidates)
+  local ready ledger_ready; ledger_ready=$(python3 -c "
+import json
+d = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+print(sum(1 for m in d.get('modules',[]) for t in m.get('tasks',[]) if t.get('status')=='ready'))
+" 2>/dev/null || echo "0")
+  if [[ "${ledger_ready}" -gt 0 ]]; then
+    local planner_c; planner_c=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['summary']['candidate_count'])" 2>/dev/null || echo "0")
+    if [[ "${planner_c}" == "0" ]]; then
+      echo -e "  ${YELLOW}[WARN]${RESET} Planner anomaly: ${ledger_ready} ready tasks in ledger but planner shows 0 candidates"
+    else
+      pulse_ok=$((pulse_ok + 1))
+    fi
+  else
+    pulse_ok=$((pulse_ok + 1))
+  fi
+
+  [[ "${pulse_ok}" -ge 2 ]] && echo -e "  ${GREEN}[OK]${RESET} health pulse: clear"
 }
 
 # ── Step 2: Preflight ─────────────────────────────────────────────────────────
@@ -734,8 +779,9 @@ case "${MODE}" in
       exit $?
     fi
 
-    # Full startup: recovery + preflight + context + channels + cache
+    # Full startup: recovery + health pulse + preflight + context + channels + cache
     run_recovery || true  # recovery warnings don't block
+    quick_health_pulse
     preflight_rc=0
     run_preflight || preflight_rc=$?
 
