@@ -79,8 +79,21 @@ trap cleanup_workspace EXIT
 # Returns task_id if created, empty string if skipped.
 auto_create_task() {
   local role="$1" check="$2" title="$3" priority="${4:-P1}" repo="${5:-livemask-ci-cd}" body="${6:-}"
+  case "${repo}" in
+    livemask-backend|livemask-admin|livemask-app|livemask-website|livemask-ci-cd|livemask-nodeagent|livemask-job-service|livemask-docs) ;;
+    *)
+      echo "    (skip auto-create: repo '${repo}' is not a canonical ledger repo)"
+      record_finding "${role}" "warning" "" "${check}" \
+        "auto-create skipped because repo '${repo}' is not a canonical ledger repo" \
+        "decompose this cross-repo finding into one canonical TASK per livemask-* repo before dispatch" \
+        ""
+      return 0
+      ;;
+  esac
+
   # Generate short, compliant task ID: TASK-AUTO-{repo-short}-{uniq}
-  local repo_short; repo_short=$(echo "${repo}" | sed 's/livemask-//' | cut -c1-8)
+  local repo_short; repo_short=$(echo "${repo}" | sed 's/livemask-//' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/-$//' | cut -c1-16)
+  [[ -n "${repo_short}" ]] || repo_short="misc"
   local uniq; uniq=$(echo "${title}" | tr 'A-Z ' 'a-z-' | sed 's/[^a-z0-9-]//g' | tr '-' '\n' | head -4 | tr '\n' '-' | cut -c1-20)
   local tid="TASK-AUTO-${repo_short}-${uniq}"
   tid="${tid%-}"  # strip trailing dash
