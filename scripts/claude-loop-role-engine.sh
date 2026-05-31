@@ -98,6 +98,180 @@ for m in ledger.get('modules',[]):
     return 0
   fi
 
+  local intelligence_file="${ROLE_CACHE_DIR}/task-intelligence-${tid}.json"
+  mkdir -p "${ROLE_CACHE_DIR}"
+  TASK_ID="${tid}" TASK_TITLE="${title}" TASK_BODY="${body}" TASK_REPO="${repo}" \
+    TASK_ROLE="${role}" TASK_CHECK="${check}" DOCS_DIR="${DOCS_DIR}" python3 - "${intelligence_file}" <<'PY' 2>/dev/null || true
+import json, os, re, subprocess, sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+docs_root = Path(os.environ["DOCS_DIR"])
+docs_tree = docs_root / "docs"
+tid = os.environ["TASK_ID"]
+title = os.environ["TASK_TITLE"]
+body = os.environ["TASK_BODY"]
+repo = os.environ["TASK_REPO"]
+role = os.environ["TASK_ROLE"]
+check = os.environ["TASK_CHECK"]
+
+stop = {
+    "task", "auto", "implement", "add", "fix", "sync", "for", "and", "the",
+    "with", "from", "ready", "contract", "documentation", "smoke", "tests",
+    "test", "pipeline", "role", "engine", "finding", "create", "across",
+}
+tokens = []
+for token in re.findall(r"[A-Za-z0-9]{3,}", f"{title} {body} {repo}"):
+    low = token.lower()
+    if low not in stop and low not in tokens:
+        tokens.append(low)
+tokens = tokens[:12]
+
+def read_json(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+ledger = read_json(docs_root / "docs/development/task-state-ledger.json", {"modules": []})
+related_tasks = []
+duplicate_signals = []
+issue_urls = []
+for module in ledger.get("modules", []):
+    for task in module.get("tasks", []):
+        text = " ".join(str(task.get(k, "")) for k in ("task_id", "repo", "status", "notes", "validation", "task_doc"))
+        text_low = text.lower()
+        overlap = [t for t in tokens if t in text_low]
+        same_repo = task.get("repo") == repo
+        if same_repo or len(overlap) >= 2:
+            related_tasks.append({
+                "task_id": task.get("task_id", ""),
+                "repo": task.get("repo", ""),
+                "status": task.get("status", ""),
+                "priority": task.get("priority", ""),
+                "task_doc": task.get("task_doc", ""),
+                "issue": task.get("issue", ""),
+                "relation": "same_repo" if same_repo else "keyword_overlap",
+                "matched_terms": overlap[:6],
+            })
+        issue = str(task.get("issue", ""))
+        if issue.startswith("http") and (same_repo or overlap):
+            issue_urls.append(issue)
+        if task.get("status") in ("ready", "dispatched", "in_progress", "blocked", "partial") and len(overlap) >= 4:
+            duplicate_signals.append({
+                "task_id": task.get("task_id", ""),
+                "status": task.get("status", ""),
+                "reason": f"high keyword overlap: {', '.join(overlap[:6])}",
+            })
+
+context_docs = []
+allowed_suffixes = {".md", ".json", ".yaml", ".yml"}
+for path in docs_tree.rglob("*"):
+    if not path.is_file() or path.suffix.lower() not in allowed_suffixes:
+        continue
+    rel = path.relative_to(docs_root).as_posix()
+    if "/node_modules/" in rel or "/.git/" in rel:
+        continue
+    score = 0
+    rel_low = rel.lower()
+    if repo.replace("livemask-", "") in rel_low:
+        score += 3
+    try:
+        sample = path.read_text(encoding="utf-8", errors="ignore")[:8000].lower()
+    except Exception:
+        sample = ""
+    matched = []
+    for token in tokens:
+        if token in rel_low or token in sample:
+            score += 1
+            matched.append(token)
+    if score:
+        context_docs.append({"path": rel, "score": score, "matched_terms": matched[:8]})
+context_docs.sort(key=lambda d: (-d["score"], d["path"]))
+
+repo_doc_hints = {
+    "livemask-backend": ["docs/backend", "docs/contracts", "docs/data", "docs/architecture"],
+    "livemask-admin": ["docs/admin", "docs/contracts", "docs/design", "docs/architecture"],
+    "livemask-app": ["docs/app", "docs/contracts", "docs/architecture"],
+    "livemask-nodeagent": ["docs/nodeagent", "docs/contracts", "docs/architecture"],
+    "livemask-job-service": ["docs/job-service", "docs/contracts", "docs/operations"],
+    "livemask-ci-cd": ["docs/development", "docs/operations", "docs/contracts"],
+    "livemask-docs": ["docs/development", "docs/contracts", "docs/architecture"],
+}
+
+quality_gates = [
+    "git diff --check",
+    "run the repo-native formatter/linter/test suite for touched files",
+    "do not introduce a new abstraction when an existing project helper or contract already covers the behavior",
+    "update docs/contracts or task evidence when behavior, API, schema, CI, or runtime expectations change",
+]
+if repo == "livemask-docs":
+    quality_gates.insert(0, "bash scripts/check-docs.sh")
+elif repo == "livemask-backend":
+    quality_gates.extend(["go test ./...", "verify OpenAPI/Swagger docs when routes or DTOs change"])
+elif repo == "livemask-admin":
+    quality_gates.extend(["npm test", "npm run build", "browser/network evidence for UI acceptance"])
+elif repo == "livemask-ci-cd":
+    quality_gates.extend(["bash -n changed shell scripts", "run the matching smoke script in dry-run/local mode when available"])
+
+issue_context = []
+search_query = " ".join(tokens[:5]) or title[:80]
+if repo and re.match(r"^livemask-[A-Za-z0-9-]+$", repo):
+    try:
+        raw = subprocess.check_output([
+            "gh", "issue", "list", "--repo", f"MyAiDevs/{repo}",
+            "--search", search_query, "--state", "all", "--limit", "5",
+            "--json", "number,title,state,url,updatedAt",
+        ], text=True, timeout=8, stderr=subprocess.DEVNULL)
+        for item in json.loads(raw):
+            comments = []
+            try:
+                detail = subprocess.check_output([
+                    "gh", "issue", "view", str(item["number"]), "--repo", f"MyAiDevs/{repo}",
+                    "--json", "comments", "--jq", ".comments[-2:]",
+                ], text=True, timeout=8, stderr=subprocess.DEVNULL)
+                comments = json.loads(detail) if detail.strip() else []
+            except Exception:
+                comments = []
+            issue_context.append({**item, "recent_comments": [
+                {
+                    "author": c.get("author", {}).get("login", ""),
+                    "createdAt": c.get("createdAt", ""),
+                    "body_excerpt": (c.get("body", "") or "")[:240],
+                }
+                for c in comments
+            ]})
+    except Exception:
+        issue_context = []
+
+summary = {
+    "schema_version": 1,
+    "task_id": tid,
+    "title": title,
+    "repo": repo,
+    "source": {"role": role, "check": check, "body_excerpt": body[:600]},
+    "query_terms": tokens,
+    "duplicate_blocker": bool(duplicate_signals),
+    "duplicate_signals": duplicate_signals[:8],
+    "related_tasks": related_tasks[:12],
+    "context_docs": context_docs[:20],
+    "repo_doc_hints": repo_doc_hints.get(repo, ["docs/development", "docs/contracts", "docs/architecture"]),
+    "github_issue_candidates": issue_context,
+    "ledger_issue_refs": sorted(set(issue_urls))[:10],
+    "comment_association": "Use linked issue recent comments plus fixed channels #14/#68 as evidence; do not treat comments as a replacement for ledger/task-doc updates.",
+    "code_quality_gates": quality_gates,
+    "no_duplicate_rule": "If duplicate_signals is non-empty, do not create a new task; update or unblock the existing task instead.",
+}
+out.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+PY
+
+  local duplicate_blocker=""
+  duplicate_blocker=$(python3 -c "import json; d=json.load(open('${intelligence_file}')); print('yes' if d.get('duplicate_blocker') else '')" 2>/dev/null || echo "")
+  if [[ -n "${duplicate_blocker}" ]]; then
+    echo "    (duplicate task signal found — skip creating ${tid}; see ${intelligence_file})"
+    return 0
+  fi
+
   # Create task doc with ALL required sections per check-docs.sh schema
   local task_doc="${DOCS_DIR}/docs/development/tasks/${tid}.md"
   local now_ts; now_ts=$(date -u +%Y-%m-%d)
@@ -123,19 +297,62 @@ Role-engine ${role}/${check} detected an actionable gap: ${title}
 
 ${body}
 
+### 1.1 Project Context Pack
+
+$(python3 - "${intelligence_file}" <<'PY' 2>/dev/null || echo "- Intelligence pack unavailable; rerun role-engine before dispatch.")
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"- Intelligence pack: `{sys.argv[1]}`")
+print(f"- Source: role-engine {d.get('source',{}).get('role','?')}/{d.get('source',{}).get('check','?')}")
+print(f"- Query terms: {', '.join(d.get('query_terms', [])[:10]) or 'none'}")
+print("- Required docs/context roots:")
+for item in d.get("repo_doc_hints", [])[:8]:
+    print(f"  - `{item}`")
+if d.get("context_docs"):
+    print("- Highest-signal project docs:")
+    for item in d["context_docs"][:8]:
+        terms = ", ".join(item.get("matched_terms", [])[:5])
+        print(f"  - `{item['path']}` (score={item['score']}; terms={terms})")
+if d.get("related_tasks"):
+    print("- Related ledger tasks:")
+    for item in d["related_tasks"][:8]:
+        issue = f"; issue={item.get('issue')}" if item.get("issue") else ""
+        print(f"  - `{item.get('task_id','?')}` status={item.get('status','?')} repo={item.get('repo','?')} relation={item.get('relation','?')}{issue}")
+if d.get("github_issue_candidates"):
+    print("- GitHub issue/comment candidates:")
+    for item in d["github_issue_candidates"][:5]:
+        print(f"  - {item.get('url')} [{item.get('state')}] {item.get('title')}")
+        for c in item.get("recent_comments", [])[:2]:
+            body = (c.get("body_excerpt") or "").replace("\n", " ")[:180]
+            print(f"    - comment {c.get('createdAt','?')} by {c.get('author','?')}: {body}")
+if d.get("duplicate_signals"):
+    print("- Duplicate signals:")
+    for item in d["duplicate_signals"][:5]:
+        print(f"  - `{item.get('task_id')}` status={item.get('status')}: {item.get('reason')}")
+print(f"- Comment association rule: {d.get('comment_association')}")
+PY
+)
+
 ## 2. Scope
 
 ### In Scope
 - Address the root cause identified by role-engine finding
 - Implement the fix or improvement described above
+- Reuse existing project helpers, contracts, schemas, runbooks, and task patterns found in the context pack
+- Preserve or update related task/GitHub issue/comment evidence instead of creating an unlinked parallel lane
 
 ### Out of Scope
 - Unrelated refactoring or feature additions
+- Rebuilding an existing capability under a new name when a related task/helper already exists
 
 ## 3. Acceptance Criteria
 - [ ] Root cause verified and addressed
 - [ ] Implementation validated with appropriate evidence
 - [ ] No regression in existing functionality
+- [ ] Related task IDs, blockers, and unlocks from the context pack are explicitly handled
+- [ ] Linked GitHub issue(s) and recent relevant comments are cited in the completion report or blocked note
+- [ ] No duplicate TASK, dispatch packet, issue, helper, or CI lane is introduced
+- [ ] Code follows the existing repo architecture and uses established helpers before adding new abstractions
 
 ## 4. Cross-Repo Impact
 
@@ -150,12 +367,23 @@ print(impacts.get(repo, '- Related repos as identified during implementation'))
 - check-docs.sh PASS
 - git diff --check PASS
 - CI/CD pipeline green for affected repos
+
+### 5.1 Code Quality Gates
+$(python3 - "${intelligence_file}" <<'PY' 2>/dev/null || echo "- Run repo-native checks and document evidence.")
+import json, sys
+d = json.load(open(sys.argv[1]))
+for gate in d.get("code_quality_gates", []):
+    print(f"- {gate}")
+PY
+)
 TASKDOC
 
   # Add to ledger with valid field types
   python3 -c "
 import json, pathlib
 ledger_path = pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json')
+intel_path = pathlib.Path('${intelligence_file}')
+intel = json.loads(intel_path.read_text()) if intel_path.exists() else {}
 ledger = json.loads(ledger_path.read_text())
 module = None
 for m in ledger.get('modules',[]):
@@ -171,11 +399,11 @@ module['tasks'].append({
     'status': 'ready',
     'priority': '${priority}',
     'task_doc': 'docs/development/tasks/${tid}.md',
-    'issue': '',
+    'issue': (intel.get('github_issue_candidates') or [{}])[0].get('url',''),
     'validation': '',
-    'blocked_by': [],
+    'blocked_by': [t.get('task_id') for t in intel.get('related_tasks', [])[:5] if t.get('status') in ('blocked','in_progress')],
     'unlocks': [],
-    'notes': 'Auto-created by role-engine ${role}/${check}'
+    'notes': 'Auto-created by role-engine ${role}/${check}; context_pack=${intelligence_file}; related_tasks=' + ','.join(t.get('task_id','') for t in intel.get('related_tasks', [])[:8] if t.get('task_id')) + '; github_issues=' + ','.join(i.get('url','') for i in intel.get('github_issue_candidates', [])[:5] if i.get('url')) + '; quality_gates=' + ' | '.join(intel.get('code_quality_gates', [])[:6])
 })
 ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False))
 " 2>/dev/null
@@ -200,12 +428,20 @@ dp = {
     'context': {
         'generated_by': 'Claude-Role-Engine',
         'source': 'role-engine PM-3 auto_create_task',
-        'task_doc': 'docs/development/tasks/${tid}.md'
+        'task_doc': 'docs/development/tasks/${tid}.md',
+        'intelligence_pack': '${intelligence_file}',
+        'context_docs': (json.loads(pathlib.Path('${intelligence_file}').read_text()).get('context_docs', [])[:8] if pathlib.Path('${intelligence_file}').exists() else []),
+        'related_tasks': (json.loads(pathlib.Path('${intelligence_file}').read_text()).get('related_tasks', [])[:8] if pathlib.Path('${intelligence_file}').exists() else []),
+        'github_issue_candidates': (json.loads(pathlib.Path('${intelligence_file}').read_text()).get('github_issue_candidates', [])[:5] if pathlib.Path('${intelligence_file}').exists() else [])
     },
     'acceptance': {
         'task_doc_exists': 'docs/development/tasks/${tid}.md',
         'ledger_status': 'dispatched',
-        'evidence_required': True
+        'evidence_required': True,
+        'must_cite_context_pack': True,
+        'must_cite_github_issue_or_explain_absence': True,
+        'must_pass_code_quality_gates': True,
+        'must_not_duplicate_existing_task_or_helper': True
     }
 }
 pathlib.Path('${dp_file}').write_text(json.dumps(dp, indent=2))
