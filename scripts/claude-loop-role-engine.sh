@@ -634,6 +634,215 @@ Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# DEEP ANALYSIS: Cross-cutting deep review modes (require TASK-ID argument)
+# ══════════════════════════════════════════════════════════════════════════════
+
+deep_review() {
+  local target_task="${1:-}"
+  [[ -z "${target_task}" ]] && { echo "Usage: bash scripts/claude-loop-role-engine.sh --deep-review <TASK-ID>"; return 1; }
+
+  echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════╗${RESET}"
+  echo -e "${BOLD}${CYAN}║  DEEP REVIEW: ${target_task}${RESET}"
+  echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════╝${RESET}"
+
+  sync_repos
+
+  # Gather: task doc
+  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
+  [[ -f "${task_doc}" ]] && { echo ""; echo "--- TASK DOC ---"; head -60 "${task_doc}"; }
+
+  # Gather: ledger entry
+  echo ""; echo "--- LEDGER ---"
+  python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}':
+            print(json.dumps({k:t[k] for k in ['status','repo','issue','validation','blocked_by','unlocks','notes'] if k in t}, indent=2))
+" 2>/dev/null || echo "not found"
+
+  # Gather: review contract
+  local rf="${DOCS_DIR}/docs/development/review-contracts/${target_task}-review.json"
+  if [[ -f "${rf}" ]]; then
+    echo ""; echo "--- REVIEW CONTRACT ---"
+    python3 -c "
+import json; d=json.load(open('${rf}'))
+print(f'state={d.get(\"state\")} round={d.get(\"review_round\")} actor={d.get(\"next_required_actor\")}')
+for r in d.get('rounds',[]):
+    c = r.get('claude',{})
+    if c: print(f'claude: {c.get(\"submitted_at\")} commit={str(c.get(\"commit\",\"\"))[:7]} summary={c.get(\"summary\",\"\")[:200]}')
+    cx = r.get('codex',{})
+    if cx: print(f'codex: verdict={cx.get(\"verdict\")} findings={cx.get(\"findings\",[])}')
+" 2>/dev/null
+  fi
+
+  # Gather: git diff
+  local target_repo
+  target_repo=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}': print(t.get('repo','livemask-docs'))
+" 2>/dev/null || echo "livemask-docs")
+  local repo_dir="${LIVEMASK_ROOT}/${target_repo}"
+
+  echo ""; echo "--- GIT DIFF (${target_repo}) ---"
+  if [[ -d "${repo_dir}/.git" ]]; then
+    cd "${repo_dir}"
+    local task_branch
+    task_branch=$(git branch -r --list "origin/task/*${target_task}*" --format='%(refname:short)' 2>/dev/null | head -1 || echo "")
+    if [[ -n "${task_branch}" ]]; then
+      git diff "origin/dev...${task_branch}" --stat 2>/dev/null | head -15
+      echo ""; git diff "origin/dev...${task_branch}" 2>/dev/null | head -150
+    elif [[ -f "${rf}" ]]; then
+      local tc; tc=$(python3 -c "import json; d=json.load(open('${rf}')); print(d.get('task_commit',''))" 2>/dev/null || echo "")
+      [[ -n "${tc}" ]] && { git show "${tc}" --stat 2>/dev/null | head -15; echo ""; git show "${tc}" 2>/dev/null | head -150; }
+    fi
+  fi
+
+  # Cross-repo impact search
+  echo ""; echo "--- CROSS-REPO IMPACT ---"
+  local keywords; keywords=$(grep -oE '[a-z_]+\.[a-z_]+\(|[A-Z][a-z]+Handler|[A-Z][a-z]+Service' "${task_doc}" 2>/dev/null | head -5 | tr '\n' ' ' || echo "")
+  [[ -n "${keywords}" ]] && echo "  key symbols: ${keywords}"
+
+  echo ""
+  echo "=== DEEP ANALYSIS PROMPT ==="
+  echo "Claude: review the context above and evaluate:"
+  echo "1. LOGIC: Does the code implement what the task doc describes? Edge cases? Race conditions?"
+  echo "2. CROSS-REPO: Which downstream repos are affected? Are they updated? If not, create follow-ups."
+  echo "3. QUALITY: Hardcoded values? Missing RBAC? Missing Swagger? TODO/FIXME in prod paths?"
+  echo "4. SECURITY: Secrets in logs? SQL injection? Input validation?"
+  echo "5. CLOSURE: Can this be marked completed? What evidence is still missing?"
+}
+
+closure_audit() {
+  local target_task="${1:-}"
+  [[ -z "${target_task}" ]] && { echo "Usage: bash scripts/claude-loop-role-engine.sh --closure-audit <TASK-ID>"; return 1; }
+
+  echo -e "${BOLD}${CYAN}CLOSURE AUDIT: ${target_task}${RESET}"
+  sync_repos
+
+  local score=0 max=0
+  local gaps=()
+
+  check() { max=$((max+1)); local label="$1" cond="$2"; if eval "${cond}"; then score=$((score+1)); echo "  [✓] ${label}"; else gaps+=("${label}"); echo "  [✗] ${label}"; fi; }
+
+  local ledger_status; ledger_status=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}': print(t.get('status','?'))
+" 2>/dev/null || echo "NOT_FOUND")
+  check "ledger status=completed" "[[ '${ledger_status}' == 'completed' || '${ledger_status}' == 'completed_with_skip' ]]"
+
+  local rf="${DOCS_DIR}/docs/development/review-contracts/${target_task}-review.json"
+  local origin_sha=""
+  [[ -f "${rf}" ]] && origin_sha=$(python3 -c "import json; print(json.load(open('${rf}')).get('origin_dev_sha',''))" 2>/dev/null || echo "")
+  check "origin/dev push evidence" "[[ -n '${origin_sha}' ]]"
+
+  local docs_ok=0
+  [[ -f "${rf}" ]] && python3 -c "
+import json; d=json.load(open('${rf}'))
+for r in d.get('rounds',[]):
+    for v in r.get('claude',{}).get('validation',[]):
+        if 'check-docs' in v.get('cmd','') and v.get('result')=='pass': print('PASS')
+" 2>/dev/null | grep -q "PASS" && docs_ok=1
+  check "check-docs.sh PASS" "[[ ${docs_ok} -eq 1 ]]"
+
+  local has_issue=""; has_issue=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${target_task}' and t.get('issue',''): print('yes')
+" 2>/dev/null || echo "")
+  check "GitHub issue linked" "[[ -n '${has_issue}' ]]"
+
+  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
+  local doc_completed=0
+  [[ -f "${task_doc}" ]] && grep -q "Completed" "${task_doc}" 2>/dev/null && doc_completed=1
+  check "task doc marked Completed" "[[ ${doc_completed} -eq 1 ]]"
+
+  local target_repo; target_repo=$(python3 -c "
+import json; ledger=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id')=='${target_task}': print(t.get('repo','livemask-docs'))
+" 2>/dev/null || echo "livemask-docs")
+  local dirty; dirty=$(git -C "${LIVEMASK_ROOT}/${target_repo}" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  check "target repo clean" "[[ ${dirty} -eq 0 ]]"
+
+  local child_count=0
+  [[ -f "${rf}" ]] && child_count=$(python3 -c "import json; print(len(json.load(open('${rf}')).get('links',{}).get('issues',[])))" 2>/dev/null || echo "0")
+  check "child issues tracked" "[[ ${child_count} -gt 0 ]]"
+
+  echo ""; echo "SCORE: ${score}/${max}"
+  [[ ${score} -ge $((max - 1)) ]] && echo "VERDICT: READY FOR CLOSURE" || echo "VERDICT: NEEDS EVIDENCE"
+  for g in "${gaps[@]}"; do echo "  GAP: $g"; done
+}
+
+impact_analysis() {
+  local target_task="${1:-}"
+  [[ -z "${target_task}" ]] && { echo "Usage: bash scripts/claude-loop-role-engine.sh --impact-analysis <TASK-ID>"; return 1; }
+
+  echo -e "${BOLD}${CYAN}IMPACT ANALYSIS: ${target_task}${RESET}"
+  sync_repos
+
+  local target_repo; target_repo=$(python3 -c "
+import json; ledger=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id')=='${target_task}': print(t.get('repo','?'))
+" 2>/dev/null || echo "?")
+
+  echo "Source: ${target_repo} → ${target_task}"
+  echo ""
+
+  case "${target_repo}" in
+    livemask-backend)
+      echo "Backend API change → affects: Admin UI, App models, NodeAgent client, Job Service executors, Website, CI/CD smoke, Docs swagger"
+      ;;
+    livemask-admin)   echo "Admin UI change → affects: CI/CD admin smoke";;
+    livemask-app)     echo "App change → affects: CI/CD app build/release smoke";;
+    livemask-nodeagent) echo "NodeAgent change → affects: Backend internal API compat, CI/CD node smoke";;
+    livemask-job-service) echo "Job Service change → affects: Backend executor endpoints, CI/CD job smoke";;
+    livemask-docs)    echo "Docs change → affects: ALL repos (contract/rule changes need implementation)";;
+  esac
+
+  # Unlock chain
+  echo ""; echo "--- Unlock Chain ---"
+  python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+target = '${target_task}'
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        blockers = t.get('blocked_by') or []
+        if target in blockers:
+            print(f\"  BLOCKS: {t['task_id']} ({t.get('repo','?')}, {t.get('status','?')})\")
+        unlocks = t.get('unlocks') or []
+        if target in unlocks:
+            print(f\"  UNLOCKS: {t['task_id']} ({t.get('repo','?')}, {t.get('status','?')})\")
+" 2>/dev/null
+
+  # Search for actual code references
+  echo ""; echo "--- Code References ---"
+  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
+  [[ -f "${task_doc}" ]] && for kw in $(grep -oE '[A-Z][a-zA-Z]{3,}' "${task_doc}" 2>/dev/null | sort -u | head -3); do
+    echo "  searching '${kw}' across repos..."
+    for rd in "${LIVEMASK_ROOT}"/livemask-*/; do
+      local rn; rn=$(basename "${rd}")
+      [[ "${rn}" == "${target_repo}" || "${rn}" == "livemask-docs" || "${rn}" == "livemask-ci-cd" ]] && continue
+      local hits; hits=$(grep -rl "${kw}" "${rd}" --include="*.go" --include="*.ts" --include="*.tsx" --include="*.dart" 2>/dev/null | wc -l | tr -d ' ')
+      [[ "${hits}" -gt 0 ]] && echo "    ${rn}: ${hits} files"
+    done
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -643,13 +852,23 @@ case "${ROLE}" in
   tech)    role_tech;;
   qa)      role_qa;;
   all)     run_all_roles;;
+  --deep-review)     deep_review "${2:-}";;
+  --closure-audit)   closure_audit "${2:-}";;
+  --impact-analysis) impact_analysis "${2:-}";;
   *)
-    echo "Usage: bash scripts/claude-loop-role-engine.sh <role>"
-    echo "  pm       — Project Manager: ledger sync, issue mgmt, dispatch, review pipeline"
-    echo "  product  — Product Manager: contract coverage, MVP milestones, inbox, direction"
-    echo "  tech     — Tech Lead: API/Swagger sync, DB migration, hardcoded config, interfaces"
-    echo "  qa       — QA: smoke coverage, evidence verification, bug triage, regression"
-    echo "  all      — All roles sequentially with aggregate report"
+    echo "Usage: bash scripts/claude-loop-role-engine.sh <role|mode> [args]"
+    echo ""
+    echo "  Automated roles:"
+    echo "    pm       — Project Manager: ledger sync, issue mgmt, dispatch, review pipeline"
+    echo "    product  — Product Manager: contract coverage, MVP milestones, inbox, direction"
+    echo "    tech     — Tech Lead: API/Swagger sync, DB migration, hardcoded config, interfaces"
+    echo "    qa       — QA: smoke coverage, evidence verification, bug triage, regression"
+    echo "    all      — All roles sequentially with aggregate report"
+    echo ""
+    echo "  Deep analysis (requires TASK-ID):"
+    echo "    --deep-review <TASK>     — Full code + logic + cross-repo analysis"
+    echo "    --closure-audit <TASK>   — 7-point closure readiness scoring"
+    echo "    --impact-analysis <TASK> — Cross-repo dependency trace + unlock chain"
     exit 1
     ;;
 esac
