@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
-# TASK-CICD-CLAUDE-ROLE-ENGINE-001
-# Multi-role automation engine. Each role has independent context cache,
-# check cycle, and output actions. Token-efficient: incremental reads.
+# TASK-CICD-CLAUDE-ROLE-ENGINE-V2-001
+# Multi-role reasoning engine. Each role does 3 deep analysis points, each
+# tracing the "why" chain to root cause. Script gathers context, Claude reasons.
 #
-# Roles:
-#   pm       — Project Manager: task lifecycle, ledger sync, dispatch, #68 heartbeat
-#   product  — Product Manager: contracts→tasks mapping, MVP milestones, requirements
-#   tech     — Tech Lead: API/Swagger sync, DB migration review, code patterns
-#   qa       — QA: smoke coverage, evidence verification, bug triage, regression
-#   all      — Run all roles sequentially, aggregate report
+# Principle: Every detection MUST answer "why did this happen?" and produce
+# a concrete next action. Nothing is just printed and forgotten.
 #
-# Usage:
-#   bash scripts/claude-loop-role-engine.sh pm              # PM role only
-#   bash scripts/claude-loop-role-engine.sh product         # Product role only
-#   bash scripts/claude-loop-role-engine.sh tech            # Tech Lead role only
-#   bash scripts/claude-loop-role-engine.sh qa              # QA role only
-#   bash scripts/claude-loop-role-engine.sh all             # All roles
+# Roles: pm | product | tech | qa | deep-review | closure-audit | impact-analysis
+# Usage: bash scripts/claude-loop-role-engine.sh <role> [TASK-ID]
 set -euo pipefail
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
@@ -23,263 +15,298 @@ DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
 CI_CD_DIR="${LIVEMASK_ROOT}/livemask-ci-cd"
 ROLE_CACHE_DIR="${LIVEMASK_ROOT}/.claude/role-cache"
 ROLE="${1:-pm}"
+ARG2="${2:-}"
 
 mkdir -p "${ROLE_CACHE_DIR}"
 
 BOLD="\033[1m" GREEN="\033[32m" YELLOW="\033[33m" RED="\033[31m" CYAN="\033[36m" RESET="\033[0m"
-role_header() { echo -e "\n${BOLD}${CYAN}┌──────────────────────────────────────────────┐${RESET}"; echo -e "${BOLD}${CYAN}│  ROLE: $*${RESET}"; echo -e "${BOLD}${CYAN}└──────────────────────────────────────────────┘${RESET}"; }
-ok()   { echo -e "  ${GREEN}[OK]${RESET} $*"; }
-warn() { echo -e "  ${YELLOW}[WARN]${RESET} $*"; }
-act()  { echo -e "  ${RED}[ACTION]${RESET} $*"; }
-info() { echo -e "  ${CYAN}[..]${RESET} $*"; }
+H1() { echo -e "\n${BOLD}${CYAN}═══ $* ═══${RESET}"; }
+OK() { echo -e "  ${GREEN}[OK]${RESET} $*"; }
+WARN(){ echo -e "  ${YELLOW}[WARN]${RESET} $*"; }
+ACT() { echo -e "  ${RED}[ACT]${RESET} $*"; }
+ASK() { echo -e "  ${BOLD}[REASON]${RESET} $*"; }
+NEXT(){ echo -e "  ${BOLD}${GREEN}[NEXT]${RESET} $*"; }
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SHARED: Context loading (all roles use this)
-# ══════════════════════════════════════════════════════════════════════════════
-
-load_role_cache() {
-  local role="$1"
-  local cache_file="${ROLE_CACHE_DIR}/${role}-cache.json"
-
-  if [[ -f "${cache_file}" ]]; then
-    ROLE_LAST_SHA=$(python3 -c "import json; print(json.load(open('${cache_file}')).get('last_sha',''))" 2>/dev/null || echo "")
-    ROLE_LAST_TIME=$(python3 -c "import json; print(json.load(open('${cache_file}')).get('updated_at',''))" 2>/dev/null || echo "")
-    ROLE_CACHE_AGE=$(python3 -c "
-import json, time
-c = json.load(open('${cache_file}'))
-print(f\"{(time.time() - c.get('updated_at_epoch',0)) / 60:.0f}\")
-" 2>/dev/null || echo "999")
-    info "cache: ${ROLE_CACHE_AGE}min old, last SHA ${ROLE_LAST_SHA:0:7}"
-  else
-    ROLE_LAST_SHA=""
-    ROLE_CACHE_AGE=999
-    info "no cache — will do full analysis"
-  fi
-}
-
-sync_repos() {
+# ── Shared: sync and cache ──────────────────────────────────────────────────
+sync_all() {
   cd "${DOCS_DIR}" && git pull --ff-only origin dev 2>/dev/null || true
   cd "${CI_CD_DIR}" && git pull --ff-only origin dev 2>/dev/null || true
-  ROLE_CURRENT_SHA=$(git -C "${DOCS_DIR}" rev-parse --short HEAD)
+  NOW_SHA=$(git -C "${DOCS_DIR}" rev-parse --short HEAD)
 }
 
-get_changed_files() {
-  if [[ -n "${ROLE_LAST_SHA:-}" ]] && [[ "${ROLE_CACHE_AGE:-999}" -lt 60 ]]; then
-    git -C "${DOCS_DIR}" diff --name-only "${ROLE_LAST_SHA}" HEAD 2>/dev/null | head -30 || echo ""
+load_cache() {
+  local role="$1" cache="${ROLE_CACHE_DIR}/${role}-cache.json"
+  if [[ -f "${cache}" ]]; then
+    LAST_SHA=$(python3 -c "import json; print(json.load(open('${cache}')).get('last_sha',''))" 2>/dev/null || echo "")
+    LAST_TIME=$(python3 -c "import json; print(json.load(open('${cache}')).get('updated_at',''))" 2>/dev/null || echo "")
+    echo "  last cycle: ${LAST_TIME} (${LAST_SHA:0:7})"
   else
-    echo ""  # full analysis needed
+    LAST_SHA=""
+    echo "  no cache — full analysis"
   fi
 }
 
-save_role_cache() {
-  local role="$1"
-  shift
-  local cache_file="${ROLE_CACHE_DIR}/${role}-cache.json"
+save_cache() {
+  local role="$1" summary="$2"
   python3 -c "
 import json, time, pathlib
-cache = {
-    'schema_version': 1,
-    'role': '${role}',
-    'updated_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-    'updated_at_epoch': time.time(),
-    'last_sha': '${ROLE_CURRENT_SHA}',
-    'cycle_summary': '$*'
-}
-pathlib.Path('${cache_file}').write_text(json.dumps(cache, indent=2))
+cache = {'schema_version':2, 'role':'${role}', 'updated_at':'$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'updated_at_epoch':time.time(), 'last_sha':'${NOW_SHA}', 'summary':'${summary}'}
+pathlib.Path('${ROLE_CACHE_DIR}/${role}-cache.json').write_text(json.dumps(cache, indent=2))
 " 2>/dev/null
 }
 
-mark_role_done() {
-  local role="$1" msg="${2:-cycle complete}"
-  echo -e "  ${GREEN}[${role}]${RESET} ${msg}"
+push_changes() {
+  local msg="${1:-role-engine cycle}"
+  cd "${DOCS_DIR}"
+  if [[ -z "$(git status --porcelain 2>/dev/null)" ]]; then
+    echo "  (no changes to push)"
+    return 0
+  fi
+  local br="task/role-$(date -u +%Y%m%d-%H%M%S)"
+  git checkout -b "${br}" 2>/dev/null
+  git add -A
+  git commit -m "${msg}
+Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
+  git checkout dev 2>/dev/null
+  git merge "${br}" --no-edit 2>/dev/null
+  git push origin dev 2>/dev/null
+  OK "pushed to origin/dev"
+}
+
+# ── Helper: get ledger entry for a task ──────────────────────────────────────
+ledger_get() {
+  local tid="$1" field="$2"
+  python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${tid}':
+            print(t.get('${field}',''))
+" 2>/dev/null || echo ""
+}
+
+# ── Helper: get all tasks with a given status ────────────────────────────────
+ledger_filter() {
+  local status="$1"
+  python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('status') == '${status}':
+            print(f\"{t['task_id']}|{t.get('repo','?')}|{t.get('issue','')}|{t.get('blocked_by',[])}|{t.get('validation','')[:80]}\")
+" 2>/dev/null
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROLE: Project Manager — task lifecycle, ledger sync, dispatch, #68 heartbeat
+# PM: 3 deep reasoning points
 # ══════════════════════════════════════════════════════════════════════════════
 
 role_pm() {
-  role_header "Project Manager"
-  load_role_cache "pm"
-  sync_repos
+  H1 "PM — Project Manager Reasoning"
+  load_cache "pm"
+  sync_all
 
-  local actions=0
+  # ── PM-1: WHY are there blocked tasks? Trace to root blocker ───────────────
+  H1 "PM-1: Blocked Task Root Cause Analysis"
 
-  # PM-1: Task State Ledger Audit
-  echo ""
-  echo "--- PM-1: Ledger Sync ---"
-  local stale_count=0 unlinked_count=0 conflict_count=0
+  local blocked_tasks
+  blocked_tasks=$(ledger_filter "blocked")
 
-  # Find tasks in non-terminal states without GitHub issues
-  unlinked_count=$(python3 -c "
-import json
-from pathlib import Path
-ledger = json.loads(Path('${DOCS_DIR}/docs/development/task-state-ledger.json').read_text())
-non_terminal = {'ready','in_progress','implemented','verified','partial','blocked','evidence_missing'}
-count = 0
-for m in ledger.get('modules',[]):
-    for t in m.get('tasks',[]):
-        if t.get('status','') in non_terminal and not t.get('issue',''):
-            count += 1
-print(count)
-" 2>/dev/null || echo "?")
-
-  if [[ "${unlinked_count}" -gt 0 ]]; then
-    warn "${unlinked_count} tasks without GitHub issue links"
-    actions=$((actions + 1))
+  if [[ -z "${blocked_tasks}" ]]; then
+    OK "no blocked tasks"
   else
-    ok "all non-terminal tasks have issue links"
+    echo "  blocked tasks:"
+    echo "${blocked_tasks}" | head -10 | while IFS='|' read -r tid repo issue blockers validation; do
+      [[ -z "${tid}" ]] && continue
+      echo "    ${tid} (${repo})"
+
+      # WHY is it blocked? Trace each blocker's status
+      local blocker_list; blocker_list=$(echo "${blockers}" | tr -d '[]' | tr ',' '\n' | sed "s/'//g" | sed "s/ //g")
+      for blocker in ${blocker_list}; do
+        [[ -z "${blocker}" ]] && continue
+        local b_status; b_status=$(ledger_get "${blocker}" "status")
+        local b_repo; b_repo=$(ledger_get "${blocker}" "repo")
+        local b_issue; b_issue=$(ledger_get "${blocker}" "issue")
+
+        ASK "blocked by ${blocker} → WHY is ${blocker} not done?"
+
+        # Gather context for reasoning
+        echo "      blocker: ${blocker} (${b_repo}) | status=${b_status}"
+        [[ -n "${b_issue}" ]] && echo "      issue: ${b_issue}"
+
+        # Check if blocker itself is blocked
+        local b_blockers; b_blockers=$(ledger_get "${blocker}" "blocked_by")
+        [[ -n "${b_blockers}" && "${b_blockers}" != "[]" ]] && echo "      meta-blocked: ${blocker} is blocked by ${b_blockers}"
+
+        # Check if blocker has a review contract
+        local brf="${DOCS_DIR}/docs/development/review-contracts/${blocker}-review.json"
+        [[ -f "${brf}" ]] && python3 -c "
+import json; d=json.load(open('${brf}'))
+print(f\"      review: state={d.get('state')} actor={d.get('next_required_actor')}\")
+" 2>/dev/null
+
+        # REASONING PROMPT
+        case "${b_status}" in
+          blocked)
+            ASK "→ ${blocker} itself is blocked — this is a CHAIN. Find the root blocker and fix it first."
+            NEXT "Action: trace dependency chain to root → fix root → chain unblocks"
+            ;;
+          partial|evidence_missing)
+            ASK "→ ${blocker} is ${b_status} — implementation exists but evidence is missing. WHY is evidence missing?"
+            ASK "   IF CI unavailable → fix CI first"
+            ASK "   IF nobody collected it → create evidence-collection subtask"
+            ASK "   IF evidence exists but not recorded → update ledger/task doc"
+            NEXT "Action: diagnose evidence gap, create collection task or update records"
+            ;;
+          ready|in_progress|implementing)
+            ASK "→ ${blocker} is ${b_status} — it's in progress but not done. WHY is it stalled?"
+            ASK "   IF Claude picked it up and stalled → check agent-state.json for recovery"
+            ASK "   IF never dispatched → check dispatch queue priority"
+            NEXT "Action: check agent state, bump dispatch priority, or create reminder SAP"
+            ;;
+          *)
+            ASK "→ ${blocker} status=${b_status} — unexpected state. Investigate."
+            NEXT "Action: read task doc and review contract for ${blocker}"
+            ;;
+        esac
+        echo ""
+      done
+    done
   fi
 
-  # Find tasks whose doc status disagrees with ledger status
-  conflict_count=$(python3 -c "
+  # ── PM-2: WHY are there doc/ledger conflicts? ──────────────────────────────
+  H1 "PM-2: Doc/Ledger Consistency Reasoning"
+
+  local conflicts_found=0
+  python3 -c "
 import json, re
 from pathlib import Path
+
 docs = Path('${DOCS_DIR}')
 ledger = json.loads((docs / 'docs/development/task-state-ledger.json').read_text())
-conflicts = 0
+
 for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
         tid = t.get('task_id','')
         doc_path = docs / 'docs/development/tasks' / f'{tid}.md'
-        if not doc_path.exists():
-            continue
+        if not doc_path.exists(): continue
+
         content = doc_path.read_text()
-        m = re.search(r'>\\s*Status:\\s*(\\S+)', content)
-        if not m:
-            continue
-        doc_status = m.group(1).lower()
+        dm = re.search(r'>\\s*Status:\\s*(\\S+)', content)
+        if not dm: continue
+
+        doc_status = dm.group(1).lower().replace(':','').strip()
         ledger_status = t.get('status','').lower()
-        completed_terms = {'completed','completed_with_skip'}
-        if doc_status in completed_terms and ledger_status not in completed_terms:
-            conflicts += 1
-            print(f'CONFLICT: {tid} doc={doc_status} ledger={ledger_status}')
-        elif ledger_status in completed_terms and doc_status not in completed_terms:
-            conflicts += 1
-            print(f'CONFLICT: {tid} doc={doc_status} ledger={ledger_status}')
-print(conflicts)
-" 2>/dev/null || echo "0")
+        done = {'completed','completed_with_skip'}
 
-  if [[ "${conflict_count}" -gt 0 ]]; then
-    warn "${conflict_count} doc/ledger status conflicts"
-    actions=$((actions + 1))
-  else
-    ok "doc ↔ ledger status consistent"
-  fi
+        if doc_status in done and ledger_status not in done:
+            print(f'CONFLICT|{tid}|{t.get(\"repo\",\"?\")}|doc={doc_status}|ledger={ledger_status}|{t.get(\"issue\",\"\")}')
+        elif ledger_status in done and doc_status not in done:
+            print(f'CONFLICT|{tid}|{t.get(\"repo\",\"?\")}|doc={doc_status}|ledger={ledger_status}|{t.get(\"issue\",\"\")}')
+" 2>/dev/null | head -10 | while IFS='|' read -r tag tid repo detail1 detail2 issue; do
+    [[ -z "${tid}" ]] && continue
+    conflicts_found=$((conflicts_found + 1))
 
-  # PM-2: GitHub Issue Sync
-  echo ""
-  echo "--- PM-2: GitHub Issue Management ---"
+    ASK "WHY does ${tid} (${repo}) have mismatched status: ${detail1} vs ${detail2}?"
 
-  # Check for open issues that should be linked to tasks
-  local orphan_issues=0
-  for repo in "livemask-backend" "livemask-admin" "livemask-app" "livemask-nodeagent" "livemask-job-service" "livemask-website"; do
-    local open_count
-    open_count=$(gh issue list --repo "MyAiDevs/${repo}" --state open --limit 5 --json number,title --jq 'length' 2>/dev/null || echo "0")
-    if [[ "${open_count}" -gt 0 ]]; then
-      echo "  ${repo}: ${open_count} open issues"
-      # Check if each issue is referenced in ledger
-      gh issue list --repo "MyAiDevs/${repo}" --state open --limit 5 --json number,title 2>/dev/null | \
-        python3 -c "
-import json,sys
-ledger_text = open('${DOCS_DIR}/docs/development/task-state-ledger.json').read()
-for issue in json.load(sys.stdin):
-    num = str(issue['number'])
-    if f'/${num}' not in ledger_text and f'/issues/{num}' not in ledger_text:
-        print(f'  ORPHAN: {repo}#{num}: {issue[\"title\"][:80]}')
-" 2>/dev/null | while read -r line; do
-        [[ -z "${line}" ]] && continue
-        warn "${line}"
-        orphan_issues=$((orphan_issues + 1))
-      done
-    fi
-  done
-  [[ "${orphan_issues}" -eq 0 ]] && ok "all open issues referenced in ledger"
-
-  # PM-3: Dispatch Queue Health
-  echo ""
-  echo "--- PM-3: Dispatch Queue ---"
-  local candidate_count blocked_count
-  read -r candidate_count blocked_count <<< "$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
-    python3 -c "import json,sys; d=json.load(sys.stdin); s=d['summary']; print(s['candidate_count'], s['blocked_open_count'])" 2>/dev/null || echo "? ?")"
-
-  echo "  candidates: ${candidate_count} | blocked: ${blocked_count}"
-
-  if [[ "${candidate_count}" == "0" && "${blocked_count}" == "0" ]]; then
-    warn "queue empty AND no blocked tasks — system may need task decomposition"
-    actions=$((actions + 1))
-  elif [[ "${candidate_count}" == "0" ]]; then
-    warn "no dispatchable tasks — ${blocked_count} tasks blocked"
-    # Show top blockers
-    python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
-      python3 -c "
-import json,sys
-d = json.load(sys.stdin)
-for t in d.get('blocked_open',[])[:5]:
-    blockers = ','.join(t.get('blocked_by_open',[])[:3]) or 'status-open'
-    print(f'  BLOCKED: {t[\"task_id\"]} ({t[\"repo\"]}, by={blockers})')
-" 2>/dev/null
-  else
-    ok "${candidate_count} tasks ready for dispatch"
-  fi
-
-  # PM-4: Review Contract Pipeline
-  echo ""
-  echo "--- PM-4: Review Pipeline ---"
-  local pending_reviews=0
-  for rf in "${DOCS_DIR}/docs/development/review-contracts/"*.json; do
-    [[ ! -f "${rf}" ]] && continue
-    [[ "$(basename "${rf}")" == ".gitkeep" ]] && continue
-    local state tid actor
-    read -r state tid actor <<< "$(python3 -c "
+    # Gather context: check review contract and git log
+    local rf="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
+    if [[ -f "${rf}" ]]; then
+      local rstate verdict
+      read -r rstate verdict <<< "$(python3 -c "
 import json; d=json.load(open('${rf}'))
-print(d.get('state','?'), d.get('task_id','?'), d.get('next_required_actor','?'))
-" 2>/dev/null || echo "? ? ?")"
+state = d.get('state','?')
+for r in d.get('rounds',[]):
+    cx = r.get('codex',{})
+    if cx: print(state, cx.get('verdict','?')); break
+else: print(state, 'no_verdict')
+" 2>/dev/null || echo "? ?")"
 
-    case "${state}" in
-      under_codex_review) act "pending review: ${tid} (waiting for ${actor})"; pending_reviews=$((pending_reviews + 1));;
-      changes_requested)  warn "needs revision: ${tid} (${actor} must act)"; pending_reviews=$((pending_reviews + 1));;
-      approved)           ok "approved, ready for merge: ${tid}";;
-      blocked)            warn "BLOCKED: ${tid}";;
-    esac
-  done
-  [[ "${pending_reviews}" -eq 0 ]] && ok "review pipeline clear"
-  actions=$((actions + pending_reviews))
+      ASK "   review contract: state=${rstate} verdict=${verdict}"
+      # WHY reasoning
+      if [[ "${rstate}" == "changes_requested" ]]; then
+        ASK "→ Contract says CHANGES_REQUESTED but doc/ledger says completed. Claude may have pre-maturely marked done."
+        NEXT "Action: revert doc to Partial, create SAP warning Claude"
+      elif [[ "${rstate}" == "under_codex_review" ]]; then
+        ASK "→ Contract is under review — status should NOT be completed. Claude may have jumped the gun."
+        NEXT "Action: hold status at implemented/verified until verdict"
+      elif [[ "${verdict}" == "approved" || "${rstate}" == "approved" ]]; then
+        ASK "→ Contract approved — doc/ledger should BOTH be completed. Which side is stale?"
+        NEXT "Action: sync the stale side to completed"
+      fi
+    else
+      ASK "→ No review contract exists — completion without review is a PROCESS_DEFECT"
+      NEXT "Action: create review contract retroactively, mark task as evidence_missing until reviewed"
+    fi
 
-  # PM-5: Write #68 heartbeat if actions found
-  if [[ "${actions}" -gt 0 ]]; then
+    # Check git for dev merge evidence
+    local dev_merge; dev_merge=$(git -C "${LIVEMASK_ROOT}/${repo}" log --oneline --grep="${tid}" -1 2>/dev/null || echo "")
+    [[ -n "${dev_merge}" ]] && echo "      dev merge: ${dev_merge}" || ASK "      no dev merge commit found — was this ever pushed?"
     echo ""
-    info "writing PM heartbeat to #68..."
-    local heartbeat_body="PM heartbeat $(date -u +%Y-%m-%dT%H:%MZ)
-- ledger: ${unlinked_count} unlinked, ${conflict_count} doc/ledger conflicts
-- issues: ${orphan_issues} orphaned
-- queue: ${candidate_count} candidates, ${blocked_count} blocked
-- reviews: ${pending_reviews} pending
-- CI: backend=$(gh run list --repo MyAiDevs/livemask-backend --branch dev --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo '?') admin=$(gh run list --repo MyAiDevs/livemask-admin --branch dev --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo '?')"
+  done
 
-    gh issue comment 68 --repo MyAiDevs/livemask-docs --body "${heartbeat_body}" 2>/dev/null || true
-    ok "#68 heartbeat written"
+  [[ "${conflicts_found}" -eq 0 ]] && OK "all doc/ledger statuses consistent"
+
+  # ── PM-3: WHY is the dispatch queue empty? What's the bottleneck? ──────────
+  H1 "PM-3: Queue Health Root Cause"
+
+  local candidates blocked
+  read -r candidates blocked <<< "$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
+    python3 -c "import json,sys; d=json.load(sys.stdin)['summary']; print(d['candidate_count'], d['blocked_open_count'])" 2>/dev/null || echo "? ?")"
+
+  echo "  candidates: ${candidates} | blocked: ${blocked}"
+
+  if [[ "${candidates}" == "0" ]]; then
+    ASK "WHY is the dispatch queue empty?"
+
+    if [[ "${blocked}" == "0" || "${blocked}" == "?" ]]; then
+      ASK "→ No candidates AND no blocked tasks. Possible causes:"
+      ASK "   1. All MVP tasks are done — system is complete (verify against contracts)"
+      ASK "   2. Tasks exist in ledger but planner can't dispatch them (check readiness)"
+      ASK "   3. No new tasks have been created (check Product role for decomposition gaps)"
+      ASK "   4. All tasks are in non-dispatchable states (in_progress without progress)"
+
+      # Check which statuses dominate
+      local status_dist; status_dist=$(python3 -c "
+import json
+from collections import Counter
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+statuses = Counter()
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        statuses[t.get('status','?')] += 1
+for s,c in statuses.most_common(8): print(f'{s}: {c}')
+" 2>/dev/null)
+      echo "      status distribution:"
+      echo "${status_dist}" | while read -r line; do echo "        ${line}"; done
+
+      NEXT "Action: if MVP complete → mark milestone. If tasks stuck → diagnose each stuck status. If no tasks → trigger Product decomposition."
+    else
+      ASK "→ ${blocked} tasks are blocked — the queue IS the blocker list. Resolve root blockers to unblock candidates."
+      NEXT "Action: run PM-1 blocker analysis for each blocked task"
+    fi
+  else
+    OK "${candidates} tasks ready — queue is healthy"
   fi
 
-  save_role_cache "pm" "actions=${actions} linked=${unlinked_count} conflicts=${conflict_count}"
-  mark_role_done "pm" "${actions} actions identified"
-  return 0
+  save_cache "pm" "blocked=$(echo "${blocked_tasks}" | wc -l | tr -d ' ') conflicts=${conflicts_found} queue=${candidates}/${blocked}"
+  H1 "PM complete. All findings require concrete NEXT actions above."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROLE: Product Manager — contracts, MVP, requirements, direction alignment
+# PRODUCT: 3 deep reasoning points
 # ══════════════════════════════════════════════════════════════════════════════
 
 role_product() {
-  role_header "Product Manager"
-  load_role_cache "product"
-  sync_repos
+  H1 "PRODUCT — Product Manager Reasoning"
+  load_cache "product"
+  sync_all
 
-  local actions=0
+  # ── PROD-1: WHY are Ready contracts not implemented? ───────────────────────
+  H1 "PROD-1: Contract-to-Implementation Gap Reasoning"
 
-  # PROD-1: Contract → Task Coverage
-  echo ""
-  echo "--- PROD-1: Contract Coverage ---"
   local uncovered=0
   python3 -c "
 import json, re
@@ -292,6 +319,7 @@ for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
         if t.get('task_id'): all_tasks.add(t['task_id'])
 
+contracts_with_gaps = []
 ci = docs / 'docs/contracts/contract-index.md'
 if not ci.exists():
     print('NO_INDEX')
@@ -300,203 +328,247 @@ if not ci.exists():
 for line in ci.read_text().split('\n'):
     if '|' not in line: continue
     parts = [p.strip() for p in line.split('|')]
-    if len(parts) < 4: continue
-    status = parts[2] if len(parts) > 2 else ''
+    if len(parts) < 5: continue
+    status = parts[2]
     if status not in ('Ready','Stable'): continue
+    domain = parts[0].strip()
+    contract_file = parts[1].strip() if len(parts) > 1 else ''
+    impacted = parts[4].strip() if len(parts) > 4 else ''
     tasks_in_line = re.findall(r'TASK-[A-Z0-9-]+', line)
     covered = any(t in all_tasks for t in tasks_in_line)
-    if not covered and tasks_in_line:
-        domain = parts[0].strip()[:40]
-        print(f'UNCOVERED: {domain} | contract={status} | task={tasks_in_line[0]}')
-" 2>/dev/null | head -15 | while read -r line; do
-    [[ -z "${line}" ]] && continue
-    warn "${line}"
-    uncovered=$((uncovered + 1))
-  done
-  [[ "${uncovered}" -eq 0 ]] && ok "all Ready/Stable contracts have task coverage"
-  actions=$((actions + uncovered))
+    if not covered:
+        contracts_with_gaps.append(f'{domain}|{contract_file}|{status}|{impacted}|{tasks_in_line[0] if tasks_in_line else \"none\"}')
 
-  # PROD-2: MVP Milestone Progress
-  echo ""
-  echo "--- PROD-2: MVP Milestones ---"
+for c in contracts_with_gaps[:10]:
+    print(c)
+" 2>/dev/null | while IFS='|' read -r domain contract status impacted suggested_task; do
+    [[ -z "${domain}" ]] && continue
+    uncovered=$((uncovered + 1))
+
+    ASK "WHY is '${domain}' (${status} contract) not implemented?"
+
+    # Check: does the contract file exist and have detail?
+    local cf="${DOCS_DIR}/docs/contracts/${contract}"
+    if [[ -f "${cf}" ]]; then
+      local cf_size; cf_size=$(wc -c < "${cf}" | tr -d ' ')
+      echo "      contract: ${contract} (${cf_size} bytes)"
+      ASK "   Contract is ${status} — implementation should exist. WHY doesn't it?"
+
+      # Reason hypotheses
+      ASK "   IF no one created the task → Product gap: decomposition pipeline didn't run"
+      ASK "   IF task exists but in wrong status → check ledger for ${suggested_task}"
+      ASK "   IF contract was just marked Ready → normal: task creation is next step"
+      ASK "   IF contract is purely docs/design → does it actually need implementation?"
+
+      # Check if there's a dependency blocking this
+      local suggested_tid="${suggested_task}"
+      local in_ledger; in_ledger=$(ledger_get "${suggested_tid}" "status")
+      [[ -z "${in_ledger}" ]] && ASK "   ${suggested_tid} NOT in ledger — task was never created"
+      [[ -n "${in_ledger}" ]] && ASK "   ${suggested_tid} exists in ledger with status=${in_ledger}"
+
+      NEXT "Action: IF contract needs implementation AND no task exists → create task stub with blocked_by chain. IF task exists but wrong status → fix. IF docs-only → mark contract as Stable."
+    else
+      WARN "   contract file missing: ${contract}"
+    fi
+    echo ""
+  done
+
+  [[ "${uncovered}" -eq 0 ]] && OK "all Ready/Stable contracts have task coverage"
+
+  # ── PROD-2: WHY are MVP milestones not progressing? ────────────────────────
+  H1 "PROD-2: MVP Milestone Progress Reasoning"
+
   if [[ -f "${DOCS_DIR}/docs/development/MVP_IMPLEMENTATION_PLAN.md" ]]; then
     local completed ready partial
     completed=$(grep -c "Completed" "${DOCS_DIR}/docs/development/MVP_IMPLEMENTATION_PLAN.md" 2>/dev/null || echo "0")
     ready=$(grep -c "Ready" "${DOCS_DIR}/docs/development/MVP_IMPLEMENTATION_PLAN.md" 2>/dev/null || echo "0")
     partial=$(grep -c "Partial" "${DOCS_DIR}/docs/development/MVP_IMPLEMENTATION_PLAN.md" 2>/dev/null || echo "0")
-    echo "  MVP items: ${completed} completed, ${ready} ready, ${partial} partial"
+    local total=$((completed + ready + partial))
+    local pct=$(( completed * 100 / (total + 1) ))
+
+    echo "  MVP: ${completed}/${total} completed (${pct}%) | ${ready} ready | ${partial} partial"
+
+    ASK "WHY is completion at ${pct}%? What's blocking the remaining ${ready}+${partial} items?"
+
+    if [[ "${partial}" -gt 0 ]]; then
+      ASK "→ ${partial} items are partially complete. WHY are they stuck?"
+      ASK "   Check each partial item: is it waiting for evidence? blocked by another task? abandoned?"
+      NEXT "Action: audit each partial item — either finish it or explicitly defer with reason"
+    fi
+    if [[ "${ready}" -gt 0 ]]; then
+      ASK "→ ${ready} items are ready but not started. WHY aren't they dispatched?"
+      ASK "   IF queue has other priorities → correct"
+      ASK "   IF they depend on blocked tasks → diagnose blockers"
+      ASK "   IF no one picked them up → check dispatch pipeline"
+      NEXT "Action: ensure ready items are in planner queue with correct priority"
+    fi
   fi
 
-  # PROD-3: Requirement Inbox Processing
-  echo ""
-  echo "--- PROD-3: Requirement Inbox ---"
+  # ── PROD-3: WHY are requirements sitting in inbox? ─────────────────────────
+  H1 "PROD-3: Requirement Inbox Processing"
+
   local inbox_count=0
   for f in "${DOCS_DIR}/docs/development/requirements-inbox/"*.json; do
     [[ ! -f "${f}" ]] && continue
     [[ "$(basename "${f}")" == ".gitkeep" ]] && continue
     inbox_count=$((inbox_count + 1))
+
     local gen_by gen_at
     read -r gen_by gen_at <<< "$(python3 -c "
 import json; d=json.load(open('${f}'))
 print(d.get('generated_by','?'), d.get('generated_at','?')[:16])
 " 2>/dev/null || echo "? ?")"
-    echo "  inbox: $(basename "${f}") (by=${gen_by}, at=${gen_at})"
+
+    ASK "WHY is this requirement still in inbox? (by=${gen_by}, at=${gen_at})"
+    ASK "→ IF it's valid → create TASK stub and move to ledger"
+    ASK "→ IF it needs more detail → read source contract, flesh out scope"
+    ASK "→ IF it's obsolete → delete or mark as rejected with reason"
+    ASK "→ IF awaiting human approval → create GitHub Issue for review"
+    NEXT "Action: process or reject each inbox item — inbox should trend to zero"
+    echo ""
   done
-  if [[ "${inbox_count}" -gt 0 ]]; then
-    act "${inbox_count} requirements pending review — create tasks or reject with reason"
-    actions=$((actions + inbox_count))
-  else
-    ok "requirement inbox empty"
-  fi
+  [[ "${inbox_count}" -eq 0 ]] && OK "requirement inbox clean"
 
-  # PROD-4: Direction Alignment Check
-  echo ""
-  echo "--- PROD-4: Direction Check ---"
-  # Compare active tasks against MVP priority
-  python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
-    python3 -c "
-import json,sys
-d = json.load(sys.stdin)
-candidates = d.get('global_next',[])
-if not candidates:
-    print('  no candidates to check')
-else:
-    priorities = [t['priority'] for t in candidates[:10]]
-    p0_count = priorities.count('P0')
-    p1_count = priorities.count('P1')
-    print(f'  top 10 candidates: P0={p0_count} P1={p1_count} P2+={10-p0_count-p1_count}')
-    if p0_count == 0 and d['summary']['candidate_count'] > 5:
-        print('  DIRECTION: no P0 tasks in queue — verify priority assignments')
-" 2>/dev/null
-
-  save_role_cache "product" "actions=${actions} uncovered=${uncovered} inbox=${inbox_count}"
-  mark_role_done "product" "${actions} actions identified"
-  return 0
+  save_cache "product" "gaps=${uncovered} mvp=${pct:-?}% inbox=${inbox_count}"
+  H1 "Product complete."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROLE: Tech Lead — code quality, API/Swagger, DB migration, architecture
+# TECH: 3 deep reasoning points
 # ══════════════════════════════════════════════════════════════════════════════
 
 role_tech() {
-  role_header "Tech Lead"
-  load_role_cache "tech"
-  sync_repos
+  H1 "TECH — Tech Lead Reasoning"
+  load_cache "tech"
+  sync_all
 
-  local actions=0
+  # ── TECH-1: API/Swagger drift — WHY and what exactly is missing? ───────────
+  H1 "TECH-1: API/Swagger Drift Analysis"
 
-  # TECH-1: API/Swagger Alignment
-  echo ""
-  echo "--- TECH-1: API/Swagger Sync ---"
-  if [[ -d "${LIVEMASK_ROOT}/livemask-backend/internal/swagger" ]]; then
-    local swagger_age
-    swagger_age=$(find "${LIVEMASK_ROOT}/livemask-backend/internal/swagger" -name "*.yaml" -mtime -7 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "${swagger_age}" -gt 0 ]]; then
-      ok "Swagger updated within 7 days (${swagger_age} files)"
-    else
-      warn "Swagger files not updated recently — API changes may not be documented"
-      actions=$((actions + 1))
-    fi
+  local BACKEND="${LIVEMASK_ROOT}/livemask-backend"
+  if [[ -f "${BACKEND}/main.go" ]]; then
+    # Extract actual routes from main.go
+    local routes; routes=$(grep -oE '"(/[^"]+)"' "${BACKEND}/main.go" 2>/dev/null | tr -d '"' | sort -u)
+    local route_count; route_count=$(echo "${routes}" | grep -c "/" || echo "0")
 
-    # Check if main.go route count matches Swagger path count
-    local route_count swagger_path_count
-    route_count=$(grep -c 'mux.HandleFunc\|Handle(' "${LIVEMASK_ROOT}/livemask-backend/main.go" 2>/dev/null || echo "0")
-    swagger_path_count=$(grep -c '^  /' "${LIVEMASK_ROOT}/livemask-backend/internal/swagger/"*.yaml 2>/dev/null || echo "0")
-    echo "  routes in main.go: ${route_count} | swagger paths: ${swagger_path_count}"
-  else
-    echo "  (backend swagger dir not found — skipping)"
-  fi
-
-  # TECH-2: Database Migration Safety
-  echo ""
-  echo "--- TECH-2: DB Migration ---"
-  local migration_count=0 add_column_count=0
-  for go_file in $(find "${LIVEMASK_ROOT}/livemask-backend/internal" -name "*.go" -not -name "*_test.go" 2>/dev/null); do
-    if grep -q "ALTER TABLE\|ADD COLUMN\|CREATE TABLE IF NOT EXISTS" "${go_file}" 2>/dev/null; then
-      migration_count=$((migration_count + 1))
-      if grep -q "ADD COLUMN" "${go_file}" 2>/dev/null; then
-        add_column_count=$((add_column_count + 1))
-      fi
-    fi
-  done
-  echo "  files with inline migrations: ${migration_count} (ADD COLUMN: ${add_column_count})"
-  if [[ "${add_column_count}" -gt 0 ]]; then
-    warn "${add_column_count} ADD COLUMN migrations — verify NOT NULL defaults and index impact"
-    actions=$((actions + 1))
-  fi
-
-  # TECH-3: Hardcoded Config Detection
-  echo ""
-  echo "--- TECH-3: Potential Hardcoded Values ---"
-  local hardcoded=0
-  # Check backend for magic strings that should be config
-  for pattern in "time.Duration([0-9]+)" "\"http://[^l]" ":=[0-9]{4,}" "DefaultMax\|DefaultMin\|DefaultTimeout"; do
-    local hits
-    hits=$(grep -r "${pattern}" "${LIVEMASK_ROOT}/livemask-backend/internal" --include="*.go" -l 2>/dev/null | head -3)
-    if [[ -n "${hits}" ]]; then
-      while read -r h; do
-        [[ -z "${h}" ]] && continue
-        hardcoded=$((hardcoded + 1))
-        echo "  potential hardcoded: $(echo "${h}" | sed "s|${LIVEMASK_ROOT}/livemask-backend/||")"
-      done <<< "${hits}"
-    fi
-  done
-  [[ "${hardcoded}" -eq 0 ]] && ok "no obvious hardcoded values detected"
-
-  # TECH-4: Cross-Repo Interface Consistency
-  echo ""
-  echo "--- TECH-4: Interface Consistency ---"
-  # Check that models shared between repos have consistent field names
-  local backend_models
-  backend_models=$(grep -rh "json:\"[a-z_]*\"" "${LIVEMASK_ROOT}/livemask-backend/internal" --include="*.go" 2>/dev/null | grep -oE 'json:"[a-z_]+"' | sed 's/json:"//' | sed 's/"//' | sort -u | head -30)
-  if [[ -n "${backend_models}" ]]; then
-    local mismatch=0
-    # Check admin TypeScript types match backend JSON tags
-    for field in $(echo "${backend_models}" | head -10); do
-      local admin_hits
-      admin_hits=$(grep -r "${field}" "${LIVEMASK_ROOT}/livemask-admin/src/types" --include="*.ts" -l 2>/dev/null | wc -l | tr -d ' ')
-      local app_hits
-      app_hits=$(grep -r "${field}" "${LIVEMASK_ROOT}/livemask-app/lib/models" --include="*.dart" -l 2>/dev/null | wc -l | tr -d ' ')
-      [[ "${admin_hits}" == "0" && "${app_hits}" == "0" ]] && continue
-      echo "  field '${field}': admin=${admin_hits} files, app=${app_hits} files"
+    # Extract swagger paths
+    local swagger_paths=""
+    for sf in "${BACKEND}/internal/swagger/"*.yaml; do
+      [[ -f "${sf}" ]] && swagger_paths+=$(grep -E '^\s+/' "${sf}" 2>/dev/null | sed 's/^[[:space:]]*//' | sed 's/:.*$//')
+      swagger_paths+=$'\n'
     done
+    local swagger_count; swagger_count=$(echo "${swagger_paths}" | grep -c "/" || echo "0")
+
+    echo "  routes: ${route_count} | swagger paths: ${swagger_count}"
+
+    if [[ "${route_count}" -gt "${swagger_count}" ]]; then
+      local diff=$((route_count - swagger_count))
+      WARN "${diff} routes may be undocumented"
+
+      # Find exact missing routes
+      ASK "WHY are ${diff} routes not in Swagger? Which ones exactly?"
+      echo "  Routes in main.go but possibly not in swagger:"
+      echo "${routes}" | head -30 | while read -r route; do
+        [[ -z "${route}" ]] && continue
+        # Skip non-API routes
+        [[ "${route}" != /api/* && "${route}" != /admin/* && "${route}" != /internal/* ]] && continue
+        local in_swagger; in_swagger=$(echo "${swagger_paths}" | grep -c "${route}" 2>/dev/null || echo "0")
+        if [[ "${in_swagger}" -eq 0 ]]; then
+          echo "    MISSING: ${route}"
+        fi
+      done
+
+      ASK "   IF route was just added → normal delay, create Swagger sync task"
+      ASK "   IF route has been there for weeks → tech debt, prioritize Swagger completion"
+      ASK "   IF route is internal only (/internal/) → may not need public Swagger, document internally"
+      NEXT "Action: create TASK-BACKEND-SWAGGER-SYNC listing exact missing routes"
+    else
+      OK "Swagger coverage matches or exceeds routes"
+    fi
   fi
 
-  save_role_cache "tech" "actions=${actions} migrations=${migration_count} hardcoded=${hardcoded}"
-  mark_role_done "tech" "${actions} actions identified"
-  return 0
+  # ── TECH-2: DB Migration Safety — WHY was ADD COLUMN used? ─────────────────
+  H1 "TECH-2: DB Migration Safety Review"
+
+  local add_cols=0
+  cd "${BACKEND}" 2>/dev/null || true
+  for go_file in $(grep -rl "ADD COLUMN" internal/ --include="*.go" 2>/dev/null); do
+    local cols; cols=$(grep -n "ADD COLUMN" "${go_file}" 2>/dev/null)
+    while IFS= read -r line; do
+      add_cols=$((add_cols + 1))
+      local lineno; lineno=$(echo "${line}" | cut -d: -f1)
+
+      ASK "WHY was ADD COLUMN needed in ${go_file}:${lineno}?"
+      echo "      ${line:0:150}"
+
+      # Check for NOT NULL without DEFAULT (dangerous)
+      if echo "${line}" | grep -q "NOT NULL" && ! echo "${line}" | grep -q "DEFAULT"; then
+        WARN "→ NOT NULL without DEFAULT — this will fail on existing rows with data!"
+        ASK "   IF table has existing rows → migration WILL fail. Add DEFAULT or make nullable."
+        NEXT "Action: FIX immediately — add DEFAULT value or remove NOT NULL constraint"
+      fi
+
+      # Check for indexes on new column
+      local col_name; col_name=$(echo "${line}" | grep -oE '[a-z_]+' | tail -3 | head -1)
+      if [[ -n "${col_name}" ]]; then
+        local has_index; has_index=$(grep -c "INDEX.*${col_name}" "${go_file}" 2>/dev/null || echo "0")
+        [[ "${has_index}" -eq 0 ]] && ASK "   New column '${col_name}' has no index — will queries on this column be slow?"
+      fi
+    done <<< "${cols}"
+  done
+  [[ "${add_cols}" -eq 0 ]] && OK "no ADD COLUMN migrations to review"
+
+  # ── TECH-3: Cross-repo interface breakage risk ─────────────────────────────
+  H1 "TECH-3: Cross-Repo Interface Change Detection"
+
+  # Check recent backend API changes that might break consumers
+  local recent_changes
+  recent_changes=$(git -C "${BACKEND}" log --oneline --since="3 days ago" --name-only -- 'internal/handler/*.go' 'main.go' 2>/dev/null | head -30)
+
+  if [[ -n "${recent_changes}" ]]; then
+    echo "  recent API changes (3 days):"
+    echo "${recent_changes}" | head -15 | while read -r line; do
+      [[ -z "${line}" ]] && continue
+      echo "    ${line}"
+    done
+
+    ASK "WHY were these API changes made? Do downstream consumers know?"
+    ASK "→ Check: does Admin use any changed endpoint? (grep in admin/src/lib/)"
+    ASK "→ Check: does App model match the new API shape? (grep in app/lib/models/)"
+    ASK "→ Check: does CI/CD smoke test the changed paths? (grep in ci-cd/scripts/)"
+
+    # Quick impact scan
+    for changed_file in $(echo "${recent_changes}" | grep "internal/" | head -5); do
+      local symbol; symbol=$(basename "${changed_file}" .go | sed 's/_test$//')
+      echo "      impact scan for '${symbol}':"
+      for rd in "${LIVEMASK_ROOT}"/livemask-admin "${LIVEMASK_ROOT}"/livemask-app "${LIVEMASK_ROOT}"/livemask-nodeagent "${LIVEMASK_ROOT}"/livemask-job-service; do
+        local rn; rn=$(basename "${rd}")
+        local hits; hits=$(grep -rl "${symbol}" "${rd}" --include="*.ts" --include="*.tsx" --include="*.dart" --include="*.go" 2>/dev/null | wc -l | tr -d ' ')
+        [[ "${hits}" -gt 0 ]] && ASK "      ${rn}: ${hits} files reference '${symbol}' — VERIFY compatibility"
+      done
+    done
+    NEXT "Action: if API shape changed and consumers not updated → create follow-up tasks for each affected repo"
+  else
+    OK "no recent API surface changes"
+  fi
+
+  save_cache "tech" "swagger_diff=${diff:-0} add_columns=${add_cols}"
+  H1 "Tech complete."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROLE: QA — test coverage, evidence verification, bug triage, regression
+# QA: 3 deep reasoning points
 # ══════════════════════════════════════════════════════════════════════════════
 
 role_qa() {
-  role_header "QA"
-  load_role_cache "qa"
-  sync_repos
+  H1 "QA — Quality Assurance Reasoning"
+  load_cache "qa"
+  sync_all
 
-  local actions=0
+  # ── QA-1: WHY does a completed task lack evidence? ─────────────────────────
+  H1 "QA-1: Completion Evidence Deep Verification"
 
-  # QA-1: Smoke Test Coverage
-  echo ""
-  echo "--- QA-1: Smoke Coverage ---"
-  local smoke_count=0
-  smoke_count=$(find "${CI_CD_DIR}/scripts" -name "*smoke*.sh" 2>/dev/null | wc -l | tr -d ' ')
-  echo "  smoke scripts: ${smoke_count}"
-  # Check if recent backend API changes have smoke coverage
-  local recent_api_changes
-  recent_api_changes=$(git -C "${LIVEMASK_ROOT}/livemask-backend" log --oneline --since="7 days ago" 2>/dev/null | wc -l | tr -d ' ')
-  echo "  backend changes (7 days): ${recent_api_changes}"
-  if [[ "${recent_api_changes}" -gt 10 && "${smoke_count}" -lt 30 ]]; then
-    warn "high change velocity (${recent_api_changes} commits) with limited smoke coverage (${smoke_count} scripts)"
-    actions=$((actions + 1))
-  fi
-
-  # QA-2: Evidence Verification for Recently Completed Tasks
-  echo ""
-  echo "--- QA-2: Completion Evidence ---"
-  local recent_completed=0 missing_evidence=0
+  local evidence_gaps=0
   python3 -c "
 import json
 from pathlib import Path
@@ -506,242 +578,218 @@ for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
         if t.get('status') in ('completed','completed_with_skip','verified'):
             validation = t.get('validation','')
-            if not validation or len(validation.strip()) < 10:
-                print(f'MISSING_EVIDENCE: {t[\"task_id\"]} ({t.get(\"repo\",\"?\")})')
-" 2>/dev/null | head -10 | while read -r line; do
-    [[ -z "${line}" ]] && continue
-    warn "${line}"
-    missing_evidence=$((missing_evidence + 1))
-  done
-  [[ "${missing_evidence}" -eq 0 ]] && ok "all completed tasks have validation evidence"
-  actions=$((actions + missing_evidence))
+            if len(validation.strip()) < 20:
+                print(f\"{t['task_id']}|{t.get('repo','?')}|{t.get('issue','')}\")
+" 2>/dev/null | head -5 | while IFS='|' read -r tid repo issue; do
+    [[ -z "${tid}" ]] && continue
+    evidence_gaps=$((evidence_gaps + 1))
 
-  # QA-3: Bug Triage
-  echo ""
-  echo "--- QA-3: Bug Triage ---"
-  local untriaged=0
-  for repo in "livemask-docs" "livemask-backend" "livemask-admin" "livemask-app" "livemask-nodeagent" "livemask-website"; do
-    local count
-    count=$(gh issue list --repo "MyAiDevs/${repo}" --label "bug" --state open --limit 20 --json number --jq 'length' 2>/dev/null || echo "0")
-    if [[ "${count}" -gt 0 ]]; then
-      echo "  ${repo}: ${count} open bugs"
-      untriaged=$((untriaged + count))
+    ASK "WHY is ${tid} marked completed but has no validation evidence?"
+
+    # Check review contract
+    local rf="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
+    if [[ -f "${rf}" ]]; then
+      local rstate verdict
+      read -r rstate verdict <<< "$(python3 -c "
+import json; d=json.load(open('${rf}'))
+state=d.get('state','?')
+for r in d.get('rounds',[]):
+    cx=r.get('codex',{})
+    if cx: print(state, cx.get('verdict','?')); break
+else: print(state, 'no_verdict')
+" 2>/dev/null || echo "? ?")"
+
+      ASK "   review contract: state=${rstate} verdict=${verdict}"
+      ASK "   IF approved by Codex → ledger validation field should have been filled, find the gap"
+      ASK "   IF no review contract → task was completed without review — PROCESS_DEFECT"
+      ASK "   IF changes_requested → task should NOT be completed, revert status"
+    else
+      ASK "   No review contract — completion without review is invalid"
     fi
-  done
-  if [[ "${untriaged}" -gt 0 ]]; then
-    warn "${untriaged} open bugs across repos — triage needed"
-    actions=$((actions + 1))
-  else
-    ok "no open bugs"
-  fi
 
-  # QA-4: Regression Risk Assessment
-  echo ""
-  echo "--- QA-4: Regression Risk ---"
-  # Check if recent changes touched high-risk areas
-  local high_risk_changes=0
-  for area in "auth" "billing" "payment" "configcenter" "node/credential"; do
-    local changes
-    changes=$(git -C "${LIVEMASK_ROOT}/livemask-backend" log --oneline --since="3 days ago" -- "internal/${area}/" 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "${changes}" -gt 0 ]]; then
-      echo "  HIGH RISK: ${area} changed ${changes} times in 3 days"
-      high_risk_changes=$((high_risk_changes + changes))
+    # Check if task doc has evidence
+    local task_doc="${DOCS_DIR}/docs/development/tasks/${tid}.md"
+    if [[ -f "${task_doc}" ]]; then
+      local has_evidence; has_evidence=$(grep -c "dev merge\|origin/dev\|validation\|check-docs" "${task_doc}" 2>/dev/null || echo "0")
+      ASK "   task doc has ${has_evidence} evidence references"
     fi
-  done
-  if [[ "${high_risk_changes}" -gt 3 ]]; then
-    warn "${high_risk_changes} changes in high-risk areas — regression testing recommended"
-    actions=$((actions + 1))
-  else
-    ok "low regression risk"
-  fi
 
-  # QA-5: Test Gap Detection
-  echo ""
-  echo "--- QA-5: Test Gap Detection ---"
-  # Find Go packages without test files
-  local no_test_packages=0
-  for pkg_dir in $(find "${LIVEMASK_ROOT}/livemask-backend/internal" -type d -mindepth 1 -maxdepth 1 2>/dev/null); do
-    local test_files
-    test_files=$(find "${pkg_dir}" -name "*_test.go" 2>/dev/null | wc -l | tr -d ' ')
-    if [[ "${test_files}" -eq 0 ]]; then
-      local pkg_name
-      pkg_name=$(basename "${pkg_dir}")
-      # Skip non-code packages
-      [[ "${pkg_name}" == "swagger" || "${pkg_name}" == "locale" || "${pkg_name}" == "dbschema" ]] && continue
-      echo "  no tests: backend/internal/${pkg_name}"
-      no_test_packages=$((no_test_packages + 1))
-    fi
-  done
-  if [[ "${no_test_packages}" -gt 0 ]]; then
-    warn "${no_test_packages} backend packages without test coverage"
-    actions=$((actions + 1))
-  else
-    ok "all backend packages have tests"
-  fi
-
-  save_role_cache "qa" "actions=${actions} bugs=${untriaged} evidence_gaps=${missing_evidence} no_test=${no_test_packages}"
-  mark_role_done "qa" "${actions} actions identified"
-  return 0
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ORCHESTRATOR: Run all roles, aggregate report
-# ══════════════════════════════════════════════════════════════════════════════
-
-run_all_roles() {
-  echo -e "${BOLD}${CYAN}"
-  echo "╔══════════════════════════════════════════════════╗"
-  echo "║  Multi-Role Automation Engine — All Roles       ║"
-  echo "╚══════════════════════════════════════════════════╝"
-  echo -e "${RESET}"
-
-  local pm_actions=0 prod_actions=0 tech_actions=0 qa_actions=0
-
-  role_pm && pm_actions=$? || true
-  role_product && prod_actions=$? || true
-  role_tech && tech_actions=$? || true
-  role_qa && qa_actions=$? || true
-
-  echo ""
-  echo -e "${BOLD}${CYAN}┌──────────────────────────────────────────────┐${RESET}"
-  echo -e "${BOLD}${CYAN}│  AGGREGATE REPORT                            │${RESET}"
-  echo -e "${BOLD}${CYAN}└──────────────────────────────────────────────┘${RESET}"
-  echo ""
-  echo "  PM:      ${pm_actions} actions"
-  echo "  Product: ${prod_actions} actions"
-  echo "  Tech:    ${tech_actions} actions"
-  echo "  QA:      ${qa_actions} actions"
-  echo "  ─────────────────────"
-  echo "  TOTAL:   $((pm_actions + prod_actions + tech_actions + qa_actions)) actions"
-
-  # Push all changes together
-  cd "${DOCS_DIR}"
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    local total_changes
-    total_changes=$(git status --porcelain | wc -l | tr -d ' ')
-    local role_branch="task/role-engine-$(date -u +%Y%m%d-%H%M%S)"
-    git checkout -b "${role_branch}" 2>/dev/null
-    git add -A
-    git commit -m "role-engine: multi-role cycle $(date -u +%Y-%m-%dT%H:%MZ)
-PM=${pm_actions} Product=${prod_actions} Tech=${tech_actions} QA=${qa_actions}
-Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
-    git checkout dev 2>/dev/null
-    git merge "${role_branch}" --no-edit 2>/dev/null
-    git push origin dev 2>/dev/null
+    NEXT "Action: IF completed without review → revert to evidence_missing, create review contract. IF review passed but ledger blank → fill ledger validation field."
     echo ""
-    ok "pushed ${total_changes} changes to origin/dev"
-  fi
+  done
+
+  [[ "${evidence_gaps}" -eq 0 ]] && OK "all completed tasks have validation evidence"
+
+  # ── QA-2: WHY are there open bugs? Triage and root cause ───────────────────
+  H1 "QA-2: Bug Triage with Root Cause"
+
+  local total_bugs=0
+  for repo in "livemask-backend" "livemask-admin" "livemask-app" "livemask-nodeagent" "livemask-website"; do
+    local bugs
+    bugs=$(gh issue list --repo "MyAiDevs/${repo}" --label "bug" --state open --limit 10 --json number,title,createdAt 2>/dev/null || echo "[]")
+    local bug_count; bug_count=$(echo "${bugs}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+
+    if [[ "${bug_count}" -gt 0 ]]; then
+      echo "  ${repo}: ${bug_count} open bugs"
+      total_bugs=$((total_bugs + bug_count))
+
+      # Analyze each bug
+      echo "${bugs}" | python3 -c "
+import json,sys
+for b in json.load(sys.stdin):
+    print(f\"{b['number']}|{b['title'][:100]}|{b['createdAt'][:10]}\")
+" 2>/dev/null | head -5 | while IFS='|' read -r num title created; do
+        [[ -z "${num}" ]] && continue
+
+        ASK "BUG ${repo}#${num}: '${title}' (since ${created})"
+        ASK "   WHY hasn't this been fixed?"
+
+        # Check age
+        local age_days; age_days=$(( ($(date +%s) - $(date -j -f "%Y-%m-%d" "${created}" +%s 2>/dev/null || date +%s)) / 86400 ))
+        [[ "${age_days}" -gt 7 ]] && ASK "   → ${age_days} days old — is this being ignored? Does it need priority bump?"
+
+        # Check if linked to a task
+        local has_task; has_task=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if '${repo}#${num}' in t.get('issue','') or '/${num}' in t.get('issue',''):
+            print(t.get('task_id'))
+            break
+" 2>/dev/null || echo "")
+        [[ -z "${has_task}" ]] && ASK "   → No TASK linked to this bug — needs task creation"
+        [[ -n "${has_task}" ]] && ASK "   → Linked to ${has_task} — check task status"
+
+        NEXT "Action: IF no task → create bug-fix task. IF task exists but stalled → diagnose. IF low priority → explicitly defer with reason."
+        echo ""
+      done
+    fi
+  done
+  [[ "${total_bugs}" -eq 0 ]] && OK "no open bugs across repos"
+
+  # ── QA-3: Regression Risk — WHAT changed in high-risk areas? WHY was it changed? ──
+  H1 "QA-3: Regression Risk Assessment"
+
+  for area in "auth" "billing" "payment" "node/credential" "configcenter"; do
+    local area_dir="${LIVEMASK_ROOT}/livemask-backend/internal/${area}"
+    [[ ! -d "${area_dir}" ]] && continue
+
+    local changes; changes=$(git -C "${LIVEMASK_ROOT}/livemask-backend" log --oneline --since="7 days ago" -- "${area_dir}/" 2>/dev/null)
+    local change_count; change_count=$(echo "${changes}" | grep -c "." 2>/dev/null || echo "0")
+
+    if [[ "${change_count}" -gt 0 ]]; then
+      WARN "HIGH RISK: ${area} — ${change_count} changes in 7 days"
+
+      ASK "WHY was ${area} changed ${change_count} times?"
+      echo "${changes}" | head -3 | while read -r cline; do
+        [[ -z "${cline}" ]] && continue
+        echo "      ${cline}"
+      done
+
+      ASK "→ IF bug fixes → are regression tests in place?"
+      ASK "→ IF feature work → is the feature complete or still churning?"
+      ASK "→ IF refactoring → are downstream consumers tested?"
+
+      # Check if smoke tests cover this area
+      local smoke_coverage; smoke_coverage=$(grep -rl "${area}" "${CI_CD_DIR}/scripts/"*smoke*.sh 2>/dev/null | wc -l | tr -d ' ')
+      ASK "→ Smoke coverage for '${area}': ${smoke_coverage} scripts — IF 0, high regression risk"
+
+      NEXT "Action: IF no smoke coverage → create targeted smoke test. IF churn is feature work → prioritize completion. IF bug fixes → verify each fix has a regression test."
+      echo ""
+    fi
+  done
+
+  save_cache "qa" "evidence_gaps=${evidence_gaps} bugs=${total_bugs}"
+  H1 "QA complete."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DEEP ANALYSIS: Cross-cutting deep review modes (require TASK-ID argument)
+# DEEP ANALYSIS: single-task deep dives (cross-cutting)
 # ══════════════════════════════════════════════════════════════════════════════
 
 deep_review() {
-  local target_task="${1:-}"
-  [[ -z "${target_task}" ]] && { echo "Usage: bash scripts/claude-loop-role-engine.sh --deep-review <TASK-ID>"; return 1; }
+  local tid="${1:-}"
+  [[ -z "${tid}" ]] && { echo "Usage: --deep-review <TASK-ID>"; return 1; }
 
-  echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════╗${RESET}"
-  echo -e "${BOLD}${CYAN}║  DEEP REVIEW: ${target_task}${RESET}"
-  echo -e "${BOLD}${CYAN}╚══════════════════════════════════════════════════╝${RESET}"
+  H1 "DEEP REVIEW: ${tid}"
+  sync_all
 
-  sync_repos
+  echo ""; echo "--- TASK DOC ---"
+  local task_doc="${DOCS_DIR}/docs/development/tasks/${tid}.md"
+  [[ -f "${task_doc}" ]] && head -60 "${task_doc}" || echo "  not found"
 
-  # Gather: task doc
-  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
-  [[ -f "${task_doc}" ]] && { echo ""; echo "--- TASK DOC ---"; head -60 "${task_doc}"; }
-
-  # Gather: ledger entry
   echo ""; echo "--- LEDGER ---"
   python3 -c "
 import json
 ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
 for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
-        if t.get('task_id') == '${target_task}':
+        if t.get('task_id')=='${tid}':
             print(json.dumps({k:t[k] for k in ['status','repo','issue','validation','blocked_by','unlocks','notes'] if k in t}, indent=2))
-" 2>/dev/null || echo "not found"
+" 2>/dev/null || echo "  not in ledger"
 
-  # Gather: review contract
-  local rf="${DOCS_DIR}/docs/development/review-contracts/${target_task}-review.json"
+  echo ""; echo "--- REVIEW CONTRACT ---"
+  local rf="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
   if [[ -f "${rf}" ]]; then
-    echo ""; echo "--- REVIEW CONTRACT ---"
     python3 -c "
 import json; d=json.load(open('${rf}'))
 print(f'state={d.get(\"state\")} round={d.get(\"review_round\")} actor={d.get(\"next_required_actor\")}')
 for r in d.get('rounds',[]):
-    c = r.get('claude',{})
-    if c: print(f'claude: {c.get(\"submitted_at\")} commit={str(c.get(\"commit\",\"\"))[:7]} summary={c.get(\"summary\",\"\")[:200]}')
-    cx = r.get('codex',{})
+    c=r.get('claude',{}); cx=r.get('codex',{})
+    if c: print(f'claude: {c.get(\"submitted_at\")} commit={str(c.get(\"commit\",\"\"))[:7]}')
+    for v in c.get('validation',[]): print(f'  validation: {v.get(\"cmd\")} → {v.get(\"result\")}')
     if cx: print(f'codex: verdict={cx.get(\"verdict\")} findings={cx.get(\"findings\",[])}')
 " 2>/dev/null
   fi
 
-  # Gather: git diff
-  local target_repo
-  target_repo=$(python3 -c "
-import json
-ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
-for m in ledger.get('modules',[]):
-    for t in m.get('tasks',[]):
-        if t.get('task_id') == '${target_task}': print(t.get('repo','livemask-docs'))
-" 2>/dev/null || echo "livemask-docs")
-  local repo_dir="${LIVEMASK_ROOT}/${target_repo}"
-
-  echo ""; echo "--- GIT DIFF (${target_repo}) ---"
-  if [[ -d "${repo_dir}/.git" ]]; then
-    cd "${repo_dir}"
-    local task_branch
-    task_branch=$(git branch -r --list "origin/task/*${target_task}*" --format='%(refname:short)' 2>/dev/null | head -1 || echo "")
-    if [[ -n "${task_branch}" ]]; then
-      git diff "origin/dev...${task_branch}" --stat 2>/dev/null | head -15
-      echo ""; git diff "origin/dev...${task_branch}" 2>/dev/null | head -150
-    elif [[ -f "${rf}" ]]; then
-      local tc; tc=$(python3 -c "import json; d=json.load(open('${rf}')); print(d.get('task_commit',''))" 2>/dev/null || echo "")
-      [[ -n "${tc}" ]] && { git show "${tc}" --stat 2>/dev/null | head -15; echo ""; git show "${tc}" 2>/dev/null | head -150; }
-    fi
+  echo ""; echo "--- GIT DIFF ---"
+  local repo; repo=$(ledger_get "${tid}" "repo")
+  [[ -z "${repo}" ]] && repo="livemask-docs"
+  cd "${LIVEMASK_ROOT}/${repo}" 2>/dev/null || true
+  local branch; branch=$(git branch -r --list "origin/task/*${tid}*" --format='%(refname:short)' 2>/dev/null | head -1 || echo "")
+  if [[ -n "${branch}" ]]; then
+    git diff "origin/dev...${branch}" --stat 2>/dev/null | head -15
+    echo ""; git diff "origin/dev...${branch}" 2>/dev/null | head -200
+  elif [[ -f "${rf}" ]]; then
+    local tc; tc=$(python3 -c "import json; print(json.load(open('${rf}')).get('task_commit',''))" 2>/dev/null || echo "")
+    [[ -n "${tc}" ]] && { git show "${tc}" --stat 2>/dev/null | head -15; echo ""; git show "${tc}" 2>/dev/null | head -150; }
   fi
 
-  # Cross-repo impact search
-  echo ""; echo "--- CROSS-REPO IMPACT ---"
-  local keywords; keywords=$(grep -oE '[a-z_]+\.[a-z_]+\(|[A-Z][a-z]+Handler|[A-Z][a-z]+Service' "${task_doc}" 2>/dev/null | head -5 | tr '\n' ' ' || echo "")
-  [[ -n "${keywords}" ]] && echo "  key symbols: ${keywords}"
-
+  echo ""; echo "=== DEEP ANALYSIS PROMPT ==="
+  ASK "1. WHY was this implementation approach chosen?"
+  ASK "   Compare task doc requirements vs actual code change."
+  ASK "   IF approach differs → was the deviation intentional (simpler, constrained) or accidental?"
   echo ""
-  echo "=== DEEP ANALYSIS PROMPT ==="
-  echo "Claude: review the context above and evaluate:"
-  echo "1. LOGIC: Does the code implement what the task doc describes? Edge cases? Race conditions?"
-  echo "2. CROSS-REPO: Which downstream repos are affected? Are they updated? If not, create follow-ups."
-  echo "3. QUALITY: Hardcoded values? Missing RBAC? Missing Swagger? TODO/FIXME in prod paths?"
-  echo "4. SECURITY: Secrets in logs? SQL injection? Input validation?"
-  echo "5. CLOSURE: Can this be marked completed? What evidence is still missing?"
+  ASK "2. WHY might this fail or be incomplete?"
+  ASK "   Edge cases not handled? Dependent services not updated? Tests missing?"
+  echo ""
+  ASK "3. WHAT downstream effects does this have?"
+  ASK "   Trace: this change → admin UI → app client → node agent → smoke tests"
+  echo ""
+  ASK "4. CAN this be closed? What evidence proves it works?"
+  ASK "   IF evidence is sufficient → recommend APPROVE"
+  ASK "   IF evidence is missing → specify exactly what's needed"
+  ASK "   IF implementation is wrong → recommend CHANGES_REQUESTED with concrete fixes"
 }
 
 closure_audit() {
-  local target_task="${1:-}"
-  [[ -z "${target_task}" ]] && { echo "Usage: bash scripts/claude-loop-role-engine.sh --closure-audit <TASK-ID>"; return 1; }
+  local tid="${1:-}"
+  [[ -z "${tid}" ]] && { echo "Usage: --closure-audit <TASK-ID>"; return 1; }
 
-  echo -e "${BOLD}${CYAN}CLOSURE AUDIT: ${target_task}${RESET}"
-  sync_repos
+  H1 "CLOSURE AUDIT: ${tid}"
+  sync_all
 
-  local score=0 max=0
-  local gaps=()
+  local score=0 max=7 gaps=()
 
-  check() { max=$((max+1)); local label="$1" cond="$2"; if eval "${cond}"; then score=$((score+1)); echo "  [✓] ${label}"; else gaps+=("${label}"); echo "  [✗] ${label}"; fi; }
+  check() { max=$((max)); local label="$1"; shift; if eval "$@"; then score=$((score+1)); echo "  [✓] ${label}"; else gaps+=("${label}"); echo "  [✗] ${label}"; fi; }
 
-  local ledger_status; ledger_status=$(python3 -c "
-import json
-ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
-for m in ledger.get('modules',[]):
-    for t in m.get('tasks',[]):
-        if t.get('task_id') == '${target_task}': print(t.get('status','?'))
-" 2>/dev/null || echo "NOT_FOUND")
-  check "ledger status=completed" "[[ '${ledger_status}' == 'completed' || '${ledger_status}' == 'completed_with_skip' ]]"
+  local ls; ls=$(ledger_get "${tid}" "status")
+  check "ledger status=completed" "[[ '${ls}' == 'completed' || '${ls}' == 'completed_with_skip' ]]"
 
-  local rf="${DOCS_DIR}/docs/development/review-contracts/${target_task}-review.json"
-  local origin_sha=""
-  [[ -f "${rf}" ]] && origin_sha=$(python3 -c "import json; print(json.load(open('${rf}')).get('origin_dev_sha',''))" 2>/dev/null || echo "")
-  check "origin/dev push evidence" "[[ -n '${origin_sha}' ]]"
+  local sha=""; local rf="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
+  [[ -f "${rf}" ]] && sha=$(python3 -c "import json; print(json.load(open('${rf}')).get('origin_dev_sha',''))" 2>/dev/null || echo "")
+  check "origin/dev push evidence" "[[ -n '${sha}' ]]"
 
   local docs_ok=0
   [[ -f "${rf}" ]] && python3 -c "
@@ -752,94 +800,79 @@ for r in d.get('rounds',[]):
 " 2>/dev/null | grep -q "PASS" && docs_ok=1
   check "check-docs.sh PASS" "[[ ${docs_ok} -eq 1 ]]"
 
-  local has_issue=""; has_issue=$(python3 -c "
-import json
-ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
-for m in ledger.get('modules',[]):
-    for t in m.get('tasks',[]):
-        if t.get('task_id') == '${target_task}' and t.get('issue',''): print('yes')
-" 2>/dev/null || echo "")
-  check "GitHub issue linked" "[[ -n '${has_issue}' ]]"
+  local has_issue; has_issue=$(ledger_get "${tid}" "issue")
+  check "GitHub issue linked in ledger" "[[ -n '${has_issue}' ]]"
 
-  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
-  local doc_completed=0
-  [[ -f "${task_doc}" ]] && grep -q "Completed" "${task_doc}" 2>/dev/null && doc_completed=1
-  check "task doc marked Completed" "[[ ${doc_completed} -eq 1 ]]"
+  local td="${DOCS_DIR}/docs/development/tasks/${tid}.md"
+  local doc_done=0; [[ -f "${td}" ]] && grep -q "Completed" "${td}" 2>/dev/null && doc_done=1
+  check "task doc marked Completed" "[[ ${doc_done} -eq 1 ]]"
 
-  local target_repo; target_repo=$(python3 -c "
-import json; ledger=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
-for m in ledger.get('modules',[]):
-    for t in m.get('tasks',[]):
-        if t.get('task_id')=='${target_task}': print(t.get('repo','livemask-docs'))
-" 2>/dev/null || echo "livemask-docs")
-  local dirty; dirty=$(git -C "${LIVEMASK_ROOT}/${target_repo}" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-  check "target repo clean" "[[ ${dirty} -eq 0 ]]"
+  local repo; repo=$(ledger_get "${tid}" "repo"); [[ -z "${repo}" ]] && repo="livemask-docs"
+  local dirty; dirty=$(git -C "${LIVEMASK_ROOT}/${repo}" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  check "target repo clean (${repo})" "[[ ${dirty} -eq 0 ]]"
 
-  local child_count=0
-  [[ -f "${rf}" ]] && child_count=$(python3 -c "import json; print(len(json.load(open('${rf}')).get('links',{}).get('issues',[])))" 2>/dev/null || echo "0")
-  check "child issues tracked" "[[ ${child_count} -gt 0 ]]"
+  local child=0; [[ -f "${rf}" ]] && child=$(python3 -c "import json; print(len(json.load(open('${rf}')).get('links',{}).get('issues',[])))" 2>/dev/null || echo "0")
+  check "cross-repo child issues tracked" "[[ ${child} -gt 0 ]]"
 
   echo ""; echo "SCORE: ${score}/${max}"
-  [[ ${score} -ge $((max - 1)) ]] && echo "VERDICT: READY FOR CLOSURE" || echo "VERDICT: NEEDS EVIDENCE"
+  [[ ${score} -ge 6 ]] && echo "VERDICT: READY" || echo "VERDICT: NEEDS EVIDENCE"
   for g in "${gaps[@]}"; do echo "  GAP: $g"; done
+  ASK "FOR EACH GAP: WHY does it exist? WHEN will it be resolved? WHO should resolve it?"
 }
 
 impact_analysis() {
-  local target_task="${1:-}"
-  [[ -z "${target_task}" ]] && { echo "Usage: bash scripts/claude-loop-role-engine.sh --impact-analysis <TASK-ID>"; return 1; }
+  local tid="${1:-}"
+  [[ -z "${tid}" ]] && { echo "Usage: --impact-analysis <TASK-ID>"; return 1; }
+  H1 "IMPACT ANALYSIS: ${tid}"
+  sync_all
 
-  echo -e "${BOLD}${CYAN}IMPACT ANALYSIS: ${target_task}${RESET}"
-  sync_repos
+  local repo; repo=$(ledger_get "${tid}" "repo"); [[ -z "${repo}" ]] && repo="livemask-docs"
+  echo "source: ${repo} → ${tid}"
 
-  local target_repo; target_repo=$(python3 -c "
-import json; ledger=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
-for m in ledger.get('modules',[]):
-    for t in m.get('tasks',[]):
-        if t.get('task_id')=='${target_task}': print(t.get('repo','?'))
-" 2>/dev/null || echo "?")
-
-  echo "Source: ${target_repo} → ${target_task}"
-  echo ""
-
-  case "${target_repo}" in
-    livemask-backend)
-      echo "Backend API change → affects: Admin UI, App models, NodeAgent client, Job Service executors, Website, CI/CD smoke, Docs swagger"
-      ;;
-    livemask-admin)   echo "Admin UI change → affects: CI/CD admin smoke";;
-    livemask-app)     echo "App change → affects: CI/CD app build/release smoke";;
-    livemask-nodeagent) echo "NodeAgent change → affects: Backend internal API compat, CI/CD node smoke";;
-    livemask-job-service) echo "Job Service change → affects: Backend executor endpoints, CI/CD job smoke";;
-    livemask-docs)    echo "Docs change → affects: ALL repos (contract/rule changes need implementation)";;
-  esac
-
-  # Unlock chain
-  echo ""; echo "--- Unlock Chain ---"
+  echo ""; echo "--- UNLOCK CHAIN ---"
   python3 -c "
 import json
 ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
-target = '${target_task}'
+target='${tid}'
+blocks=[]; unlocks=[]
 for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
-        blockers = t.get('blocked_by') or []
-        if target in blockers:
-            print(f\"  BLOCKS: {t['task_id']} ({t.get('repo','?')}, {t.get('status','?')})\")
-        unlocks = t.get('unlocks') or []
-        if target in unlocks:
-            print(f\"  UNLOCKS: {t['task_id']} ({t.get('repo','?')}, {t.get('status','?')})\")
+        if target in (t.get('blocked_by') or []): blocks.append(t['task_id'])
+        if target in (t.get('unlocks') or []): unlocks.append(t['task_id'])
+for b in blocks: print(f'  BLOCKS: {b}')
+for u in unlocks: print(f'  UNLOCKS: {u}')
+if not blocks and not unlocks: print('  (no dependency chain recorded in ledger)')
 " 2>/dev/null
 
-  # Search for actual code references
-  echo ""; echo "--- Code References ---"
-  local task_doc="${DOCS_DIR}/docs/development/tasks/${target_task}.md"
-  [[ -f "${task_doc}" ]] && for kw in $(grep -oE '[A-Z][a-zA-Z]{3,}' "${task_doc}" 2>/dev/null | sort -u | head -3); do
-    echo "  searching '${kw}' across repos..."
-    for rd in "${LIVEMASK_ROOT}"/livemask-*/; do
-      local rn; rn=$(basename "${rd}")
-      [[ "${rn}" == "${target_repo}" || "${rn}" == "livemask-docs" || "${rn}" == "livemask-ci-cd" ]] && continue
-      local hits; hits=$(grep -rl "${kw}" "${rd}" --include="*.go" --include="*.ts" --include="*.tsx" --include="*.dart" 2>/dev/null | wc -l | tr -d ' ')
-      [[ "${hits}" -gt 0 ]] && echo "    ${rn}: ${hits} files"
+  echo ""; echo "--- CODE REFERENCES ---"
+  local td="${DOCS_DIR}/docs/development/tasks/${tid}.md"
+  if [[ -f "${td}" ]]; then
+    for kw in $(grep -oE '[A-Z][a-zA-Z]{4,}' "${td}" 2>/dev/null | sort -u | head -5); do
+      echo "  '${kw}' across repos:"
+      for rd in "${LIVEMASK_ROOT}"/livemask-*/; do
+        local rn; rn=$(basename "${rd}")
+        [[ "${rn}" == "${repo}" || "${rn}" == "livemask-docs" || "${rn}" == "livemask-ci-cd" ]] && continue
+        [[ ! -d "${rd}" ]] && continue
+        local hits; hits=$(grep -rl "${kw}" "${rd}" --include="*.go" --include="*.ts" --include="*.tsx" --include="*.dart" 2>/dev/null | wc -l | tr -d ' ')
+        [[ "${hits}" -gt 0 ]] && echo "    ${rn}: ${hits} files"
+      done
     done
-  done
+  fi
+
+  ASK "IF this task completes today, what is the NEXT task that becomes unblocked?"
+  ASK "IF this task CAN'T complete, what is the ALTERNATIVE path to the same goal?"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ORCHESTRATOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+run_all() {
+  role_pm
+  role_product
+  role_tech
+  role_qa
+  push_changes "role-engine: full cycle $(date -u +%Y-%m-%dT%H:%MZ)"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -847,28 +880,28 @@ for m in ledger.get('modules',[]):
 # ══════════════════════════════════════════════════════════════════════════════
 
 case "${ROLE}" in
-  pm)      role_pm;;
-  product) role_product;;
-  tech)    role_tech;;
-  qa)      role_qa;;
-  all)     run_all_roles;;
-  --deep-review)     deep_review "${2:-}";;
-  --closure-audit)   closure_audit "${2:-}";;
-  --impact-analysis) impact_analysis "${2:-}";;
+  pm)                role_pm;;
+  product)           role_product;;
+  tech)              role_tech;;
+  qa)                role_qa;;
+  all)               run_all;;
+  --deep-review)     deep_review "${ARG2}";;
+  --closure-audit)   closure_audit "${ARG2}";;
+  --impact-analysis) impact_analysis "${ARG2}";;
   *)
     echo "Usage: bash scripts/claude-loop-role-engine.sh <role|mode> [args]"
     echo ""
-    echo "  Automated roles:"
-    echo "    pm       — Project Manager: ledger sync, issue mgmt, dispatch, review pipeline"
-    echo "    product  — Product Manager: contract coverage, MVP milestones, inbox, direction"
-    echo "    tech     — Tech Lead: API/Swagger sync, DB migration, hardcoded config, interfaces"
-    echo "    qa       — QA: smoke coverage, evidence verification, bug triage, regression"
-    echo "    all      — All roles sequentially with aggregate report"
+    echo "  Reasoning roles (each asks WHY and produces NEXT actions):"
+    echo "    pm       — Blocked task root cause, doc/ledger consistency, queue health"
+    echo "    product  — Contract gaps, MVP progress, inbox processing"
+    echo "    tech     — API/Swagger drift, DB migration safety, interface breakage"
+    echo "    qa       — Evidence verification, bug triage, regression risk"
+    echo "    all      — All roles + push changes"
     echo ""
-    echo "  Deep analysis (requires TASK-ID):"
-    echo "    --deep-review <TASK>     — Full code + logic + cross-repo analysis"
-    echo "    --closure-audit <TASK>   — 7-point closure readiness scoring"
-    echo "    --impact-analysis <TASK> — Cross-repo dependency trace + unlock chain"
+    echo "  Deep dives (single task, full reasoning):"
+    echo "    --deep-review <TASK>      — Implementation quality + approach reasoning"
+    echo "    --closure-audit <TASK>    — 7-point scoring + gap diagnosis"
+    echo "    --impact-analysis <TASK>  — Dependency chain + code reference trace"
     exit 1
     ;;
 esac
