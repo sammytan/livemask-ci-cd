@@ -51,6 +51,130 @@ warn()    { echo -e "  ${YELLOW}[WARN]${RESET} $*"; }
 fail()    { echo -e "  ${RED}[FAIL]${RESET} $*"; }
 info()    { echo -e "  ${CYAN}[..]${RESET} $*"; }
 
+collect_startup_intelligence() {
+  local task_id="$1" repo="$2"
+  local out="${HOME}/.claude/role-cache/startup-context-${task_id}.json"
+  mkdir -p "${HOME}/.claude/role-cache"
+
+  TASK_ID="${task_id}" TASK_REPO="${repo}" DOCS_DIR="${DOCS_DIR}" CI_CD_DIR="${CI_CD_DIR}" ADAPTER_LIB="${ADAPTER_LIB}" \
+    python3 - "${out}" <<'PY' 2>/dev/null || return 1
+import json, os, re, subprocess, sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+task_id = os.environ["TASK_ID"]
+repo = os.environ["TASK_REPO"]
+docs = Path(os.environ["DOCS_DIR"])
+adapter = os.environ["ADAPTER_LIB"]
+
+def run(cmd, timeout=10):
+    try:
+        return subprocess.check_output(cmd, text=True, timeout=timeout, stderr=subprocess.DEVNULL)
+    except Exception:
+        return ""
+
+def load_json_text(text, default):
+    try:
+        return json.loads(text)
+    except Exception:
+        return default
+
+task_context = load_json_text(run(["bash", adapter, "task-context", task_id]), {})
+ledger_entry = load_json_text(run(["bash", adapter, "task-ledger-entry", task_id]), {})
+dispatch_status = load_json_text(run(["bash", adapter, "dispatch-status", task_id]), {})
+findings = load_json_text(run(["bash", adapter, "findings-search", task_id]), {"findings": []})
+pm_status = load_json_text(run(["bash", adapter, "pm-status"]), {})
+planner = load_json_text(run(["python3", str(docs / "scripts/plan-next-tasks.py"), "--format", "json"]), {})
+
+issue = str(ledger_entry.get("issue") or "")
+issue_context = {}
+if issue:
+    m = re.search(r"github\.com/([^/]+/[^/]+)/issues/(\d+)", issue)
+    if not m and "#" in issue:
+        short = issue.strip()
+        if short.startswith("livemask-"):
+            name, num = short.split("#", 1)
+            m = type("M", (), {"group": lambda self, i: f"MyAiDevs/{name}" if i == 1 else num})()
+    if m:
+        gh_repo, number = m.group(1), m.group(2)
+        detail = load_json_text(run([
+            "gh", "issue", "view", number, "--repo", gh_repo,
+            "--json", "number,state,title,url,updatedAt,body,comments,labels",
+        ], timeout=12), {})
+        comments = detail.get("comments", [])[-5:]
+        issue_context = {
+            "repo": gh_repo,
+            "number": number,
+            "state": detail.get("state"),
+            "title": detail.get("title"),
+            "url": detail.get("url"),
+            "updatedAt": detail.get("updatedAt"),
+            "labels": [l.get("name", "") for l in detail.get("labels", [])],
+            "body_excerpt": (detail.get("body") or "")[:1200],
+            "recent_comments": [
+                {
+                    "author": c.get("author", {}).get("login", ""),
+                    "createdAt": c.get("createdAt", ""),
+                    "body_excerpt": (c.get("body") or "").replace("\n", " ")[:700],
+                }
+                for c in comments
+            ],
+        }
+
+terms = []
+for value in [task_id, repo, ledger_entry.get("module_id", ""), ledger_entry.get("notes", ""), ledger_entry.get("validation", "")]:
+    for token in re.findall(r"[A-Za-z0-9-]{4,}", str(value)):
+        low = token.lower()
+        if low not in terms and low not in {"task", "status", "repo", "ready", "blocked"}:
+            terms.append(low)
+terms = terms[:8]
+
+knowledge_hits = []
+for term in terms[:5]:
+    text = run(["bash", adapter, "knowledge-search", term, "6"], timeout=8)
+    if text.strip():
+        knowledge_hits.append({"query": term, "hits_excerpt": text[:1800]})
+
+related_planner_rows = []
+for section in ("global_next", "blocked_open", "evidence_missing"):
+    for row in planner.get(section, []):
+        if row.get("task_id") == task_id or row.get("repo") == repo:
+            related_planner_rows.append({"section": section, **row})
+
+summary = {
+    "schema_version": 1,
+    "task_id": task_id,
+    "repo": repo,
+    "startup_context_path": str(out),
+    "task_context": task_context,
+    "ledger_entry": ledger_entry,
+    "dispatch_status": dispatch_status,
+    "role_engine_findings": findings.get("findings", []),
+    "pm_status": pm_status,
+    "github_issue": issue_context,
+    "knowledge_search_terms": terms,
+    "knowledge_hits": knowledge_hits,
+    "related_planner_rows": related_planner_rows[:12],
+    "implementation_guardrails": [
+        "Read required_first_reads before editing code.",
+        "Use docs/contracts and repo-specific docs as authority; GitHub comments are evidence, not ledger replacements.",
+        "Search existing helpers and task history before adding new abstractions.",
+        "Cite linked issue and recent relevant comments in completion or blocked report.",
+        "Run repo-native tests plus git diff --check; update docs/contracts when behavior changes.",
+    ],
+}
+out.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+print(json.dumps({
+    "path": str(out),
+    "issue": issue_context.get("url", issue),
+    "knowledge_terms": terms,
+    "findings": len(summary["role_engine_findings"]),
+    "knowledge_hit_groups": len(knowledge_hits),
+    "planner_rows": len(summary["related_planner_rows"]),
+}, ensure_ascii=False))
+PY
+}
+
 # ── Step 0: Read agent state ──────────────────────────────────────────────────
 read_agent_state() {
   header "Step 0: Agent State"
@@ -405,6 +529,27 @@ if notes:
     echo "  ${r}: ${p}"
   done || true
 
+  # Build richer startup intelligence: docs search + GitHub issue/comment context
+  echo ""
+  info "startup intelligence pack:"
+  local intelligence_summary
+  intelligence_summary=$(collect_startup_intelligence "${task_id}" "${repo}" 2>/dev/null || echo "")
+  if [[ -n "${intelligence_summary}" ]]; then
+    echo "${intelligence_summary}" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(f\"  path:              {d.get('path','?')}\")
+print(f\"  linked issue:      {d.get('issue') or 'none'}\")
+print(f\"  knowledge terms:   {', '.join(d.get('knowledge_terms', [])[:8]) or 'none'}\")
+print(f\"  docs hit groups:   {d.get('knowledge_hit_groups', 0)}\")
+print(f\"  role findings:     {d.get('findings', 0)}\")
+print(f\"  planner rows:      {d.get('planner_rows', 0)}\")
+" 2>/dev/null || echo "  ${intelligence_summary}"
+    echo "  NEXT READ: python3 -m json.tool $(echo "${intelligence_summary}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('path',''))" 2>/dev/null)"
+  else
+    warn "startup intelligence pack unavailable"
+  fi
+
   return 0
 }
 
@@ -590,6 +735,11 @@ check_fixed_channels() {
     else
       ok "no actionable keywords in latest comment"
     fi
+
+    gh issue view "${num}" --repo "${repo}" --json comments --jq '
+      .comments[-3:][]? |
+      "  comment \(.createdAt) by \(.author.login): " + (.body | gsub("\n"; " ") | .[0:220])
+    ' 2>/dev/null || true
   done
 }
 
@@ -654,6 +804,10 @@ decision_summary() {
     echo "  Last action: ${LAST_ACTION:-none}"
     echo ""
     echo "  NEXT: bash ${ADAPTER_LIB} task-context ${CURRENT_TASK}"
+    if [[ "${CURRENT_TASK}" != "null" && -n "${TARGET_REPO:-}" ]]; then
+      echo "  NEXT: inspect startup intelligence pack:"
+      collect_startup_intelligence "${CURRENT_TASK}" "${TARGET_REPO}" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print('        python3 -m json.tool ' + d.get('path',''))" 2>/dev/null || true
+    fi
     return 0
   fi
 
