@@ -80,13 +80,20 @@ else:
         "elements": [{"tag": "plain_text", "content": f"LiveMask · {ts}"}]
     })
 
+# Lark signing: sign_string = timestamp + "\n" + secret (as HMAC KEY, per official docs)
+ts_epoch = str(int(time.time()))
+sign_str = ts_epoch + "\n" + secret
+sign = base64.b64encode(hmac.new(sign_str.encode("utf-8"), digestmod=hashlib.sha256).digest()).decode('utf-8')
+
 body = {
+    "timestamp": ts_epoch,
+    "sign": sign,
     "msg_type": "interactive",
     "card": card
 }
 
-data = json.dumps(body).encode()
-req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json"})
+data = json.dumps(body, ensure_ascii=False).encode('utf-8')
+req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json; charset=utf-8"})
 try:
     resp = urllib.request.urlopen(req, timeout=5)
     result = json.loads(resp.read().decode())
@@ -142,9 +149,12 @@ card = {
     ]
 }
 
-body = {"msg_type": "interactive", "card": card}
-data = json.dumps(body).encode()
-req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json"})
+sign_str = str(int(time.time())) + "\n" + secret
+sign = base64.b64encode(hmac.new(sign_str.encode("utf-8"), digestmod=hashlib.sha256).digest()).decode('utf-8')
+
+body = {"timestamp": str(int(time.time())), "sign": sign, "msg_type": "interactive", "card": card}
+data = json.dumps(body, ensure_ascii=False).encode('utf-8')
+req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json; charset=utf-8"})
 try:
     resp = urllib.request.urlopen(req, timeout=5)
     result = json.loads(resp.read().decode())
