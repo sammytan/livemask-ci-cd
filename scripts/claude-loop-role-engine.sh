@@ -91,10 +91,10 @@ auto_create_task() {
       ;;
   esac
 
-  # Generate short, compliant task ID: TASK-AUTO-{repo-short}-{uniq}
-  local repo_short; repo_short=$(echo "${repo}" | sed 's/livemask-//' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g; s/^-//; s/-$//' | cut -c1-16)
-  [[ -n "${repo_short}" ]] || repo_short="misc"
-  local uniq; uniq=$(echo "${title}" | tr 'A-Z ' 'a-z-' | sed 's/[^a-z0-9-]//g' | tr '-' '\n' | head -4 | tr '\n' '-' | cut -c1-20)
+  # Generate short, ledger-compliant task ID: TASK-AUTO-{REPO-SHORT}-{UNIQ}
+  local repo_short; repo_short=$(echo "${repo}" | sed 's/livemask-//' | tr '[:lower:]' '[:upper:]' | sed 's/[^A-Z0-9]\+/-/g; s/^-//; s/-$//' | cut -c1-16)
+  [[ -n "${repo_short}" ]] || repo_short="MISC"
+  local uniq; uniq=$(echo "${title}" | tr '[:lower:] ' '[:upper:]-' | sed 's/[^A-Z0-9-]//g' | tr '-' '\n' | head -4 | tr '\n' '-' | cut -c1-20)
   local tid="TASK-AUTO-${repo_short}-${uniq}"
   tid="${tid%-}"  # strip trailing dash
   tid=$(echo "${tid}" | cut -c1-60)  # hard cap at 60 chars
@@ -296,6 +296,20 @@ PY
     echo "    (duplicate task signal found — skip creating ${tid}; see ${intelligence_file})"
     bash "${ADAPTER_LIB}" memory-add "role-engine-duplicate-skip" "${tid}" "${repo}" \
       "auto-create skipped because intelligence pack found duplicate signals for ${title}" \
+      "${intelligence_file}" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local issue_linked=""
+  issue_linked=$(python3 -c "import json; d=json.load(open('${intelligence_file}')); print('yes' if (d.get('github_issue_candidates') or d.get('ledger_issue_refs')) else '')" 2>/dev/null || echo "")
+  if [[ -z "${issue_linked}" ]]; then
+    echo "    (skip auto-create ${tid}: no GitHub issue/comment or ledger issue reference found; see ${intelligence_file})"
+    record_finding "${role}" "warning" "" "${check}" \
+      "auto-create skipped because no GitHub issue/comment linkage was found for ${title}" \
+      "link or create a GitHub issue first, then create a canonical TASK with docs/context and quality gates" \
+      "${intelligence_file}"
+    bash "${ADAPTER_LIB}" memory-add "role-engine-auto-create-skip" "${tid}" "${repo}" \
+      "auto-create skipped because no GitHub issue/comment or ledger issue reference existed for ${title}" \
       "${intelligence_file}" >/dev/null 2>&1 || true
     return 0
   fi
