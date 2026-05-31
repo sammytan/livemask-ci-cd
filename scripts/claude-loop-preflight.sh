@@ -56,6 +56,31 @@ else
   idle_ok "Planner: no candidates"
 fi
 
+# ── Channel 2a: Dispatch packets ─────────────────────────────────────────────
+echo "--- Channel 2a: Dispatch Packets ---"
+DISPATCH_DIR="${DOCS_DIR}/docs/development/dispatch-packets"
+DISPATCH_COUNT=0
+if [[ -d "${DISPATCH_DIR}" ]]; then
+  DISPATCH_COUNT=$(find "${DISPATCH_DIR}" -maxdepth 1 -type f -name 'TASK-*.json' ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
+fi
+echo "  Dispatch packets: ${DISPATCH_COUNT}"
+if [[ "${DISPATCH_COUNT}" -gt 0 ]]; then
+  while IFS= read -r dp; do
+    [[ -f "${dp}" ]] || continue
+    dp_info=$(python3 -c "
+import json
+d=json.load(open(__import__('sys').argv[1]))
+print('|'.join([d.get('task_id','?'), d.get('repo','?'), d.get('assigned_to','?'), d.get('readiness','?')]))
+" "${dp}" 2>/dev/null || echo "?|?|?|?")
+    dp_task="${dp_info%%|*}"
+    dp_rest="${dp_info#*|}"
+    dp_repo="${dp_rest%%|*}"
+    work "Dispatch packet: ${dp_task} (${dp_repo})"
+  done < <(find "${DISPATCH_DIR}" -maxdepth 1 -type f -name 'TASK-*.json' ! -name '.gitkeep' 2>/dev/null | sort)
+else
+  idle_ok "Dispatch packets: none"
+fi
+
 # ── Channel 2b: Review Contracts ────────────────────────────────────────────
 echo "--- Channel 2b: Review Contracts ---"
 REVIEW_DIR="${DOCS_DIR}/docs/development/review-contracts"

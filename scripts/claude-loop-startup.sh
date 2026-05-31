@@ -740,6 +740,13 @@ active_idle_poll() {
   local max_cycles="${2:-30}"  # 30 cycles * 2min = 60min max
   local cycle=0
 
+  local initial_packets
+  initial_packets=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -type f -name 'TASK-*.json' ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "${initial_packets}" -gt 0 ]]; then
+    echo -e "  ${BOLD}${GREEN}[WAKE] ${initial_packets} dispatch packet(s) already exist; idle monitor is not allowed.${RESET}"
+    return 1
+  fi
+
   echo ""
   echo -e "  ${BOLD}${CYAN}Queue empty. Actively polling origin/dev every ${poll_seconds}s (max ${max_cycles} cycles)...${RESET}"
   echo "  Claude will wake immediately when Codex pushes new tasks."
@@ -774,6 +781,14 @@ active_idle_poll() {
         echo ""
         echo -e "  ${BOLD}${GREEN}>>> WORK FOUND. Breaking idle loop to accept task.${RESET}"
         return 1  # Signal: work available, re-enter task acceptance
+      fi
+
+      local packet_count
+      packet_count=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -type f -name 'TASK-*.json' ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
+      if [[ "${packet_count}" -gt 0 ]]; then
+        echo ""
+        echo -e "  ${BOLD}${GREEN}>>> DISPATCH PACKET FOUND (${packet_count}). Breaking idle loop to accept task.${RESET}"
+        return 1
       fi
 
       baseline_sha="${current_sha}"

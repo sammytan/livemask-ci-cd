@@ -1279,6 +1279,13 @@ Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
     if git diff --cached --quiet 2>/dev/null; then
       :
     else
+      if ! bash "${DOCS_DIR}/scripts/check-docs.sh" >/tmp/claude-role-engine-check-docs.log 2>&1; then
+        WARN "auto-create output failed docs checks; reverting staged auto-created artifacts"
+        git restore --staged docs/development/tasks/ docs/development/dispatch-packets/ docs/development/task-state-ledger.json 2>/dev/null || true
+        git restore docs/development/tasks/ docs/development/dispatch-packets/ docs/development/task-state-ledger.json 2>/dev/null || true
+        AUTO_CREATED_TASKS=""
+        return 0
+      fi
       local cr_br="task/auto-create-$(date -u +%Y%m%d-%H%M%S)"
       git checkout -b "${cr_br}" 2>/dev/null
       git commit -m "role-engine: auto-create ${created_count} task(s) from findings
@@ -1327,8 +1334,7 @@ for s,c in statuses.most_common(8): print(f'{s}: {c}')
 
       NEXT "Action: if MVP complete → mark milestone. If tasks stuck → diagnose each stuck status. If no tasks → trigger Product decomposition."
       record_finding "pm" "warning" "" "PM-3" "dispatch queue empty (candidate_count=0)" "run product decomposition or audit backlog" "bash scripts/claude-loop-role-engine.sh product"
-      ACT "PM-3: queue empty, self-decomposing Ready contracts into real tasks..."
-      # Directly create implementation tasks from the first Ready contract gap
+      ACT "PM-3: queue empty; direct auto-create is disabled. Codex must decompose and dispatch canonical tasks."
       local gap_info; gap_info=$(python3 -c "
 import json, re
 from pathlib import Path
@@ -1354,7 +1360,11 @@ if ci.exists():
         local gap_domain gap_repo gap_task
         gap_domain="${gap_info%%|*}"; gap_info="${gap_info#*|}"
         gap_repo="${gap_info%%|*}"; gap_task="${gap_info##*|}"
-        auto_create_task "pm" "PM-3" "Implement ${gap_domain} (contract Ready, no implementation task)" "P1" "${gap_repo}" "Ready contract '${gap_domain}' has no implementation task in ledger. Parent task: ${gap_task}. Create implementation across affected repos: ${gap_repo}."
+        record_finding "pm" "warning" "" "PM-3" \
+          "Ready contract gap requires Codex decomposition: ${gap_domain}; parent=${gap_task}; repos=${gap_repo}" \
+          "Codex must create canonical TASK IDs, valid ledger repos, GitHub issue links, and dispatch packets" \
+          ""
+        WARN "PM-3 found Ready contract gap (${gap_domain}) but did not auto-create TASK-AUTO artifacts"
       fi
     else
       ASK "→ ${blocked} tasks are blocked — the queue IS the blocker list. Resolve root blockers to unblock candidates."
