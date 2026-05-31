@@ -271,6 +271,44 @@ for m in ledger.get('modules',[]):
     done
   fi
 
+  # 5d. CI queue staleness (>30 min queued → may need investigation)
+  for r in "MyAiDevs/livemask-ci-cd" "MyAiDevs/livemask-docs"; do
+    local queued_count; queued_count=$(gh run list --repo "$r" --branch dev --limit 3 --json status --jq '[.[].status] | join(",")' 2>/dev/null | grep -o "queued" | wc -l | tr -d ' ' || echo "0")
+    if [[ "${queued_count}" -ge 2 ]]; then
+      WARN "CI: $r has ${queued_count} queued runs — runners may be stuck"
+      issues=$((issues + 1))
+    fi
+  done
+
+  # 5e. Post-reconcile queue anomaly: ready tasks exist but planner shows 0
+  local ready_count; ready_count=$(python3 -c "
+import json
+d = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+count = 0
+for m in d.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('status') == 'ready': count += 1
+print(count)
+" 2>/dev/null || echo "0")
+  if [[ "${ready_count}" -gt 0 ]]; then
+    local planner_cand; planner_cand=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['summary']['candidate_count'])" 2>/dev/null || echo "0")
+    if [[ "${planner_cand}" == "0" ]]; then
+      WARN "Planner anomaly: ${ready_count} tasks status=ready but planner shows 0 candidates — planner may need re-index"
+      issues=$((issues + 1))
+    else
+      PASS "Planner: ${planner_cand} candidates, ${ready_count} ready in ledger"
+    fi
+  fi
+
+  # 5f. Docs CI recovery check
+  local docs_ci; docs_ci=$(gh run list --repo MyAiDevs/livemask-docs --branch dev --limit 1 --json conclusion,status --jq '.[0].conclusion // .[0].status' 2>/dev/null || echo "unknown")
+  case "${docs_ci}" in
+    success) PASS "Docs CI: latest run passed";;
+    failure) WARN "Docs CI: latest run FAILED — check output"; issues=$((issues + 1));;
+    queued|in_progress) PASS "Docs CI: ${docs_ci}";;
+    *) WARN "Docs CI: ${docs_ci}";;
+  esac
+
   # ── Summary ─────────────────────────────────────────────────────────────
   echo ""
   echo "═══════════════════════════════════════════"
