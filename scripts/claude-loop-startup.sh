@@ -379,13 +379,15 @@ quick_health_pulse() {
   # Check PM lease (don't start if another agent is working)
   local lease_file="${HOME}/.claude/role-cache/pm-lease.json"
   if [[ -f "${lease_file}" ]]; then
-    local holder age; read -r holder age <<< "$(python3 -c "
+    local holder age phase; read -r holder age phase <<< "$(python3 -c "
 import json, time
 d = json.load(open('${lease_file}'))
 age = (time.time() - d.get('started_at_epoch',0)) / 60
-print(d.get('agent','?'), f'{age:.0f}')
-" 2>/dev/null || echo "? 0")"
-    if [[ "${holder}" != "claude-pm-backup" && "${age}" -lt 15 ]]; then
+print(d.get('agent','?'), f'{age:.0f}', d.get('phase','?'))
+" 2>/dev/null || echo "? 0 ?")"
+    if [[ "${phase}" == "complete" || "${phase}" == "stale-auto-released" ]]; then
+      pulse_ok=$((pulse_ok + 1))
+    elif [[ "${holder}" != "claude-pm-backup" && "${age}" -lt 15 ]]; then
       echo -e "  ${YELLOW}[WAIT]${RESET} PM lease held by ${holder} (${age}min) — may conflict with PM cycle"
     else
       pulse_ok=$((pulse_ok + 1))
