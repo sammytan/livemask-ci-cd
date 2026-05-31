@@ -23,6 +23,7 @@ AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 LEASE_FILE="${DOCS_DIR}/docs/development/leases/task-leases.json"
 DISPATCH_DIR="${DOCS_DIR}/docs/development/dispatch-packets"
 AUTO_FIXED_TASKS=""
+PM_SKIP=0
 ROLE="${1:-pm}"
 ARG2="${2:-}"
 
@@ -101,9 +102,86 @@ sync_all() {
   NOW_SHA_FULL=$(git -C "${DOCS_DIR}" rev-parse HEAD 2>/dev/null || echo "")
 }
 
+# ── PM Mutual Exclusion: prevent Claude and Codex from colliding ──────────────
+# Acquire PM lease before touching shared state. Stale leases (>15min) can be
+# taken over. Returns 0 if lease acquired, 1 if another agent is active.
+PM_LEASE_FILE="${ROLE_CACHE_DIR}/pm-lease.json"
+PM_LEASE_TTL_MIN=15
+
+acquire_pm_lease() {
+  local agent="${1:-unknown}"
+  mkdir -p "${ROLE_CACHE_DIR}"
+
+  if [[ -f "${PM_LEASE_FILE}" ]]; then
+    local holder holder_start age_min
+    read -r holder holder_start age_min <<< "$(python3 -c "
+import json, time
+try:
+    d = json.load(open('${PM_LEASE_FILE}'))
+    holder = d.get('agent', '?')
+    started = d.get('started_at_epoch', 0)
+    age = (time.time() - started) / 60
+    print(holder, d.get('started_at','?'), f'{age:.0f}')
+except: print('?','?','999')
+" 2>/dev/null || echo "? ? 999")"
+
+    if [[ "${holder}" == "${agent}" ]]; then
+      # Same agent — renew lease
+      :
+    elif [[ "${age_min}" -lt "${PM_LEASE_TTL_MIN}" ]]; then
+      echo -e "  ${YELLOW}[WAIT]${RESET} PM lease held by '${holder}' (${age_min}min ago) — skipping to avoid collision"
+      echo "  Lease: ${PM_LEASE_FILE}"
+      return 1
+    else
+      echo -e "  ${YELLOW}[TAKEOVER]${RESET} PM lease from '${holder}' is stale (${age_min}min > ${PM_LEASE_TTL_MIN}min TTL) — taking over"
+    fi
+  fi
+
+  # Acquire/renew lease
+  python3 -c "
+import json, time, pathlib
+d = {
+    'agent': '${agent}',
+    'started_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+    'started_at_epoch': time.time(),
+    'phase': 'preflight',
+    'docs_head': '${NOW_SHA_FULL:-?}'
+}
+pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d, indent=2))
+" 2>/dev/null
+  echo "  [LEASE] PM lock acquired by ${agent}"
+  return 0
+}
+
+release_pm_lease() {
+  if [[ -f "${PM_LEASE_FILE}" ]]; then
+    python3 -c "
+import json, pathlib
+d = json.load(open('${PM_LEASE_FILE}'))
+d['phase'] = 'complete'
+d['completed_at'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d, indent=2))
+" 2>/dev/null
+    echo "  [LEASE] PM lock released"
+  fi
+}
+
 # Shared intake aligned with CODEX_LOOP_RULES.md §2 and §12
 preflight_context() {
   H1 "Preflight Context (Codex control-plane alignment)"
+
+  # PM mutual exclusion FIRST — don't sync or touch state if another agent is working
+  local pm_agent="${ROLE:-unknown}"
+  if [[ "${ROLE}" == "all" ]]; then
+    pm_agent="claude-pm-backup"
+  fi
+  if ! acquire_pm_lease "${pm_agent}"; then
+    # Another agent holds the lease — skip this cycle
+    PM_SKIP=1
+    return 1
+  fi
+  PM_SKIP=0
+
   sync_all
   echo "  docs_head: ${NOW_SHA}"
 
@@ -1166,6 +1244,14 @@ run_all() {
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Check if another agent is running PM — skip if so
+if [[ "${PM_SKIP:-0}" -eq 1 ]]; then
+  echo -e "  ${YELLOW}[SKIP]${RESET} Another agent holds PM lease. Exiting to avoid collision."
+  echo "  Check: cat ${PM_LEASE_FILE}"
+  release_pm_lease 2>/dev/null || true
+  exit 0
+fi
+
 case "${ROLE}" in
   pm)
     role_pm
@@ -1209,5 +1295,6 @@ case "${ROLE}" in
     ;;
 esac
 
+release_pm_lease 2>/dev/null || true
 log_summary "role-engine" 0 "${ROLE}" 2>/dev/null || true
 log_debug_info 2>/dev/null || true
