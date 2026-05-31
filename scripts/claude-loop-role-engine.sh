@@ -641,6 +641,7 @@ for c in contracts_with_gaps[:10]:
       ASK "→ ${partial} items are partially complete. WHY are they stuck?"
       ASK "   Check each partial item: is it waiting for evidence? blocked by another task? abandoned?"
       NEXT "Action: audit each partial item — either finish it or explicitly defer with reason"
+      record_finding "product" "warning" "" "PROD-2" "MVP: ${partial} partial items stalled at ${pct}% completion" "audit each partial item or defer with reason" ""
     fi
     if [[ "${ready}" -gt 0 ]]; then
       ASK "→ ${ready} items are ready but not started. WHY aren't they dispatched?"
@@ -648,6 +649,7 @@ for c in contracts_with_gaps[:10]:
       ASK "   IF they depend on blocked tasks → diagnose blockers"
       ASK "   IF no one picked them up → check dispatch pipeline"
       NEXT "Action: ensure ready items are in planner queue with correct priority"
+      record_finding "product" "info" "" "PROD-2" "MVP: ${ready} items ready but undispatched at ${pct}% completion" "verify planner priority and dispatch pipeline" ""
     fi
   fi
 
@@ -666,12 +668,14 @@ import json; d=json.load(open('${f}'))
 print(d.get('generated_by','?'), d.get('generated_at','?')[:16])
 " 2>/dev/null || echo "? ?")"
 
+    inbox_count=$((inbox_count + 1))
     ASK "WHY is this requirement still in inbox? (by=${gen_by}, at=${gen_at})"
     ASK "→ IF it's valid → create TASK stub and move to ledger"
     ASK "→ IF it needs more detail → read source contract, flesh out scope"
     ASK "→ IF it's obsolete → delete or mark as rejected with reason"
     ASK "→ IF awaiting human approval → create GitHub Issue for review"
     NEXT "Action: process or reject each inbox item — inbox should trend to zero"
+    record_finding "product" "warning" "" "PROD-3" "requirement still in inbox (by=${gen_by}, at=${gen_at})" "process or reject: create TASK, add detail, or mark rejected" ""
     echo ""
   done
   [[ "${inbox_count}" -eq 0 ]] && OK "requirement inbox clean"
