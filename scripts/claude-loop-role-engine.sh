@@ -62,15 +62,22 @@ push_changes() {
     echo "  (no changes to push)"
     return 0
   fi
+  local changes; changes=$(git status --porcelain | wc -l | tr -d ' ')
+  WARN "${changes} file(s) changed — NOT auto-pushing to dev (safety gate)"
+
+  # Create task branch but DO NOT merge to dev automatically
   local br="task/role-$(date -u +%Y%m%d-%H%M%S)"
   git checkout -b "${br}" 2>/dev/null
   git add -A
   git commit -m "${msg}
 Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
-  git checkout dev 2>/dev/null
-  git merge "${br}" --no-edit 2>/dev/null
-  git push origin dev 2>/dev/null
-  OK "pushed to origin/dev"
+
+  echo ""
+  echo "  Branch '${br}' created with ${changes} changes."
+  echo "  To merge: bash ${CI_CD_DIR}/scripts/dev-merge-guard.sh ${br}"
+  echo "  Or manually: git checkout dev && git merge ${br} --no-edit && git push origin dev"
+  echo ""
+  WARN "Changes saved to branch but NOT merged to dev. Merge requires explicit action."
 }
 
 # ── Helper: get ledger entry for a task ──────────────────────────────────────
@@ -118,7 +125,9 @@ role_pm() {
     OK "no blocked tasks"
   else
     echo "  blocked tasks:"
-    echo "${blocked_tasks}" | head -10 | while IFS='|' read -r tid repo issue blockers validation; do
+    local pm1_list
+    pm1_list=$(echo "${blocked_tasks}" | head -10)
+    while IFS='|' read -r tid repo issue blockers validation; do
       [[ -z "${tid}" ]] && continue
       echo "    ${tid} (${repo})"
 
@@ -132,22 +141,18 @@ role_pm() {
 
         ASK "blocked by ${blocker} → WHY is ${blocker} not done?"
 
-        # Gather context for reasoning
         echo "      blocker: ${blocker} (${b_repo}) | status=${b_status}"
         [[ -n "${b_issue}" ]] && echo "      issue: ${b_issue}"
 
-        # Check if blocker itself is blocked
         local b_blockers; b_blockers=$(ledger_get "${blocker}" "blocked_by")
         [[ -n "${b_blockers}" && "${b_blockers}" != "[]" ]] && echo "      meta-blocked: ${blocker} is blocked by ${b_blockers}"
 
-        # Check if blocker has a review contract
         local brf="${DOCS_DIR}/docs/development/review-contracts/${blocker}-review.json"
         [[ -f "${brf}" ]] && python3 -c "
 import json; d=json.load(open('${brf}'))
 print(f\"      review: state={d.get('state')} actor={d.get('next_required_actor')}\")
 " 2>/dev/null
 
-        # REASONING PROMPT
         case "${b_status}" in
           blocked)
             ASK "→ ${blocker} itself is blocked — this is a CHAIN. Find the root blocker and fix it first."
@@ -173,14 +178,14 @@ print(f\"      review: state={d.get('state')} actor={d.get('next_required_actor'
         esac
         echo ""
       done
-    done
+    done <<< "${pm1_list}"
   fi
 
   # ── PM-2: WHY are there doc/ledger conflicts? ──────────────────────────────
   H1 "PM-2: Doc/Ledger Consistency Reasoning"
 
-  local conflicts_found=0
-  python3 -c "
+  local pm2_conflicts
+  pm2_conflicts=$(python3 -c "
 import json, re
 from pathlib import Path
 
@@ -205,7 +210,10 @@ for m in ledger.get('modules',[]):
             print(f'CONFLICT|{tid}|{t.get(\"repo\",\"?\")}|doc={doc_status}|ledger={ledger_status}|{t.get(\"issue\",\"\")}')
         elif ledger_status in done and doc_status not in done:
             print(f'CONFLICT|{tid}|{t.get(\"repo\",\"?\")}|doc={doc_status}|ledger={ledger_status}|{t.get(\"issue\",\"\")}')
-" 2>/dev/null | head -10 | while IFS='|' read -r tag tid repo detail1 detail2 issue; do
+" 2>/dev/null | head -10)
+
+  local conflicts_found=0
+  while IFS='|' read -r tag tid repo detail1 detail2 issue; do
     [[ -z "${tid}" ]] && continue
     conflicts_found=$((conflicts_found + 1))
 
@@ -245,7 +253,7 @@ else: print(state, 'no_verdict')
     local dev_merge; dev_merge=$(git -C "${LIVEMASK_ROOT}/${repo}" log --oneline --grep="${tid}" -1 2>/dev/null || echo "")
     [[ -n "${dev_merge}" ]] && echo "      dev merge: ${dev_merge}" || ASK "      no dev merge commit found — was this ever pushed?"
     echo ""
-  done
+  done <<< "${pm2_conflicts}"
 
   [[ "${conflicts_found}" -eq 0 ]] && OK "all doc/ledger statuses consistent"
 
@@ -308,7 +316,8 @@ role_product() {
   H1 "PROD-1: Contract-to-Implementation Gap Reasoning"
 
   local uncovered=0
-  python3 -c "
+  local prod1_raw
+  prod1_raw=$(python3 -c "
 import json, re
 from pathlib import Path
 
@@ -341,7 +350,8 @@ for line in ci.read_text().split('\n'):
 
 for c in contracts_with_gaps[:10]:
     print(c)
-" 2>/dev/null | while IFS='|' read -r domain contract status impacted suggested_task; do
+" 2>/dev/null)
+  while IFS='|' read -r domain contract status impacted suggested_task; do
     [[ -z "${domain}" ]] && continue
     uncovered=$((uncovered + 1))
 
@@ -371,7 +381,7 @@ for c in contracts_with_gaps[:10]:
       WARN "   contract file missing: ${contract}"
     fi
     echo ""
-  done
+  done <<< "${prod1_raw}"
 
   [[ "${uncovered}" -eq 0 ]] && OK "all Ready/Stable contracts have task coverage"
 
@@ -569,7 +579,8 @@ role_qa() {
   H1 "QA-1: Completion Evidence Deep Verification"
 
   local evidence_gaps=0
-  python3 -c "
+  local qa1_raw
+  qa1_raw=$(python3 -c "
 import json
 from pathlib import Path
 
@@ -580,7 +591,8 @@ for m in ledger.get('modules',[]):
             validation = t.get('validation','')
             if len(validation.strip()) < 20:
                 print(f\"{t['task_id']}|{t.get('repo','?')}|{t.get('issue','')}\")
-" 2>/dev/null | head -5 | while IFS='|' read -r tid repo issue; do
+" 2>/dev/null | head -5)
+  while IFS='|' read -r tid repo issue; do
     [[ -z "${tid}" ]] && continue
     evidence_gaps=$((evidence_gaps + 1))
 
@@ -616,7 +628,7 @@ else: print(state, 'no_verdict')
 
     NEXT "Action: IF completed without review → revert to evidence_missing, create review contract. IF review passed but ledger blank → fill ledger validation field."
     echo ""
-  done
+  done <<< "${qa1_raw}"
 
   [[ "${evidence_gaps}" -eq 0 ]] && OK "all completed tasks have validation evidence"
 
@@ -634,21 +646,21 @@ else: print(state, 'no_verdict')
       total_bugs=$((total_bugs + bug_count))
 
       # Analyze each bug
-      echo "${bugs}" | python3 -c "
+      local qa2_list
+      qa2_list=$(echo "${bugs}" | python3 -c "
 import json,sys
 for b in json.load(sys.stdin):
     print(f\"{b['number']}|{b['title'][:100]}|{b['createdAt'][:10]}\")
-" 2>/dev/null | head -5 | while IFS='|' read -r num title created; do
+" 2>/dev/null | head -5)
+      while IFS='|' read -r num title created; do
         [[ -z "${num}" ]] && continue
 
         ASK "BUG ${repo}#${num}: '${title}' (since ${created})"
         ASK "   WHY hasn't this been fixed?"
 
-        # Check age
         local age_days; age_days=$(( ($(date +%s) - $(date -j -f "%Y-%m-%d" "${created}" +%s 2>/dev/null || date +%s)) / 86400 ))
         [[ "${age_days}" -gt 7 ]] && ASK "   → ${age_days} days old — is this being ignored? Does it need priority bump?"
 
-        # Check if linked to a task
         local has_task; has_task=$(python3 -c "
 import json
 ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
@@ -663,7 +675,7 @@ for m in ledger.get('modules',[]):
 
         NEXT "Action: IF no task → create bug-fix task. IF task exists but stalled → diagnose. IF low priority → explicitly defer with reason."
         echo ""
-      done
+      done <<< "${qa2_list}"
     fi
   done
   [[ "${total_bugs}" -eq 0 ]] && OK "no open bugs across repos"
