@@ -1425,11 +1425,95 @@ if not blocks and not unlocks: print('  (no dependency chain recorded in ledger)
 # ORCHESTRATOR
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── Self-healing: clean up artifacts that the role-engine itself created ─────
+self_heal_clean_state() {
+  H1 "Self-Heal: Clean State"
+
+  local healed=0
+
+  # 1. Remove empty modules from ledger
+  local empty_mods; empty_mods=$(python3 -c "
+import json, pathlib
+p = pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json')
+d = json.loads(p.read_text())
+removed = []
+new_modules = []
+for m in d.get('modules', []):
+    tasks = m.get('tasks', [])
+    if len(tasks) == 0 and m.get('module_id') in ('auto-tasks',):
+        removed.append(m['module_id'])
+    else:
+        new_modules.append(m)
+if removed:
+    d['modules'] = new_modules
+    p.write_text(json.dumps(d, indent=2, ensure_ascii=False))
+    for r in removed: print(r)
+" 2>/dev/null)
+  if [[ -n "${empty_mods}" ]]; then
+    while read -r mod; do
+      [[ -z "${mod}" ]] && continue
+      ACT "SELF-HEAL: removed empty module '${mod}' from ledger"
+      healed=$((healed + 1))
+    done <<< "${empty_mods}"
+  fi
+
+  # 2. Resolve orphaned fallback SAPs (duplicates from repeated cycles)
+  local sap_dir="${DOCS_DIR}/docs/development/supervisor-actions"
+  if [[ -d "${sap_dir}" ]]; then
+    local sap_count=0
+    for sf in "${sap_dir}"/SAP-ACTION-NEEDED-*.json; do
+      [[ -f "${sf}" ]] || continue
+      local sap_task sap_status; read -r sap_task sap_status <<< "$(python3 -c "
+import json; d=json.load(open('${sf}'))
+print(d.get('task_id',''), d.get('status',''))
+" 2>/dev/null || echo '? ?')"
+      # Resolve duplicate fallback SAPs (keep only the most recent)
+      if [[ "${sap_task}" == "TASK-DOCS-AUTO-DECOMPOSE-FALLBACK" && "${sap_status}" == "open" ]]; then
+        sap_count=$((sap_count + 1))
+        if [[ "${sap_count}" -gt 1 ]]; then
+          python3 -c "
+import json, pathlib
+d = json.load(open('${sf}'))
+d['status'] = 'resolved'
+d['resolution'] = {'by': 'claude-pm-backup', 'how': 'self-heal: duplicate fallback SAP'}
+pathlib.Path('${sf}').write_text(json.dumps(d, indent=2))
+" 2>/dev/null
+          ACT "SELF-HEAL: resolved duplicate fallback SAP: $(basename ${sf})"
+          healed=$((healed + 1))
+        fi
+      fi
+    done
+  fi
+
+  # 3. Clean up untracked SAP/requirement files from previous incomplete cycles
+  cd "${DOCS_DIR}" 2>/dev/null || true
+  local untracked; untracked=$(git ls-files --others --exclude-standard 2>/dev/null | grep -E "supervisor-actions/SAP|requirements-inbox/" | head -5)
+  if [[ -n "${untracked}" ]]; then
+    while read -r f; do
+      [[ -z "${f}" ]] && continue
+      # Check if this is a transient artifact (not committed)
+      if [[ -f "${f}" ]]; then
+        local br; br=$(git branch --show-current 2>/dev/null)
+        if [[ "${br}" == "dev" ]]; then
+          git add "${f}" 2>/dev/null
+          git commit -m "self-heal: commit untracked control-plane artifact $(basename ${f})" 2>/dev/null
+          ACT "SELF-HEAL: committed untracked file: ${f}"
+          healed=$((healed + 1))
+        fi
+      fi
+    done <<< "${untracked}"
+  fi
+
+  [[ "${healed}" -eq 0 ]] && OK "state is clean — no self-healing needed"
+}
+
 run_all() {
   role_pm || true
   role_product || true
   role_tech || true
   role_qa || true
+
+  self_heal_clean_state
 
   set +e  # don't let Lark or print failures kill the cycle
   print_top_actions 5
