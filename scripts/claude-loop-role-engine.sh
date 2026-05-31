@@ -388,9 +388,9 @@ for m in ledger.get('modules',[]):
     ASK "WHY does ${tid} (${repo}) have mismatched status: ${detail1} vs ${detail2}?"
 
     # Gather context: check review contract and git log
+    local rstate="" verdict=""
     local rf="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
     if [[ -f "${rf}" ]]; then
-      local rstate verdict
       read -r rstate verdict <<< "$(python3 -c "
 import json; d=json.load(open('${rf}'))
 state = d.get('state','?')
@@ -424,6 +424,60 @@ else: print(state, 'no_verdict')
     # Check git for dev merge evidence
     local dev_merge; dev_merge=$(git -C "${LIVEMASK_ROOT}/${repo}" log --oneline --grep="${tid}" -1 2>/dev/null || echo "")
     [[ -n "${dev_merge}" ]] && echo "      dev merge: ${dev_merge}" || ASK "      no dev merge commit found — was this ever pushed?"
+
+    # ── AUTO-RECONCILE: resolve conflict when evidence is clear ────────────────
+    local auto_fixed=0
+    local target_status=""
+
+    # Rule 1: Review contract approved → sync both to completed
+    if [[ "${rstate:-}" == "approved" || "${verdict:-}" == "approved" ]]; then
+      target_status="completed"
+      ACT "AUTO-FIX: review contract approved → syncing doc+ledger to completed"
+      auto_fixed=1
+    # Rule 2: Review contract changes_requested → revert doc to partial
+    elif [[ "${rstate:-}" == "changes_requested" ]]; then
+      target_status="partial"
+      ACT "AUTO-FIX: review contract changes_requested → reverting doc to partial"
+      auto_fixed=1
+    # Rule 3: No contract but dev merge exists → sync both to completed
+    elif [[ -z "${rstate:-}" ]] && [[ -n "${dev_merge}" ]]; then
+      target_status="completed"
+      ACT "AUTO-FIX: dev merge exists without contract → syncing to completed (merge is evidence)"
+      auto_fixed=1
+    # Rule 4: No contract, no merge → leave as conflict for human/Codex
+    else
+      WARN "Cannot auto-resolve — no review contract and no dev merge. Needs human decision."
+    fi
+
+    if [[ "${auto_fixed}" -eq 1 && -n "${target_status}" ]]; then
+      # Update ledger
+      python3 -c "
+import json, re, pathlib
+docs = pathlib.Path('${DOCS_DIR}')
+
+# Update ledger
+ledger_path = docs / 'docs/development/task-state-ledger.json'
+ledger = json.loads(ledger_path.read_text())
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id') == '${tid}':
+            t['status'] = '${target_status}'
+            if '${target_status}' == 'completed':
+                t['validation'] = t.get('validation','') + ' [auto-reconciled: review contract or dev merge evidence]'
+ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False))
+
+# Update task doc Status line
+doc_path = docs / 'docs/development/tasks' / '${tid}.md'
+if doc_path.exists():
+    content = doc_path.read_text()
+    # Replace Status line: > Status: X or > **Status**: X  or > ✅ X etc
+    new_status = '> Status: ' + '${target_status}'.capitalize()
+    content = re.sub(r'>\s*\*?\*?Status:?\*?\*?\s*[^\n]+', new_status, content)
+    doc_path.write_text(content)
+print('auto-reconciled: ${tid} → ${target_status}')
+" 2>/dev/null && OK "auto-reconciled: ${tid} → ${target_status}" || WARN "auto-reconcile failed for ${tid}"
+    fi
+
     echo ""
   done <<< "${pm2_conflicts}"
 

@@ -281,6 +281,76 @@ for r in runs:
   if [[ -n "${FAILURES}" ]]; then
     while IFS='|' read -r wf conclusion url sha; do
       [[ -n "${wf}" ]] && block "CI: ${CI_REPO} ${wf} ${conclusion} at ${sha} — ${url}"
+
+      # Auto-create CI fix task for repeated failures
+      local ci_fix_key="${CI_REPO}:${wf}"
+      local fail_count
+      fail_count=$(echo "${FAILURES}" | grep -c "${wf}" 2>/dev/null || echo "1")
+      if [[ "${fail_count}" -ge 2 ]]; then
+        local fix_tid="TASK-CICD-FIX-$(echo "${wf}" | sed 's/[^a-zA-Z0-9]/-/g' | tr '[:upper:]' '[:lower:]' | cut -c1-40)"
+        # Check if fix task already exists in ledger
+        local fix_exists; fix_exists=$(python3 -c "
+import json
+ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if '${fix_tid}' in t.get('task_id',''): print('yes'); break
+" 2>/dev/null || echo "")
+        if [[ -z "${fix_exists}" ]]; then
+          REASONS+=("AUTO_FIX: CI ${CI_REPO} ${wf} failed ${fail_count} times — auto-creating fix task ${fix_tid}")
+          # Create a minimal task stub
+          local fix_doc="${DOCS_DIR}/docs/development/tasks/${fix_tid}.md"
+          if [[ ! -f "${fix_doc}" ]]; then
+            cat > "${fix_doc}" << TASKDOC
+# ${fix_tid} — Auto-created CI Fix
+
+> Priority: P0
+> Repo: ${CI_REPO}
+> Status: ready
+
+## Problem
+${wf} failed ${fail_count} consecutive runs on ${CI_REPO}/dev.
+Latest: ${url}
+
+## Acceptance Criteria
+- [ ] ${wf} passes on dev branch
+- [ ] Root cause identified and fixed
+- [ ] CI green for 2+ consecutive runs
+
+## Validation
+- CI run passes: ${url}
+TASKDOC
+            # Update ledger
+            python3 -c "
+import json, pathlib
+ledger_path = pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json')
+ledger = json.loads(ledger_path.read_text())
+# Find or create ci-fix module
+module = None
+for m in ledger.get('modules',[]):
+    if m.get('module_id') == 'ci-health':
+        module = m
+        break
+if not module:
+    module = {'module_id': 'ci-health', 'overall_status': 'partial', 'owner_repo': 'livemask-ci-cd', 'tasks': []}
+    ledger['modules'].append(module)
+module['tasks'].append({
+    'task_id': '${fix_tid}',
+    'repo': '${CI_REPO}',
+    'module_id': 'ci-health',
+    'status': 'ready',
+    'priority': 'P0',
+    'task_doc': 'docs/development/tasks/${fix_tid}.md',
+    'issue': '${url}',
+    'notes': 'Auto-created: ${wf} failed ${fail_count} times'
+})
+ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False))
+" 2>/dev/null
+          fi
+        else
+          REASONS+=("AUTO_FIX: fix task ${fix_tid} already exists for ${wf}")
+        fi
+      fi
     done <<< "${FAILURES}"
   else
     echo "  ${CI_REPO}: no failures (${CI_RUNS:+runs found})"
