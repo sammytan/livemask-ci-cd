@@ -75,6 +75,16 @@ run_recovery() {
     fail "docs/dev sync failed — may be dirty or diverged"
   fi
 
+  # 1a2. Sync ci-cd (so Claude picks up script updates)
+  info "syncing livemask-ci-cd/dev..."
+  cd "${CI_CD_DIR}"
+  if git switch dev 2>/dev/null && git pull --ff-only origin dev 2>/dev/null; then
+    CI_CD_HEAD=$(git rev-parse --short HEAD)
+    ok "ci-cd/dev at ${CI_CD_HEAD}"
+  else
+    warn "ci-cd/dev sync failed — running with local scripts, may miss updates"
+  fi
+
   # 1b. Check for orphaned task branches
   info "scanning for orphaned task branches..."
   local orphaned=0
@@ -236,6 +246,8 @@ modules = d.get('open_modules',[])
 for m in modules[:5]:
     print(f\"  {m['module_id']}: {m['overall_status']}\")
 "
+    # ── Fallback: task decomposition when queue is empty ──────────────────
+    fallback_task_decomposition
     return 1
   fi
 
@@ -298,6 +310,190 @@ if notes:
     echo "  ${r}: ${p}"
   done || true
 
+  return 0
+}
+
+# ── Fallback: Task decomposition when planner queue is empty ──────────────────
+fallback_task_decomposition() {
+  header "Fallback: Task Decomposition"
+
+  echo ""
+  echo -e "  ${BOLD}${YELLOW}Queue is empty. Running autonomous task decomposition...${RESET}"
+  echo ""
+
+  local created=0
+
+  # 1. Scan Ready contracts for unimplemented tasks
+  info "scanning Ready contracts for gaps..."
+  CONTRACT_COUNT=$(python3 -c "
+import json
+from pathlib import Path
+
+docs_dir = Path('${DOCS_DIR}')
+ledger = json.loads((docs_dir / 'docs/development/task-state-ledger.json').read_text())
+
+# Collect all task IDs in ledger
+all_tasks = set()
+for m in ledger.get('modules', []):
+    for t in m.get('tasks', []):
+        tid = t.get('task_id', '')
+        if tid:
+            all_tasks.add(tid)
+
+# Read contract index
+contract_index = docs_dir / 'docs/contracts/contract-index.md'
+if not contract_index.exists():
+    print('CONTRACT_INDEX_MISSING')
+    exit(0)
+
+content = contract_index.read_text()
+import re
+# Find Ready contracts and their primary tasks
+ready_contracts = []
+for line in content.split('\n'):
+    if '| Ready |' in line and 'TASK-' in line:
+        match = re.search(r'TASK-[A-Z0-9-]+', line)
+        if match:
+            tid = match.group(0)
+            if tid not in all_tasks:
+                ready_contracts.append(line.strip()[:120])
+
+if ready_contracts:
+    for c in ready_contracts[:5]:
+        print(f'GAP: {c}')
+else:
+    print('NO_GAPS')
+" 2>/dev/null || echo "PARSE_ERROR")
+
+  if echo "${CONTRACT_COUNT}" | grep -q "GAP:"; then
+    echo "${CONTRACT_COUNT}" | grep "GAP:" | while read -r line; do
+      echo "  ${line}"
+    done
+  else
+    echo "  No contract gaps detected"
+  fi
+
+  # 2. Check open modules for gaps
+  info "checking open modules for actionable gaps..."
+  python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
+    python3 -c "
+import json,sys
+d = json.load(sys.stdin)
+modules = d.get('open_modules',[])
+gaps = d.get('automation_gaps',{})
+print(f'  open_modules: {len(modules)}')
+print(f'  missing_issue: {len(gaps.get(\"missing_issue\",[]))}')
+print(f'  needs_runtime_evidence: {len(gaps.get(\"needs_runtime_evidence\",[]))}')
+" 2>/dev/null || true
+
+  # 3. If there are gaps, create a SAP to notify Codex
+  if echo "${CONTRACT_COUNT}" | grep -q "GAP:"; then
+    echo ""
+    info "creating SAP to notify Codex of new task candidates..."
+    SAP_OUT=$(python3 "${DOCS_DIR}/scripts/supervisor-action.py" create \
+      --task-id "TASK-DOCS-AUTO-DECOMPOSE-FALLBACK" \
+      --action ACTION_NEEDED \
+      --target-agent Codex \
+      --severity warning \
+      --blocks-loop false \
+      --repo livemask-docs \
+      --reason "Claude queue is empty. Auto-decomposition found Ready contracts without implementation tasks. Codex: review and approve task candidates, or Claude will self-dispatch in next cycle." \
+      --supervisor "Claude-Fallback" 2>&1)
+    SAP_ID=$(echo "${SAP_OUT}" | grep -oE 'SAP-ACTION-NEEDED-[0-9]+-[0-9]+' || echo "unknown")
+    echo "  SAP created: ${SAP_ID}"
+    created=1
+  fi
+
+  # 4. Create requirements-inbox candidates for the top gap
+  if echo "${CONTRACT_COUNT}" | grep -q "GAP:"; then
+    info "writing task candidates to requirements-inbox..."
+    TIMESTAMP=$(date -u +%Y%m%d-%H%M%S)
+    CANDIDATE_FILE="${DOCS_DIR}/docs/development/requirements-inbox/auto-decompose-${TIMESTAMP}.json"
+
+    python3 -c "
+import json, pathlib
+candidate = {
+    'generated_at': '${TIMESTAMP}',
+    'generated_by': 'Claude-Fallback',
+    'reason': 'Planner queue empty, autonomous decomposition',
+    'action': 'Codex review or Claude self-dispatch on next cycle'
+}
+pathlib.Path('${CANDIDATE_FILE}').write_text(json.dumps(candidate, indent=2))
+print(f'candidate written: ${CANDIDATE_FILE}')
+" 2>/dev/null || true
+    echo "  candidate: ${CANDIDATE_FILE}"
+    created=1
+  fi
+
+  # 5. Summary
+  echo ""
+  if [[ "${created}" -eq 1 ]]; then
+    echo -e "  ${BOLD}${YELLOW}Task decomposition complete. New candidates staged for review.${RESET}"
+    echo "  If Codex does not respond within 2 cycles, Claude will self-dispatch."
+  else
+    echo "  No actionable gaps found. System may be fully built or require manual planning."
+  fi
+
+  return 0
+}
+
+# ── Step 3.5: Active idle poll (replaces passive sleep) ──────────────────────
+active_idle_poll() {
+  header "Step 3.5: Active Idle Monitor"
+
+  local poll_seconds="${1:-120}"
+  local max_cycles="${2:-30}"  # 30 cycles * 2min = 60min max
+  local cycle=0
+
+  echo ""
+  echo -e "  ${BOLD}${CYAN}Queue empty. Actively polling origin/dev every ${poll_seconds}s (max ${max_cycles} cycles)...${RESET}"
+  echo "  Claude will wake immediately when Codex pushes new tasks."
+  echo ""
+
+  local baseline_sha
+  baseline_sha=$(git -C "${DOCS_DIR}" ls-remote origin dev | awk '{print $1}')
+  echo "  baseline: ${baseline_sha:0:7}"
+
+  while [[ "${cycle}" -lt "${max_cycles}" ]]; do
+    sleep "${poll_seconds}"
+    cycle=$((cycle + 1))
+
+    local current_sha
+    current_sha=$(git -C "${DOCS_DIR}" ls-remote origin dev 2>/dev/null | awk '{print $1}')
+    [[ -z "${current_sha}" ]] && continue
+
+    if [[ "${current_sha}" != "${baseline_sha}" ]]; then
+      echo ""
+      echo -e "  ${BOLD}${GREEN}[WAKE] origin/dev changed: ${baseline_sha:0:7} → ${current_sha:0:7}${RESET}"
+      echo "  Re-running preflight..."
+
+      # Pull new state
+      cd "${DOCS_DIR}" && git pull --ff-only origin dev 2>/dev/null
+      cd "${CI_CD_DIR}" && git pull --ff-only origin dev 2>/dev/null
+
+      # Re-run preflight to check for new work
+      local new_rc=0
+      bash "${CI_CD_DIR}/scripts/claude-loop-preflight.sh" 2>&1 | tail -20 || new_rc=$?
+
+      if [[ "${new_rc}" -ne 0 ]]; then
+        echo ""
+        echo -e "  ${BOLD}${GREEN}>>> WORK FOUND. Breaking idle loop to accept task.${RESET}"
+        return 1  # Signal: work available, re-enter task acceptance
+      fi
+
+      baseline_sha="${current_sha}"
+      echo "  (preflight still IDLE, continuing to poll)"
+    fi
+
+    # Every 5 cycles, print a heartbeat
+    if [[ $((cycle % 5)) -eq 0 ]]; then
+      echo "  [heartbeat cycle ${cycle}/${max_cycles}] still watching..."
+    fi
+  done
+
+  echo ""
+  echo "  Max idle cycles reached (${max_cycles}). Exiting monitor."
+  echo "  Next cron trigger will restart the loop."
   return 0
 }
 
@@ -513,5 +709,23 @@ case "${MODE}" in
 
     # HARD GATE: if preflight_rc != 0, decision_summary enforces action (never monitoring)
     decision_summary "${preflight_rc}" "${review_signal_count}" "${reconcile_signal_count}"
+
+    # If IDLE (exit 0), enter active polling instead of passive sleep
+    if [[ "${preflight_rc}" -eq 0 ]]; then
+      active_idle_poll 120 30 || {
+        # active_idle_poll returned 1 = work detected during polling
+        echo ""
+        echo -e "${BOLD}${GREEN}>>> Work detected during idle poll. Re-entering task acceptance...${RESET}"
+        # Re-run preflight to get fresh state
+        run_preflight || preflight_rc=$?
+        if [[ "${preflight_rc}" -eq 2 ]]; then
+          decision_summary 2 "${PREFLIGHT_REVIEW_COUNT:-0}" "${PREFLIGHT_RECONCILE_COUNT:-0}"
+          exit 2
+        fi
+        build_task_context || true
+        check_fixed_channels || true
+        decision_summary "${preflight_rc}" "${PREFLIGHT_REVIEW_COUNT:-0}" "${PREFLIGHT_RECONCILE_COUNT:-0}"
+      }
+    fi
     ;;
 esac
