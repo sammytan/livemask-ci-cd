@@ -25,6 +25,20 @@ RED="\033[31m"
 CYAN="\033[36m"
 RESET="\033[0m"
 
+# ── Repo Context Guard: ENFORCE correct working directory ─────────────────────
+# Claude may be in a runtime repo from a previous task. All control-plane
+# commands (supervisor-action.py, plan-next-tasks.py, gh issue, etc.) MUST
+# run from livemask-docs or with absolute paths.
+STARTUP_START_DIR=$(pwd)
+# Export absolute paths for Claude to use in manual commands
+export DOCS_SCRIPTS="${DOCS_DIR}/scripts"
+export CI_CD_SCRIPTS="${CI_CD_DIR}/scripts"
+if [[ ! "${STARTUP_START_DIR}" =~ livemask-(docs|ci-cd) ]]; then
+  echo -e "  ${YELLOW}[WARN]${RESET} startup invoked from ${STARTUP_START_DIR} — control-plane commands need absolute paths"
+  echo "  Use: python3 ${DOCS_SCRIPTS}/supervisor-action.py ..."
+  echo "  Use: bash ${CI_CD_SCRIPTS}/claude-loop-preflight.sh"
+fi
+
 header()  { echo -e "\n${BOLD}${CYAN}═══ $* ═══${RESET}"; }
 ok()      { echo -e "  ${GREEN}[OK]${RESET} $*"; }
 warn()    { echo -e "  ${YELLOW}[WARN]${RESET} $*"; }
