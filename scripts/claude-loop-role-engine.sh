@@ -15,6 +15,9 @@ DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
 CI_CD_DIR="${LIVEMASK_ROOT}/livemask-ci-cd"
 ROLE_CACHE_DIR="${LIVEMASK_ROOT}/.claude/role-cache"
 FINDINGS_FILE="${ROLE_CACHE_DIR}/findings.jsonl"
+AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
+LEASE_FILE="${DOCS_DIR}/docs/development/leases/task-leases.json"
+DISPATCH_DIR="${DOCS_DIR}/docs/development/dispatch-packets"
 ROLE="${1:-pm}"
 ARG2="${2:-}"
 
@@ -33,20 +36,24 @@ NEXT(){ echo -e "  ${BOLD}${GREEN}[NEXT]${RESET} $*"; }
 # Severity: blocker (must fix) > warning (should fix) > info (FYI)
 record_finding() {
   local role="$1" severity="$2" task_id="${3:-}" check="$4" finding="$5" next="${6:-}" cmd="${7:-}"
-  python3 -c "
-import json, pathlib
-f = {
-    'role': '${role}',
-    'severity': '${severity}',
-    'task_id': '${task_id}',
-    'check': '${check}',
-    'finding': '${finding}',
-    'next': '${next}',
-    'cmd': '${cmd}'
+  FINDINGS_FILE="${FINDINGS_FILE}" NOW_SHA_FULL="${NOW_SHA_FULL:-}" python3 - \
+    "${role}" "${severity}" "${task_id}" "${check}" "${finding}" "${next}" "${cmd}" <<'PY'
+import json, os, sys
+role, severity, task_id, check, finding, nxt, cmd = sys.argv[1:8]
+entry = {
+    "role": role,
+    "severity": severity,
+    "task_id": task_id,
+    "check": check,
+    "finding": finding,
+    "next": nxt,
+    "cmd": cmd,
+    "docs_head": os.environ.get("NOW_SHA_FULL", ""),
 }
-with open('${FINDINGS_FILE}', 'a') as fh:
-    fh.write(json.dumps(f, ensure_ascii=False) + '\n')
-" 2>/dev/null
+path = os.environ["FINDINGS_FILE"]
+with open(path, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+PY
 }
 
 print_top_actions() {
@@ -85,11 +92,108 @@ print(f'Total findings: {len(findings)} (${FINDINGS_FILE})')
 sync_all() {
   cd "${DOCS_DIR}" && git pull --ff-only origin dev 2>/dev/null || true
   cd "${CI_CD_DIR}" && git pull --ff-only origin dev 2>/dev/null || true
-  NOW_SHA=$(git -C "${DOCS_DIR}" rev-parse --short HEAD)
+  NOW_SHA=$(git -C "${DOCS_DIR}" rev-parse --short HEAD 2>/dev/null || echo "?")
+  NOW_SHA_FULL=$(git -C "${DOCS_DIR}" rev-parse HEAD 2>/dev/null || echo "")
+}
+
+# Shared intake aligned with CODEX_LOOP_RULES.md §2 and §12
+preflight_context() {
+  H1 "Preflight Context (Codex control-plane alignment)"
+  sync_all
+  echo "  docs_head: ${NOW_SHA}"
+
+  # Claude agent state (read-only)
+  if [[ -f "${AGENT_STATE}" ]]; then
+    python3 -c "
+import json
+d = json.load(open('${AGENT_STATE}'))
+task = d.get('current_task') or {}
+print(f\"  claude agent: phase={d.get('phase','?')} task={task.get('task_id') or 'null'} repo={task.get('target_repo') or ''}\")
+" 2>/dev/null || WARN "could not parse agent-state.json"
+  else
+    echo "  claude agent: (no agent-state.json)"
+  fi
+
+  # Active leases
+  if [[ -f "${LEASE_FILE}" ]]; then
+    python3 -c "
+import json
+data = json.load(open('${LEASE_FILE}'))
+active = [l for l in data.get('leases', []) if l.get('status') == 'active']
+print(f'  active leases: {len(active)}')
+for l in active[:5]:
+    print(f\"    {l.get('task_id','?')} owner={l.get('lease_owner','?')} repo={l.get('repo','?')}\")
+" 2>/dev/null || true
+  fi
+
+  # Dispatch packets
+  local pkt_count=0
+  if [[ -d "${DISPATCH_DIR}" ]]; then
+    pkt_count=$(find "${DISPATCH_DIR}" -maxdepth 1 -name 'TASK-*.json' 2>/dev/null | wc -l | tr -d ' ')
+    echo "  dispatch packets: ${pkt_count}"
+    for pf in "${DISPATCH_DIR}"/TASK-*.json; do
+      [[ -f "${pf}" ]] || continue
+      python3 -c "
+import json, pathlib
+p = json.load(open('${pf}'))
+print(f\"    {p.get('task_id','?')} -> {p.get('assigned_to','?')} repo={p.get('repo','?')}\")
+" 2>/dev/null
+    done
+  fi
+
+  # Planner top candidate
+  local planner_line
+  planner_line=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
+    python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+tasks = [t for t in d.get('global_next', []) if t.get('readiness') == 'dispatch_now']
+if not tasks:
+    print('NONE|0|0')
+else:
+    t = tasks[0]
+    print(f\"{t['task_id']}|{t['repo']}|{d.get('summary',{}).get('candidate_count',0)}\")
+" 2>/dev/null || echo "NONE|0|0")
+
+  local top_task top_repo candidate_count
+  top_task="${planner_line%%|*}"
+  planner_line="${planner_line#*|}"
+  top_repo="${planner_line%%|*}"
+  candidate_count="${planner_line##*|}"
+
+  if [[ "${top_task}" != "NONE" ]]; then
+    echo "  planner top: ${top_task} (${top_repo}) candidates=${candidate_count}"
+    local pkt="${DISPATCH_DIR}/${top_task}.json"
+    if [[ -f "${pkt}" ]]; then
+      OK "dispatch packet exists for top task"
+      record_finding "shared" "info" "${top_task}" "PREFLIGHT" \
+        "handoff pending: dispatch packet exists for ${top_task}" \
+        "run claude-loop-startup.sh and ACK_TASK" \
+        "bash ${CI_CD_DIR}/scripts/claude-loop-startup.sh"
+    else
+      WARN "top dispatch_now task has no packet yet — Codex should create one"
+      record_finding "shared" "warning" "${top_task}" "PREFLIGHT" \
+        "dispatch_now without packet: ${top_task}" \
+        "wait for Codex dispatch or run startup only" \
+        "bash ${CI_CD_DIR}/scripts/claude-loop-startup.sh"
+    fi
+  else
+    echo "  planner top: (no dispatch_now tasks) candidates=${candidate_count}"
+  fi
+
+  if [[ -n "${LAST_SHA:-}" && "${LAST_SHA}" == "${NOW_SHA}" ]]; then
+    echo "  docs unchanged since last role-engine run (${LAST_SHA})"
+  fi
+}
+
+finish_role() {
+  local role_name="$1"
+  save_cache "${role_name}" "${2:-done}"
 }
 
 load_cache() {
-  local role="$1" cache="${ROLE_CACHE_DIR}/${role}-cache.json"
+  local role_name="$1"
+  local cache="${ROLE_CACHE_DIR}/${role_name}-cache.json"
   if [[ -f "${cache}" ]]; then
     LAST_SHA=$(python3 -c "import json; print(json.load(open('${cache}')).get('last_sha',''))" 2>/dev/null || echo "")
     LAST_TIME=$(python3 -c "import json; print(json.load(open('${cache}')).get('updated_at',''))" 2>/dev/null || echo "")
@@ -101,11 +205,12 @@ load_cache() {
 }
 
 save_cache() {
-  local role="$1" summary="$2"
+  local role_name="$1"
+  local summary="$2"
   python3 -c "
 import json, time, pathlib
-cache = {'schema_version':2, 'role':'${role}', 'updated_at':'$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'updated_at_epoch':time.time(), 'last_sha':'${NOW_SHA}', 'summary':'${summary}'}
-pathlib.Path('${ROLE_CACHE_DIR}/${role}-cache.json').write_text(json.dumps(cache, indent=2))
+cache = {'schema_version':2, 'role':'${role_name}', 'updated_at':'$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'updated_at_epoch':time.time(), 'last_sha':'${NOW_SHA}', 'summary':'${summary}'}
+pathlib.Path('${ROLE_CACHE_DIR}/${role_name}-cache.json').write_text(json.dumps(cache, indent=2))
 " 2>/dev/null
 }
 
@@ -167,7 +272,7 @@ for m in ledger.get('modules',[]):
 role_pm() {
   H1 "PM — Project Manager Reasoning"
   load_cache "pm"
-  sync_all
+  preflight_context
 
   # ── PM-1: WHY are there blocked tasks? Trace to root blocker ───────────────
   H1 "PM-1: Blocked Task Root Cause Analysis"
@@ -260,6 +365,12 @@ for m in ledger.get('modules',[]):
         if not dm: continue
 
         doc_status = dm.group(1).lower().replace(':','').strip()
+        if doc_status.startswith('✅'):
+            doc_status = 'completed'
+        elif doc_status.startswith('🟡') or doc_status == 'partial':
+            doc_status = 'partial'
+        elif doc_status.startswith('🔴') or doc_status == 'blocked':
+            doc_status = 'blocked'
         ledger_status = t.get('status','').lower()
         done = {'completed','completed_with_skip'}
 
@@ -294,16 +405,20 @@ else: print(state, 'no_verdict')
       if [[ "${rstate}" == "changes_requested" ]]; then
         ASK "→ Contract says CHANGES_REQUESTED but doc/ledger says completed. Claude may have pre-maturely marked done."
         NEXT "Action: revert doc to Partial, create SAP warning Claude"
+        record_finding "pm" "warning" "${tid}" "PM-2" "doc/ledger vs review: changes_requested" "revert premature completion" ""
       elif [[ "${rstate}" == "under_codex_review" ]]; then
         ASK "→ Contract is under review — status should NOT be completed. Claude may have jumped the gun."
         NEXT "Action: hold status at implemented/verified until verdict"
+        record_finding "pm" "warning" "${tid}" "PM-2" "doc/ledger ahead of review state" "hold until codex verdict" ""
       elif [[ "${verdict}" == "approved" || "${rstate}" == "approved" ]]; then
         ASK "→ Contract approved — doc/ledger should BOTH be completed. Which side is stale?"
         NEXT "Action: sync the stale side to completed"
+        record_finding "pm" "info" "${tid}" "PM-2" "doc/ledger mismatch after approval" "sync stale side to completed" ""
       fi
     else
       ASK "→ No review contract exists — completion without review is a PROCESS_DEFECT"
       NEXT "Action: create review contract retroactively, mark task as evidence_missing until reviewed"
+      record_finding "pm" "warning" "${tid}" "PM-2" "doc/ledger conflict without review contract" "create review contract or reconcile ledger" ""
     fi
 
     # Check git for dev merge evidence
@@ -348,16 +463,25 @@ for s,c in statuses.most_common(8): print(f'{s}: {c}')
       echo "${status_dist}" | while read -r line; do echo "        ${line}"; done
 
       NEXT "Action: if MVP complete → mark milestone. If tasks stuck → diagnose each stuck status. If no tasks → trigger Product decomposition."
+      record_finding "pm" "warning" "" "PM-3" "dispatch queue empty (candidate_count=0)" "run product decomposition or audit backlog" "bash scripts/claude-loop-role-engine.sh product"
     else
       ASK "→ ${blocked} tasks are blocked — the queue IS the blocker list. Resolve root blockers to unblock candidates."
       NEXT "Action: run PM-1 blocker analysis for each blocked task"
+      record_finding "pm" "warning" "" "PM-3" "queue empty but ${blocked} blocked tasks open" "resolve root blockers" "bash scripts/claude-loop-role-engine.sh pm"
     fi
   else
     OK "${candidates} tasks ready — queue is healthy"
+    local top_id
+    top_id=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | \
+      python3 -c "import json,sys; d=json.load(sys.stdin); t=[x for x in d.get('global_next',[]) if x.get('readiness')=='dispatch_now']; print(t[0]['task_id'] if t else '')" 2>/dev/null || echo "")
+    if [[ -n "${top_id}" ]]; then
+      NEXT "Action: accept ${top_id} via claude-loop-startup.sh — do not re-decompose in Codex PM loop"
+      record_finding "pm" "info" "${top_id}" "PM-3" "dispatch_now available (${candidates} candidates)" "accept top task from startup" "bash ${CI_CD_DIR}/scripts/claude-loop-startup.sh"
+    fi
   fi
 
-  save_cache "pm" "blocked=$(echo "${blocked_tasks}" | wc -l | tr -d ' ') conflicts=${conflicts_found} queue=${candidates}/${blocked}"
-  H1 "PM complete. All findings require concrete NEXT actions above."
+  finish_role "pm" "blocked=$(echo "${blocked_tasks}" | wc -l | tr -d ' ') conflicts=${conflicts_found} queue=${candidates}/${blocked}"
+  H1 "PM complete. Top actions and findings.jsonl above."
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -367,7 +491,7 @@ for s,c in statuses.most_common(8): print(f'{s}: {c}')
 role_product() {
   H1 "PRODUCT — Product Manager Reasoning"
   load_cache "product"
-  sync_all
+  preflight_context
 
   # ── PROD-1: WHY are Ready contracts not implemented? ───────────────────────
   H1 "PROD-1: Contract-to-Implementation Gap Reasoning"
@@ -434,8 +558,10 @@ for c in contracts_with_gaps[:10]:
       [[ -n "${in_ledger}" ]] && ASK "   ${suggested_tid} exists in ledger with status=${in_ledger}"
 
       NEXT "Action: IF contract needs implementation AND no task exists → create task stub with blocked_by chain. IF task exists but wrong status → fix. IF docs-only → mark contract as Stable."
+      record_finding "product" "warning" "${suggested_tid}" "PROD-1" "Ready contract '${domain}' lacks implementation coverage" "create TASK or verify docs-only" ""
     else
       WARN "   contract file missing: ${contract}"
+      record_finding "product" "warning" "" "PROD-1" "contract file missing: ${contract}" "restore contract or fix contract-index" ""
     fi
     echo ""
   done <<< "${prod1_raw}"
@@ -496,7 +622,7 @@ print(d.get('generated_by','?'), d.get('generated_at','?')[:16])
   done
   [[ "${inbox_count}" -eq 0 ]] && OK "requirement inbox clean"
 
-  save_cache "product" "gaps=${uncovered} mvp=${pct:-?}% inbox=${inbox_count}"
+  finish_role "product" "gaps=${uncovered} mvp=${pct:-?}% inbox=${inbox_count}"
   H1 "Product complete."
 }
 
@@ -507,7 +633,7 @@ print(d.get('generated_by','?'), d.get('generated_at','?')[:16])
 role_tech() {
   H1 "TECH — Tech Lead Reasoning"
   load_cache "tech"
-  sync_all
+  preflight_context
 
   # ── TECH-1: API/Swagger drift — WHY and what exactly is missing? ───────────
   H1 "TECH-1: API/Swagger Drift Analysis"
@@ -549,6 +675,7 @@ role_tech() {
       ASK "   IF route has been there for weeks → tech debt, prioritize Swagger completion"
       ASK "   IF route is internal only (/internal/) → may not need public Swagger, document internally"
       NEXT "Action: create TASK-BACKEND-SWAGGER-SYNC listing exact missing routes"
+      record_finding "tech" "warning" "TASK-BACKEND-SWAGGER-SYNC" "TECH-1" "${diff} routes may be missing from Swagger" "create swagger sync task" ""
     else
       OK "Swagger coverage matches or exceeds routes"
     fi
@@ -573,6 +700,7 @@ role_tech() {
         WARN "→ NOT NULL without DEFAULT — this will fail on existing rows with data!"
         ASK "   IF table has existing rows → migration WILL fail. Add DEFAULT or make nullable."
         NEXT "Action: FIX immediately — add DEFAULT value or remove NOT NULL constraint"
+        record_finding "tech" "blocker" "" "TECH-2" "NOT NULL without DEFAULT in ${go_file}:${lineno}" "fix migration before merge" ""
       fi
 
       # Check for indexes on new column
@@ -619,7 +747,7 @@ role_tech() {
     OK "no recent API surface changes"
   fi
 
-  save_cache "tech" "swagger_diff=${diff:-0} add_columns=${add_cols}"
+  finish_role "tech" "swagger_diff=${diff:-0} add_columns=${add_cols}"
   H1 "Tech complete."
 }
 
@@ -630,7 +758,7 @@ role_tech() {
 role_qa() {
   H1 "QA — Quality Assurance Reasoning"
   load_cache "qa"
-  sync_all
+  preflight_context
 
   # ── QA-1: WHY does a completed task lack evidence? ─────────────────────────
   H1 "QA-1: Completion Evidence Deep Verification"
@@ -684,6 +812,7 @@ else: print(state, 'no_verdict')
     fi
 
     NEXT "Action: IF completed without review → revert to evidence_missing, create review contract. IF review passed but ledger blank → fill ledger validation field."
+    record_finding "qa" "warning" "${tid}" "QA-1" "completed task lacks validation evidence" "fill ledger validation or revert status" "bash scripts/claude-loop-role-engine.sh --closure-audit ${tid}"
     echo ""
   done <<< "${qa1_raw}"
 
@@ -769,7 +898,7 @@ for m in ledger.get('modules',[]):
     fi
   done
 
-  save_cache "qa" "evidence_gaps=${evidence_gaps} bugs=${total_bugs}"
+  finish_role "qa" "evidence_gaps=${evidence_gaps} bugs=${total_bugs}"
   H1 "QA complete."
 }
 
@@ -953,10 +1082,26 @@ run_all() {
 # ══════════════════════════════════════════════════════════════════════════════
 
 case "${ROLE}" in
-  pm)                role_pm;;
-  product)           role_product;;
-  tech)              role_tech;;
-  qa)                role_qa;;
+  pm)
+    role_pm
+    print_top_actions 3
+    echo "  Machine-readable findings: ${FINDINGS_FILE}"
+    ;;
+  product)
+    role_product
+    print_top_actions 3
+    echo "  Machine-readable findings: ${FINDINGS_FILE}"
+    ;;
+  tech)
+    role_tech
+    print_top_actions 3
+    echo "  Machine-readable findings: ${FINDINGS_FILE}"
+    ;;
+  qa)
+    role_qa
+    print_top_actions 3
+    echo "  Machine-readable findings: ${FINDINGS_FILE}"
+    ;;
   all)               run_all;;
   --deep-review)     deep_review "${ARG2}";;
   --closure-audit)   closure_audit "${ARG2}";;
