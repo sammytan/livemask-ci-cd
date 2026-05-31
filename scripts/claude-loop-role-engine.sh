@@ -29,6 +29,46 @@ PM_SKIP=0
 ROLE="${1:-pm}"
 ARG2="${2:-}"
 
+# ── Workspace guard: NEVER leave the working tree dirty ──────────────────────
+# Trap EXIT ensures cleanup runs even if the script crashes mid-cycle
+cleanup_workspace() {
+  local exit_code=$?
+  cd "${DOCS_DIR}" 2>/dev/null || true
+
+  # 1. Switch back to dev (no matter what branch we're on)
+  local current_br; current_br=$(git branch --show-current 2>/dev/null || echo "")
+  if [[ -n "${current_br}" && "${current_br}" != "dev" ]]; then
+    # Stash any uncommitted changes before switching
+    git stash --include-untracked -m "auto-stash: role-engine cleanup $(date -u +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    git checkout dev 2>/dev/null || true
+  fi
+
+  # 2. Clean up leftover task branches from this run
+  for br in $(git branch --list "task/pm-auto-reconcile-*" "task/auto-create-*" "task/role-*" "task/fallback-sap-*" --format='%(refname:short)' 2>/dev/null); do
+    git branch -D "${br}" 2>/dev/null || true
+  done
+
+  # 3. Release PM lease if held
+  if [[ -f "${PM_LEASE_FILE:-}" ]]; then
+    python3 -c "
+import json, pathlib
+try:
+    d = json.load(open('${PM_LEASE_FILE}'))
+    if d.get('phase') != 'complete':
+        d['phase'] = 'complete'
+        d['completed_at'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+        pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d, indent=2))
+except: pass
+" 2>/dev/null || true
+  fi
+
+  # 4. Pull latest dev (so we're synced for next cycle)
+  git pull --ff-only origin dev 2>/dev/null || true
+
+  exit ${exit_code}
+}
+trap cleanup_workspace EXIT
+
 # ── Auto-create task from finding (therapeutic layer) ────────────────────────
 # Only creates if finding is actionable AND no existing task covers it.
 # Returns task_id if created, empty string if skipped.
