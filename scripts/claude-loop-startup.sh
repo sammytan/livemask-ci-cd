@@ -807,6 +807,20 @@ case "${MODE}" in
     # HARD GATE: if preflight_rc != 0, decision_summary enforces action (never monitoring)
     decision_summary "${preflight_rc}" "${review_signal_count}" "${reconcile_signal_count}"
 
+    # ── Task Execution Summary ──────────────────────────────────────────────
+    echo ""
+    echo -e "${BOLD}${CYAN}═══ Cycle Report ═══${RESET}"
+    echo "  preflight:      $( [[ ${preflight_rc} -eq 0 ]] && echo -e "${GREEN}IDLE${RESET}" || ([[ ${preflight_rc} -eq 2 ]] && echo -e "${RED}BLOCKED${RESET}" || echo -e "${YELLOW}WORK${RESET}") )"
+    echo "  candidates:     ${candidate_count:-0} dispatchable, ${blocked_count:-0} blocked"
+    echo "  dispatch pkts:  $(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | wc -l | tr -d ' ' || echo "0")"
+    echo "  findings:       ${FINDINGS_WARNING:-0} warnings, ${FINDINGS_BLOCKER:-0} blockers"
+    echo "  review:         ${review_signal_count} contracts need action"
+    echo "  reconcile:      ${reconcile_signal_count} ledger entries stale"
+    echo "  CI:             $(gh run list --repo MyAiDevs/livemask-backend --branch dev --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo '?') (backend) | $(gh run list --repo MyAiDevs/livemask-admin --branch dev --limit 1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo '?') (admin)"
+    echo "  PM lease:       $(cat ${HOME}/.claude/role-cache/pm-lease.json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(f\"{d.get(\"agent\",\"none\")} ({d.get(\"phase\",\"?\")})\")' 2>/dev/null || echo 'none')"
+    echo "  logs:           tail -30 /tmp/claude/latest-startup.log"
+    echo ""
+
     # Lark notification
     lark_card_preflight "${preflight_rc}" "${pf_label:-IDLE}" "${candidate_count:-0}" "${blocked_count:-0}" \
       "${FINDINGS_WARNING:-0}" "${ci_status:-?}" "${review_signal_count}" "${reconcile_signal_count}" 2>/dev/null || true
