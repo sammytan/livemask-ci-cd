@@ -811,11 +811,10 @@ PY
 
   if [[ "${COORDINATION_DECISION}" == "wait" || "${COORDINATION_DECISION}" == "handoff_wait" ]]; then
     record_finding "shared" "info" "${coord_task:-}" "COORDINATION" \
-      "role-engine waiting because coordination=${COORDINATION_DECISION}" \
-      "next actor: ${COORDINATION_NEXT_ACTOR}" \
+      "role-engine switched to safe diagnostics because coordination=${COORDINATION_DECISION}" \
+      "diagnose/read context only; next actor: ${COORDINATION_NEXT_ACTOR}" \
       "bash ${ADAPTER_LIB} coordination-status claude-role-engine ${coord_task}"
-    PM_SKIP=1
-    return 1
+    COORDINATION_DECISION="read_only"
   fi
 
   if [[ "${COORDINATION_DECISION}" == "read_only" ]]; then

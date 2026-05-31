@@ -224,7 +224,7 @@ read_agent_state() {
 coordination_preflight() {
   header "Step 0.5: Role Coordination"
 
-  mkdir -p "${HOME}/.claude/role-cache"
+  mkdir -p "$(dirname "${COORDINATION_STATUS_FILE}")"
   local task_arg=""
   [[ "${CURRENT_TASK:-null}" != "null" ]] && task_arg="${CURRENT_TASK}"
 
@@ -257,12 +257,12 @@ PY
 
   case "${COORDINATION_DECISION}" in
     wait|handoff_wait)
-      warn "coordination says ${COORDINATION_DECISION}; startup will not accept or mutate tasks this cycle"
-      log_summary "startup" 0 "WAIT coordination next=${COORDINATION_NEXT_ACTOR}" 2>/dev/null || true
-      return 20
+      warn "coordination says ${COORDINATION_DECISION}; switching to safe-progress work instead of stopping"
+      log_summary "startup" 0 "SAFE_PROGRESS coordination next=${COORDINATION_NEXT_ACTOR}" 2>/dev/null || true
+      return 0
       ;;
     read_only)
-      warn "coordination says read_only; startup may inspect context but must not accept new work"
+      warn "coordination says read_only; startup will advance read-only context and handoff work"
       return 0
       ;;
     *)
@@ -792,6 +792,77 @@ active_idle_poll() {
   return 0
 }
 
+# ── Step 3.6: Safe progress when coordination blocks writes ─────────────────
+coordination_safe_progress() {
+  header "Step 3.6: Non-Blocking Safe Progress"
+
+  echo ""
+  echo -e "  ${BOLD}${CYAN}Coordination does not stop Claude. It changes the work type.${RESET}"
+  echo "  decision:     ${COORDINATION_DECISION}"
+  echo "  next_actor:   ${COORDINATION_NEXT_ACTOR}"
+  echo "  status_json:  ${COORDINATION_STATUS_FILE}"
+  echo ""
+
+  python3 - "${COORDINATION_STATUS_FILE}" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+for reason in d.get("reasons", [])[:6]:
+    print(f"  reason:       {reason}")
+tracks = d.get("progress_tracks") or []
+if tracks:
+    print("")
+    print("  safe progress tracks:")
+    for idx, item in enumerate(tracks[:8], 1):
+        print(f"    {idx}. {item}")
+PY
+
+  if [[ "${CURRENT_TASK:-null}" != "null" ]]; then
+    echo ""
+    echo -e "  ${BOLD}${YELLOW}Active task exists: continue recovery context without switching tasks.${RESET}"
+    echo "  NEXT: bash ${ADAPTER_LIB} task-context ${CURRENT_TASK}"
+    bash "${ADAPTER_LIB}" task-context "${CURRENT_TASK}" 2>/dev/null | python3 -c "
+import json, sys
+d=json.load(sys.stdin)
+print(f\"  required_first_reads: {len(d.get('required_first_reads', []))}\")
+for f in d.get('required_first_reads', [])[:8]:
+    print(f\"    - {f.get('path')} ({'exists' if f.get('exists') else 'missing'})\")
+print(f\"  recommended_searches: {len(d.get('recommended_searches', []))}\")
+" 2>/dev/null || true
+  else
+    echo ""
+    echo -e "  ${BOLD}${YELLOW}No active task: prepare context for the next non-conflicting task.${RESET}"
+    bash "${ADAPTER_LIB}" dispatch-status 2>/dev/null | python3 -c "
+import json, sys
+d=json.load(sys.stdin)
+items=d.get('packets', []) if isinstance(d, dict) else []
+print(f\"  dispatch packets: {len(items)}\")
+for p in items[:5]:
+    print(f\"    - {p.get('task_id','?')} -> {p.get('assigned_to','?')} repo={p.get('repo','?')}\")
+" 2>/dev/null || true
+    python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "
+import json, sys
+d=json.load(sys.stdin)
+rows=d.get('global_next', [])[:5]
+print(f\"  planner candidates: {len(rows)} shown\")
+for r in rows:
+    print(f\"    - {r.get('task_id','?')} repo={r.get('repo','?')} readiness={r.get('readiness','?')}\")
+" 2>/dev/null || true
+  fi
+
+  echo ""
+  echo "  read-only commands Claude can run now:"
+  echo "    bash ${ADAPTER_LIB} findings-search"
+  echo "    bash ${ADAPTER_LIB} pm-status"
+  echo "    bash ${ADAPTER_LIB} dispatch-status"
+  echo "    bash ${ADAPTER_LIB} knowledge-inventory 80"
+  echo "    bash ${ADAPTER_LIB} memory-search livemask 10"
+  echo ""
+  echo "  Required behavior:"
+  echo "    - Do not accept a new conflicting TASK while coordination is ${COORDINATION_DECISION}."
+  echo "    - Do produce context, diagnostics, and handoff notes so the next actor can continue immediately."
+  echo "    - If a task is already active, continue that task's recovery path instead of switching."
+}
+
 # ── Step 4: Fixed channels ───────────────────────────────────────────────────
 check_fixed_channels() {
   header "Step 4: Fixed Control Channels"
@@ -966,15 +1037,27 @@ decision_summary() {
 case "${MODE}" in
   --recovery)
     read_agent_state
-    coordination_preflight || exit 0
+    coordination_preflight
+    if [[ "${COORDINATION_DECISION}" != "proceed" ]] && [[ "${AGENT_PHASE}" == "idle" || "${AGENT_PHASE}" == "idle_monitor" ]]; then
+      coordination_safe_progress
+      check_fixed_channels || true
+      check_event_cache || true
+      decision_summary 0 0 0
+      exit 0
+    fi
     run_recovery
     decision_summary 0 0 0
     ;;
   --quick)
     read_agent_state
-    coordination_preflight || exit 0
+    coordination_preflight
     if [[ "${AGENT_PHASE}" != "idle" && "${AGENT_PHASE}" != "idle_monitor" ]]; then
       run_recovery
+      decision_summary 0 0 0
+    elif [[ "${COORDINATION_DECISION}" != "proceed" ]]; then
+      coordination_safe_progress
+      check_fixed_channels || true
+      check_event_cache || true
       decision_summary 0 0 0
     else
       echo "quick mode: agent is idle, nothing to recover"
@@ -982,7 +1065,7 @@ case "${MODE}" in
     ;;
   *)
     read_agent_state
-    coordination_preflight || exit 0
+    coordination_preflight
 
     # If in a non-idle phase, go straight to recovery
     if [[ "${AGENT_PHASE}" != "idle" && "${AGENT_PHASE}" != "idle_monitor" ]]; then
@@ -991,14 +1074,15 @@ case "${MODE}" in
       exit $?
     fi
 
-    if [[ "${COORDINATION_DECISION}" == "read_only" ]]; then
+    if [[ "${COORDINATION_DECISION}" != "proceed" ]]; then
       echo ""
-      echo -e "${BOLD}${YELLOW}READ_ONLY — coordination guard allows inspection only; no task acceptance this cycle.${RESET}"
+      echo -e "${BOLD}${YELLOW}SAFE_PROGRESS — coordination guard changes the work type; Claude still has useful project work.${RESET}"
+      coordination_safe_progress
       build_task_context || warn "context build returned non-zero"
       check_fixed_channels || true
       check_event_cache || true
       decision_summary 0 0 0
-      log_summary "startup" 0 "READ_ONLY coordination next=${COORDINATION_NEXT_ACTOR}" 2>/dev/null || true
+      log_summary "startup" 0 "SAFE_PROGRESS coordination next=${COORDINATION_NEXT_ACTOR}" 2>/dev/null || true
       exit 0
     fi
 

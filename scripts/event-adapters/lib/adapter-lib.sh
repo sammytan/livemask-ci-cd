@@ -1078,6 +1078,13 @@ decision = "proceed"
 next_actor = actor
 safe_actions = ["read docs", "read ledger", "read GitHub issues/comments", "run adapter knowledge/search commands"]
 blocked_actions = []
+progress_tracks = [
+    "build context for the active or next dispatchable TASK without accepting it",
+    "read linked GitHub issue body and recent comments; summarize decisions and open questions",
+    "search docs/contracts and prior ledger tasks before proposing code changes",
+    "run read-only diagnostics from findings-search, pm-status, dispatch-status, and task-context",
+    "prepare a handoff note that names the next actor, blockers, and exact evidence paths",
+]
 
 if pm_status == "active" and pm.get("agent") and pm.get("agent") != actor:
     decision = "wait"
@@ -1131,6 +1138,7 @@ print(json.dumps({
     "reasons": reasons,
     "safe_actions": sorted(set(safe_actions)),
     "blocked_actions": sorted(set(blocked_actions)),
+    "progress_tracks": progress_tracks,
     "pm_lease": {"status": pm_status, "agent": pm.get("agent"), "phase": pm.get("phase"), "age_min": pm_age_min},
     "claude_agent": {"phase": claude_phase, "task_id": claude_task, "repo": claude_repo},
     "active_task_leases": active_task_leases,
