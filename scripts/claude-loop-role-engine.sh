@@ -19,6 +19,7 @@ source "${SCRIPT_DIR}/lib/github-ops.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/memory-fast.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/local-verify.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/ledger-intelligence.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/review-gate.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
 memory_init 2>/dev/null || true
 
@@ -2928,6 +2929,14 @@ for f in findings[:10]:
   echo "    memory_search <query>"
   echo "    memory_recent_decisions 24"
   echo "    memory_learned_patterns"
+  echo ""
+  echo "  Review gate commands (executor→leader→QA→merge):"
+  echo "    executor_submit_review <TASK-ID>   # Submit implementation for review"
+  echo "    leader_review <TASK-ID>            # Model reviews code diff + evidence"
+  echo "    qa_verify <TASK-ID>                # QA runs build/test/acceptance"
+  echo "    leader_approve <TASK-ID>           # Approve → executor merges to dev"
+  echo "    leader_request_changes <TASK-ID> \"<reason>\"  # Request fixes"
+  echo "    review_status [TASK-ID]            # Check review state"
   echo ""
   echo "  Ledger intelligence commands:"
   echo "    ledger_health_dashboard          # Status overview"
