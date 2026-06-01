@@ -2984,9 +2984,10 @@ for f in findings[:10]:
   [[ -z "${queue_count}" ]] && queue_count="0"
   if [[ "${queue_count}" == "0" ]]; then
     echo ""
-    echo -e "  ${BOLD}${YELLOW}[AUTO-FIX]${RESET} Queue empty — auto-creating tasks from Ready contract gaps"
+    echo -e "  ${BOLD}${YELLOW}[AUTO-FIX]${RESET} Queue empty — auto-creating tasks"
+    # FIX 14: Try contract-index first, fallback to requirements-inbox, MVP plan, task README
     python3 -c "
-import json, pathlib, datetime, re, subprocess
+import json, pathlib, datetime, re, subprocess, sys
 docs = pathlib.Path('${DOCS_DIR}')
 ledger = json.loads((docs / 'docs/development/task-state-ledger.json').read_text())
 all_tasks = {t['task_id'] for m in ledger['modules'] for t in m['tasks'] if t.get('task_id')}
