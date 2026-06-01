@@ -49,6 +49,9 @@ log_cycle "AUTONOMOUS DEVELOPMENT DAEMON STARTED (PID: $$, MAX: ${MAX_CYCLES})"
 while [[ "${CYCLE_COUNT}" -lt "${MAX_CYCLES}" ]]; do
   CYCLE_COUNT=$((CYCLE_COUNT + 1))
 
+  # Prevent rapid cycling — small sleep between iterations
+  sleep 2
+
   # ── Phase 0: System health ──────────────────────────────────────────
   executor_repair_agent_state 2>/dev/null || true
   executor_repair_ledger 2>/dev/null || true
@@ -191,6 +194,8 @@ pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json').write_text(j
   fi
 
   log_cycle "Cycle ${CYCLE_COUNT} complete — starting next cycle"
+  log_cycle "Sleeping ${SLEEP_BETWEEN}s between cycles"
+  sleep "${SLEEP_BETWEEN}"
 done
 
 log_cycle "MAX_CYCLES (${MAX_CYCLES}) reached — exiting"
