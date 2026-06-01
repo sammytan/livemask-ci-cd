@@ -77,8 +77,11 @@ cleanup_workspace() {
   # 1. Switch back to dev (no matter what branch we're on)
   local current_br; current_br=$(git branch --show-current 2>/dev/null || echo "")
   if [[ -n "${current_br}" && "${current_br}" != "dev" ]]; then
-    # Stash any uncommitted changes before switching
-    git stash --include-untracked -m "auto-stash: role-engine cleanup $(date -u +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    # Only stash if there are actual uncommitted changes on this branch.
+    # NEVER stash --include-untracked blindly — it can nuke user files.
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+      git stash -m "auto-stash: role-engine cleanup $(date -u +%Y%m%d-%H%M%S)" 2>/dev/null || true
+    fi
     git checkout dev 2>/dev/null || true
   fi
 
@@ -150,7 +153,7 @@ for m in ledger.get('modules',[]):
             count += 1
 print(count)
 " 2>/dev/null || echo "0")
-  if [[ "${open_auto_count}" -ge 3 ]]; then
+  if [[ "${open_auto_count:-0}" -ge 3 ]]; then
     echo "    (skip auto-create: ${open_auto_count} open TASK-AUTO tasks already pending — dispatch and implement existing tasks before creating more)"
     record_finding "${role}" "warning" "" "${check}" \
       "auto-create skipped: ${open_auto_count} open TASK-AUTO tasks already exist — dispatch/implement them first" \
@@ -182,7 +185,7 @@ import json
 ledger = json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
 for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
-        if '${tid}' in t.get('task_id',''): print('yes'); break
+        if t.get('task_id','') == '${tid}': print('yes'); break
 " 2>/dev/null || echo "")
   [[ -n "${exists}" ]] && { echo "    (task ${tid} already exists — skip)"; return 0; }
 
@@ -1042,7 +1045,7 @@ except: print('?','?','999','?')
   fi
 
   # Acquire/renew lease
-  python3 -c "
+  if ! python3 -c "
 import json, time, pathlib
 d = {
     'agent': '${agent}',
@@ -1052,7 +1055,10 @@ d = {
     'docs_head': '${NOW_SHA_FULL:-?}'
 }
 pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d, indent=2))
-" 2>/dev/null
+" 2>/dev/null; then
+    WARN "failed to write PM lease file — continuing without lease"
+    return 0
+  fi
   echo "  [LEASE] PM lock acquired by ${agent}"
   return 0
 }
@@ -2950,7 +2956,17 @@ case "${ROLE}" in
     echo "  Machine-readable findings: ${FINDINGS_FILE}"
     echo "  Task review report: ${ROLE_CACHE_DIR}/task-review-report.json"
     ;;
-  all)               run_all;;
+  all)
+    # Pre-flight PM lease check before running all roles.
+    # Without this, each role calls preflight_context individually (5x)
+    # and the MAIN-level PM_SKIP guard never fires for 'all' mode.
+    if ! acquire_pm_lease "claude-pm-backup"; then
+      echo -e "  ${YELLOW}[SKIP]${RESET} PM lease held by another agent. Exiting to avoid collision."
+      exit 0
+    fi
+    run_all
+    release_pm_lease 2>/dev/null || true
+    ;;
   --deep-review)     deep_review "${ARG2}";;
   --closure-audit)   closure_audit "${ARG2}";;
   --impact-analysis) impact_analysis "${ARG2}";;
