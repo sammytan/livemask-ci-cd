@@ -18,6 +18,7 @@ source "${SCRIPT_DIR}/lib/reasoning-engine.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/github-ops.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/memory-fast.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/local-verify.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/ledger-intelligence.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
 memory_init 2>/dev/null || true
 
@@ -2927,6 +2928,15 @@ for f in findings[:10]:
   echo "    memory_search <query>"
   echo "    memory_recent_decisions 24"
   echo "    memory_learned_patterns"
+  echo ""
+  echo "  Ledger intelligence commands:"
+  echo "    ledger_health_dashboard          # Status overview"
+  echo "    ledger_dispatch_recommendations  # What to work on next"
+  echo "    ledger_find_stuck 5              # Tasks with no recent activity"
+  echo "    ledger_closure_score <TASK-ID>   # 0-100 readiness score"
+  echo "    ledger_trace_blockers <TASK-ID>  # Dependency chain to root"
+  echo "    ledger_unblock_impact <TASK-ID>  # What completing this unlocks"
+  echo "    ledger_full_report               # Complete intelligence report"
   echo ""
 
   # Auto-save cycle memory for future retrieval
