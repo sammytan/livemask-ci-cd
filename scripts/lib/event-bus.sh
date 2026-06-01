@@ -61,6 +61,10 @@ state_path.write_text(json.dumps(state,indent=2,ensure_ascii=False))
       event_react_product_progress "${task_id}" 2>/dev/null || true ;;
     code_committed)
       event_react_tech_commit_check "${task_id}" 2>/dev/null || true
+      # Auto-trigger skills on commit: code-review + security-review + verify
+      skill_code_review "${task_id}" 2>/dev/null || true
+      skill_security_review "${task_id}" 2>/dev/null || true
+      (skill_verify "${repo}" 2>/dev/null || true) &  # Async: don't block the event chain
       executor_renew_lease "claude-executor" "${task_id}" 2>/dev/null || true ;;
     review_submitted)
       event_react_leader_review "${task_id}" 2>/dev/null || true
