@@ -39,26 +39,33 @@ pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d,indent=2))
     return 0
   fi
 
-  local holder age_min
-  read -r holder age_min <<< "$(python3 -c "
+  local holder age_min holder_phase
+  read -r holder age_min holder_phase <<< "$(python3 -c "
 import json,time
 d=json.load(open('${PM_LEASE_FILE}'))
-print(d.get('agent','?'),int((time.time()-d.get('started_at_epoch',0))/60))
-" 2>/dev/null || echo '? 999')"
+print(d.get('agent','?'),int((time.time()-d.get('started_at_epoch',0))/60),d.get('phase','?'))
+" 2>/dev/null || echo '? 999 ?')"
 
-  if [[ "${holder}" != "${agent}" && "${age_min}" -lt 15 ]]; then
-    echo "  [LEASE] held by '${holder}' (${age_min}min) — cannot renew"
+  # Allow takeover if previous lease is terminal (complete/stale-auto-released)
+  if [[ "${holder_phase}" == "complete" || "${holder_phase}" == "stale-auto-released" ]]; then
+    echo "  [LEASE] Previous lease by '${holder}' is terminal (${holder_phase}) — taking over"
+  elif [[ "${holder}" != "${agent}" && "${age_min}" -lt 15 ]]; then
+    echo "  [LEASE] held by '${holder}' (${age_min}min, phase=${holder_phase}) — cannot renew"
     return 1
   fi
 
-  # FIX 1: Renew + record heartbeat
+  # FIX 1: Renew + record heartbeat. Change agent if taking over terminal lease.
   python3 -c "
 import json,time,pathlib
 d=json.load(open('${PM_LEASE_FILE}'))
+# If taking over from a different agent, claim the lease
+if d.get('agent','') != '${agent}': d['agent']='${agent}'; d['takeover_from']=d.get('agent','?')
 d['started_at_epoch']=time.time()
 d['started_at']='$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+d['phase']='implementing'
 d['renewed_count']=d.get('renewed_count',0)+1
 d['last_heartbeat_task']='${task_id}'
+d['note']='Executor lease — Codex must skip reconciliation'
 pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d,indent=2))
 " 2>/dev/null
   local hb; hb=$(python3 -c "import json;print(json.load(open('${PM_LEASE_FILE}')).get('renewed_count',0))" 2>/dev/null || echo "?")
