@@ -23,6 +23,7 @@ source "${SCRIPT_DIR}/lib/review-gate.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/monitor-learn.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/executor-guard.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/event-bus.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/impl-assist.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
 memory_init 2>/dev/null || true
 monitor_init 2>/dev/null || true
