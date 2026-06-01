@@ -364,9 +364,17 @@ executor_repair_ledger() {
       return 0
     fi
   fi
-  # Last resort: init empty ledger
-  echo '{"modules":[]}' > "${ledger_path}"
-  echo "  [REPAIR] Ledger reset to empty — manual recovery needed"
+	  # NEVER reset to empty — that destroys all tasks. Restore from origin/dev instead.
+	  echo "  [REPAIR] Attempting restore from origin/dev..."
+	  git fetch origin dev 2>/dev/null && git show "origin/dev:docs/development/task-state-ledger.json" > "${ledger_path}.recovered" 2>/dev/null
+	  if python3 -c "import json; json.load(open("${ledger_path}.recovered"))" 2>/dev/null; then
+	    mv "${ledger_path}.recovered" "${ledger_path}"
+	    echo "  [REPAIR] Ledger restored from origin/dev"
+	    return 0
+	  fi
+	  echo "  [REPAIR] CRITICAL: Cannot restore ledger — manual intervention required"
+	  executor_push_alert "ledger_lost" "Ledger corrupted and cannot be restored from git" 2>/dev/null || true
+	  return 1
   return 1
 }
 
