@@ -394,20 +394,50 @@ executor_full_guard() {
   echo ""
 }
 
-# ── FIX 12: Liveness heartbeat file (solve heartbeat假活) ───────────────
+# ── FIX 12: Liveness heartbeat with PID check (solve heartbeat假活) ─────
 executor_heartbeat_file="${ROLE_CACHE_DIR}/executor-heartbeat.txt"
+executor_heartbeat_pid_file="${ROLE_CACHE_DIR}/executor-heartbeat-pid.txt"
+
 executor_touch_heartbeat() {
   mkdir -p "$(dirname "${executor_heartbeat_file}")" 2>/dev/null
   date -u +%s > "${executor_heartbeat_file}"
+  echo "$$" > "${executor_heartbeat_pid_file}"  # Record PID of the process touching heartbeat
 }
 
 executor_check_liveness() {
-  if [[ ! -f "${executor_heartbeat_file}" ]]; then return 1; fi
+  # Check 1: Heartbeat file exists and is fresh (< 3 min)
+  if [[ ! -f "${executor_heartbeat_file}" ]]; then
+    echo "  [LIVENESS] No heartbeat file — executor is DEAD"
+    return 1
+  fi
   local last; last=$(cat "${executor_heartbeat_file}" 2>/dev/null || echo "0")
   local now; now=$(date -u +%s)
   local age=$((now - last))
-  [[ "${age}" -lt 180 ]] && return 0  # Alive if heartbeat within 3 min
-  return 1  # Dead if no heartbeat for >3 min
+
+  # Check 2: PID-based liveness (solve heartbeat假活)
+  if [[ -f "${executor_heartbeat_pid_file}" ]]; then
+    local hb_pid; hb_pid=$(cat "${executor_heartbeat_pid_file}" 2>/dev/null || echo "0")
+    # Check if the heartbeat-writer process is still alive
+    if ! kill -0 "${hb_pid}" 2>/dev/null; then
+      echo "  [LIVENESS] Heartbeat PID ${hb_pid} is dead — executor CRASHED (假活 detected!)"
+      return 1  # Heartbeat process itself is dead
+    fi
+    # Check if parent executor process is alive (the heartbeat is a child of executor)
+    local ppid; ppid=$(ps -o ppid= -p "${hb_pid}" 2>/dev/null | tr -d ' ' || echo "0")
+    if [[ "${ppid}" != "0" && "${ppid}" != "1" ]]; then
+      if ! kill -0 "${ppid}" 2>/dev/null; then
+        echo "  [LIVENESS] Executor parent PID ${ppid} is dead — CRASHED but heartbeat orphaned (假活!)"
+        return 1
+      fi
+    fi
+  fi
+
+  # Check 3: Age-based liveness
+  if [[ "${age}" -lt 180 ]]; then
+    return 0  # Alive: heartbeat fresh + process alive
+  fi
+  echo "  [LIVENESS] Heartbeat stale (${age}s) — executor is DEAD"
+  return 1
 }
 
 # ── FIX 13: Auto-recover blocked tasks after timeout ────────────────────
