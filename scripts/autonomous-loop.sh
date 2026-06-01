@@ -115,7 +115,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
 
   # ── Phase 1: Check work availability ────────────────────────────────
   queue_count=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('summary',{}).get('candidate_count',0))" 2>/dev/null || echo "0")
-  pkt_count=$(python3 -c 'import pathlib,os; docs=os.environ.get("DOCS_DIR",""); print(len(list(pathlib.Path(docs+"/docs/development/dispatch-packets").glob("TASK-*.json"))))' 2>/dev/null || echo 0)
+  pkt_files=( "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json ); pkt_count=${#pkt_files[@]}; [[ ! -f "${pkt_files[0]}" ]] && pkt_count=0
   log_cycle "Queue: ${queue_count} candidates, ${pkt_count} packets, ${CONSECUTIVE_BLOCKS} consecutive blocks"
 
   # ── ALL-TASKS-BLOCKED DETECTION ─────────────────────────────────────
@@ -139,7 +139,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
     (bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" all 2>&1 || true) | tail -10 >> "${LOOP_LOG}" || true
 
     # Re-check after role engine
-    pkt_count=$(python3 -c 'import pathlib,os; docs=os.environ.get("DOCS_DIR",""); print(len(list(pathlib.Path(docs+"/docs/development/dispatch-packets").glob("TASK-*.json"))))' 2>/dev/null || echo 0)
+    pkt_files=( "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json ); pkt_count=${#pkt_files[@]}; [[ ! -f "${pkt_files[0]}" ]] && pkt_count=0
     if [[ "${pkt_count}" -eq 0 ]]; then
       log_cycle "Still no work — syncing knowledge base"
       sync_knowledge "task creation gap" 2>/dev/null || true
