@@ -1807,7 +1807,7 @@ if not ci.exists():
 for line in ci.read_text().split('\n'):
     if '|' not in line: continue
     parts = [p.strip() for p in line.split('|')]
-    if len(parts) < 5: continue
+    if len(parts) < 6: continue
     status = parts[2]
     if status not in ('Ready','Stable'): continue
     domain = parts[0].strip()
@@ -2999,12 +2999,12 @@ if ci.exists():
     for line in ci.read_text().split('\n'):
         if '| Ready |' not in line: continue
         parts = [p.strip() for p in line.split('|')]
-        if len(parts) < 5: continue
+        if len(parts) < 6: continue
         domain = parts[1].strip()[:40] if len(parts) > 1 else 'unknown'
         tasks_in_line = re.findall(r'TASK-[A-Z0-9-]+', line)
         if any(t in all_tasks for t in tasks_in_line): continue
-        impacted = parts[4].strip()[:60] if len(parts) > 4 else ''
-        first_repo = impacted.split('/')[0].strip()
+        repos_raw = parts[5].strip()[:80] if len(parts) > 5 else 'Backend'
+        first_repo = repos_raw.split('/')[0].strip()
         repo_map = {'Backend':'livemask-backend','Admin':'livemask-admin','App':'livemask-app','Website':'livemask-website','CI-CD':'livemask-ci-cd','CI/CD':'livemask-ci-cd','NodeAgent':'livemask-nodeagent','Job Service':'livemask-job-service','Jobs':'livemask-job-service','Docs':'livemask-docs'}
         repo = repo_map.get(first_repo, 'livemask-backend')
         tid = f\"TASK-{repo.replace('livemask-','').upper()}-{domain.upper().replace(' ','-')[:30]}-AUTO-{now.strftime('%Y%m%d%H%M%S')}\"
