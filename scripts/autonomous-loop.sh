@@ -97,7 +97,7 @@ sync_knowledge() {
 # ── Main autonomous loop ─────────────────────────────────────────────────
 log_cycle "DAEMON STARTED (PID: $$, adapter=$(test -f "${ADAPTER_LIB}" && echo OK || echo MISSING))"
 
-while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
+while true; do  # Run forever
   CYCLE_COUNT=$((CYCLE_COUNT + 1))
   set +e  # NEVER exit — daemon tolerates all failures
 
@@ -298,4 +298,4 @@ pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json').write_text(j
   log_cycle "Sleeping ${SLEEP_CYCLE}s between cycles"
 done
 
-log_cycle "MAX_CYCLES reached — exiting"
+# Daemon runs forever — this line never reached
