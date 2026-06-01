@@ -273,6 +273,28 @@ for line in sys.stdin:
     issues=$((issues + 1))
   fi
 
+  # 3d. Local runtime container logs
+  local runtime_audit="/tmp/claude/health-runtime-log-audit.json"
+  mkdir -p /tmp/claude 2>/dev/null || true
+  if [[ -x "${CI_CD_DIR}/scripts/runtime-log-audit.sh" || -f "${CI_CD_DIR}/scripts/runtime-log-audit.sh" ]]; then
+    bash "${CI_CD_DIR}/scripts/runtime-log-audit.sh" \
+      --compose "${CI_CD_DIR}/infra/docker-compose.local.yml" \
+      --env local \
+      --tail 200 \
+      --output "${runtime_audit}" >/dev/null 2>&1 || true
+    local runtime_errors; runtime_errors=$(python3 -c "import json; print(json.load(open('${runtime_audit}')).get('error_count', 0))" 2>/dev/null || echo "0")
+    local runtime_unrelated; runtime_unrelated=$(python3 -c "import json; print(json.load(open('${runtime_audit}')).get('unrelated_count', 0))" 2>/dev/null || echo "0")
+    if [[ "${runtime_errors}" -gt 0 ]]; then
+      WARN "Runtime logs: ${runtime_errors} error signal(s), ${runtime_unrelated} unrelated — see ${runtime_audit}"
+      issues=$((issues + 1))
+    else
+      PASS "Runtime logs: no high-signal errors"
+    fi
+  else
+    WARN "Runtime logs: audit script missing"
+    issues=$((issues + 1))
+  fi
+
   # ── 4. Structural integrity ─────────────────────────────────────────────
   echo "── Structural Integrity ──"
 

@@ -173,6 +173,8 @@ summary = {
         "Search existing helpers and task history before adding new abstractions.",
         "Cite linked issue and recent relevant comments in completion or blocked report.",
         "Run repo-native tests plus git diff --check; update docs/contracts when behavior changes.",
+        "Before coding, verify local repo freshness, remote dev runtime freshness, and container logs.",
+        "Unrelated runtime/container errors must become a finding and GitHub issue instead of being ignored.",
     ],
 }
 out.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -209,6 +211,56 @@ verify_memory_write() {
   ok "memory write verified"
   echo "  memory_result:  ${memory_result}"
   return 0
+}
+
+verify_runtime_and_environment() {
+  local task_id="${CURRENT_TASK:-}"
+  local repo="${TARGET_REPO:-}"
+  [[ "${task_id}" == "null" ]] && task_id=""
+
+  header "Step 1.5: Runtime Logs + Code Freshness"
+
+  mkdir -p /tmp/claude 2>/dev/null || true
+  local runtime_out="/tmp/claude/startup-runtime-log-audit.json"
+  if bash "${CI_CD_DIR}/scripts/runtime-log-audit.sh" \
+    --compose "${CI_CD_DIR}/infra/docker-compose.local.yml" \
+    --env local \
+    --tail 250 \
+    --task-id "${task_id}" \
+    --task-repo "${repo}" \
+    --output "${runtime_out}" 2>/dev/null; then
+    python3 - "${runtime_out}" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"  runtime_logs:  status={d.get('status')} errors={d.get('error_count',0)} related={d.get('related_count',0)} unrelated={d.get('unrelated_count',0)}")
+print(f"  log_artifact:   {sys.argv[1]}")
+if d.get("unrelated_count", 0):
+    print("  required:       create/link GitHub issue before ignoring unrelated runtime errors")
+PY
+  else
+    warn "runtime log audit failed to execute"
+  fi
+
+  if [[ -n "${task_id}" || -n "${repo}" ]]; then
+    local fresh_out="/tmp/claude/startup-task-environment-freshness.json"
+    if bash "${CI_CD_DIR}/scripts/task-environment-freshness.sh" \
+      --task-id "${task_id}" \
+      --repo "${repo}" \
+      --output "${fresh_out}" 2>/dev/null; then
+      python3 - "${fresh_out}" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f"  code_freshness: status={d.get('status')} issues={len(d.get('issues', []))}")
+print(f"  fresh_artifact: {sys.argv[1]}")
+for issue in d.get("issues", [])[:4]:
+    print(f"    - {issue}")
+PY
+    else
+      warn "task environment freshness check failed"
+    fi
+  else
+    echo "  code_freshness: skipped (no active task)"
+  fi
 }
 
 # ── Step 0: Read agent state ──────────────────────────────────────────────────
@@ -1078,6 +1130,7 @@ case "${MODE}" in
     read_agent_state
     coordination_preflight
     if [[ "${COORDINATION_DECISION}" != "proceed" ]] && [[ "${AGENT_PHASE}" == "idle" || "${AGENT_PHASE}" == "idle_monitor" ]]; then
+      verify_runtime_and_environment || true
       coordination_safe_progress
       check_fixed_channels || true
       check_event_cache || true
@@ -1094,6 +1147,7 @@ case "${MODE}" in
       run_recovery
       decision_summary 0 0 0
     elif [[ "${COORDINATION_DECISION}" != "proceed" ]]; then
+      verify_runtime_and_environment || true
       coordination_safe_progress
       check_fixed_channels || true
       check_event_cache || true
@@ -1116,6 +1170,7 @@ case "${MODE}" in
     if [[ "${COORDINATION_DECISION}" != "proceed" ]]; then
       echo ""
       echo -e "${BOLD}${YELLOW}SAFE_PROGRESS — coordination guard changes the work type; Claude still has useful project work.${RESET}"
+      verify_runtime_and_environment || true
       coordination_safe_progress
       build_task_context || warn "context build returned non-zero"
       check_fixed_channels || true
@@ -1128,6 +1183,7 @@ case "${MODE}" in
     # Full startup: recovery + self-audit health + preflight + context + channels + cache
     run_recovery || true  # recovery warnings don't block
     health_check_all 2>/dev/null || true
+    verify_runtime_and_environment || true
     quick_health_pulse
     preflight_rc=0
     run_preflight || preflight_rc=$?

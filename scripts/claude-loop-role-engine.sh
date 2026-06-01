@@ -600,6 +600,108 @@ with open(path, "a", encoding="utf-8") as fh:
 PY
 }
 
+current_task_repo_hint() {
+  local tid="${1:-}"
+  if [[ -z "${tid}" ]]; then
+    echo ""
+    return 0
+  fi
+  python3 - "${DOCS_DIR}/docs/development/task-state-ledger.json" "${tid}" <<'PY' 2>/dev/null || true
+import json, sys
+ledger, tid = sys.argv[1:3]
+d = json.load(open(ledger))
+for module in d.get("modules", []):
+    for task in module.get("tasks", []):
+        if task.get("task_id") == tid:
+            print(task.get("repo", ""))
+            raise SystemExit
+PY
+}
+
+runtime_log_audit_findings() {
+  local tid="${1:-}"
+  local repo="${2:-}"
+  local out="/tmp/claude/role-engine-runtime-log-audit.json"
+  mkdir -p /tmp/claude "${ROLE_CACHE_DIR}" 2>/dev/null || true
+
+  bash "${CI_CD_DIR}/scripts/runtime-log-audit.sh" \
+    --compose "${CI_CD_DIR}/infra/docker-compose.local.yml" \
+    --env local \
+    --tail 250 \
+    --task-id "${tid}" \
+    --task-repo "${repo}" \
+    --output "${out}" \
+    --create-issue >/tmp/claude/runtime-log-audit.out 2>/dev/null || true
+
+  if [[ ! -f "${out}" ]]; then
+    record_finding "shared" "warning" "${tid}" "RUNTIME-LOGS" \
+      "runtime log audit did not produce an artifact" \
+      "run runtime-log-audit.sh and inspect Docker access" \
+      "bash ${CI_CD_DIR}/scripts/runtime-log-audit.sh"
+    return 0
+  fi
+
+  python3 - "${out}" <<'PY' 2>/tmp/claude/runtime-log-audit.findings || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d.get("status", "unknown"), d.get("error_count", 0), d.get("related_count", 0), d.get("unrelated_count", 0), d.get("github_issue_url", ""))
+for e in d.get("errors", [])[:5]:
+    marker = "related" if e.get("related_to_current_task") else "unrelated"
+    print(f"{marker}\t{e.get('service')}\t{e.get('line')[:220]}")
+PY
+
+  local status error_count related_count unrelated_count issue_url
+  read -r status error_count related_count unrelated_count issue_url < <(head -1 /tmp/claude/runtime-log-audit.findings 2>/dev/null || echo "unknown 0 0 0")
+  if [[ "${error_count:-0}" -gt 0 ]]; then
+    WARN "runtime logs: ${error_count} error signal(s), related=${related_count}, unrelated=${unrelated_count}"
+    if [[ "${unrelated_count:-0}" -gt 0 ]]; then
+      record_finding "shared" "warning" "${tid}" "RUNTIME-LOGS" \
+        "unrelated local container log errors detected (${unrelated_count}); issue=${issue_url:-not-created}" \
+        "triage or link runtime anomaly before ignoring it" \
+        "bash ${CI_CD_DIR}/scripts/runtime-log-audit.sh --create-issue"
+    else
+      record_finding "shared" "warning" "${tid}" "RUNTIME-LOGS" \
+        "container log errors detected for current task scope (${related_count})" \
+        "inspect runtime-log-audit artifact and fix before completion" \
+        "bash ${CI_CD_DIR}/scripts/runtime-log-audit.sh --task-id ${tid}"
+    fi
+  else
+    OK "runtime logs clean"
+  fi
+}
+
+task_environment_freshness_findings() {
+  local tid="${1:-}"
+  local repo="${2:-}"
+  [[ -z "${tid}" && -z "${repo}" ]] && return 0
+
+  local out="/tmp/claude/role-engine-task-environment-freshness.json"
+  mkdir -p /tmp/claude "${ROLE_CACHE_DIR}" 2>/dev/null || true
+  bash "${CI_CD_DIR}/scripts/task-environment-freshness.sh" \
+    --task-id "${tid}" \
+    --repo "${repo}" \
+    --output "${out}" >/tmp/claude/task-environment-freshness.out 2>/dev/null || true
+
+  if [[ ! -f "${out}" ]]; then
+    record_finding "shared" "warning" "${tid}" "ENV-FRESHNESS" \
+      "task environment freshness check did not produce an artifact" \
+      "verify local repo and remote dev runtime freshness before coding" \
+      "bash ${CI_CD_DIR}/scripts/task-environment-freshness.sh --task-id ${tid} --repo ${repo}"
+    return 0
+  fi
+
+  local issue_count
+  issue_count="$(python3 -c "import json; print(len(json.load(open('${out}')).get('issues', [])))" 2>/dev/null || echo 0)"
+  if [[ "${issue_count}" -gt 0 ]]; then
+    record_finding "shared" "warning" "${tid}" "ENV-FRESHNESS" \
+      "task local/remote environment is not verified fresh (${issue_count} issue(s))" \
+      "pull/sync local dev and wait for latest Dev Runtime Deploy before task completion" \
+      "bash ${CI_CD_DIR}/scripts/task-environment-freshness.sh --task-id ${tid} --repo ${repo}"
+  else
+    OK "task environment freshness verified"
+  fi
+}
+
 write_decision_summary() {
   local out="${ROLE_CACHE_DIR}/decision-summary.json"
   python3 - "${FINDINGS_FILE}" "${out}" <<'PY'
@@ -2247,6 +2349,21 @@ fi
 # ── Proactive health check: catch problems before they become bugs ─────────
 health_check_all 2>/dev/null || true
 claude_self_audit_gate 2>/dev/null || true
+
+RUNTIME_TASK_ID=""
+RUNTIME_TASK_REPO=""
+if [[ "${ARG2:-}" =~ ^TASK- ]]; then
+  RUNTIME_TASK_ID="${ARG2}"
+elif [[ -f "${AGENT_STATE}" ]]; then
+  RUNTIME_TASK_ID="$(python3 -c "import json; d=json.load(open('${AGENT_STATE}')); print(d.get('current_task',{}).get('task_id') or '')" 2>/dev/null || true)"
+fi
+if [[ -n "${RUNTIME_TASK_ID}" && "${RUNTIME_TASK_ID}" != "null" ]]; then
+  RUNTIME_TASK_REPO="$(current_task_repo_hint "${RUNTIME_TASK_ID}")"
+else
+  RUNTIME_TASK_ID=""
+fi
+runtime_log_audit_findings "${RUNTIME_TASK_ID}" "${RUNTIME_TASK_REPO}" 2>/dev/null || true
+task_environment_freshness_findings "${RUNTIME_TASK_ID}" "${RUNTIME_TASK_REPO}" 2>/dev/null || true
 
 case "${ROLE}" in
   pm)
