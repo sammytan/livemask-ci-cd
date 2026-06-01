@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
+<<<<<<< Updated upstream
 """Webhook server — Lark receive + GitHub events with token auth.
 Lark: receive messages → store to inbox → daemon processes.
 GitHub: receive CI completion events → store + alerts.
 
 Run: WEBHOOK_TOKEN=xxx python3 webhook-server.py --port 10086"""
 import json, pathlib, time, os
+=======
+"""Lightweight webhook server for Lark + GitHub events.
+Run: python3 webhook-server.py --port 10086
+Receives events, writes to local file for daemon consumption."""
+import json, pathlib, time, sys, os
+>>>>>>> Stashed changes
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import argparse
 
 EVENT_DIR = pathlib.Path(os.path.expanduser("~/.claude/role-cache/webhook-events"))
 EVENT_DIR.mkdir(parents=True, exist_ok=True)
+<<<<<<< Updated upstream
 DEFAULT_TOKEN = os.environ.get("WEBHOOK_TOKEN", "livemask-webhook-2026")
 
 def store_requirement(text, user):
@@ -120,11 +128,56 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self.respond(200, {"status": "ok"})
             except Exception as e:
                 self.respond(400, {"status": "error", "message": str(e)})
+=======
+
+class WebhookHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        content_len = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_len).decode('utf-8')
+
+        event = {"path": self.path, "received_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "headers": dict(self.headers)}
+
+        if "/lark" in self.path:
+            try:
+                data = json.loads(body)
+                event["type"] = "lark_message"
+                event["message"] = data.get("text", data.get("content", ""))
+                event["user"] = data.get("user_name", data.get("sender", {}).get("name", "unknown"))
+                inbox = EVENT_DIR / "lark-inbox.jsonl"
+                with open(inbox, "a") as f:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                print(f"[LARK] {event['user']}: {event['message'][:80]}")
+                self.respond(200, {"status": "ok", "message": "Lark message received"})
+            except Exception as e:
+                self.respond(400, {"status": "error", "message": str(e)})
+
+        elif "/github" in self.path:
+            try:
+                data = json.loads(body)
+                event["type"] = "github_workflow"
+                event["action"] = data.get("action", "")
+                event["workflow"] = data.get("workflow_run", {}).get("name", "")
+                event["conclusion"] = data.get("workflow_run", {}).get("conclusion", "")
+                event["repo"] = data.get("repository", {}).get("name", "")
+                event["url"] = data.get("workflow_run", {}).get("html_url", "")
+                inbox = EVENT_DIR / "github-events.jsonl"
+                with open(inbox, "a") as f:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                print(f"[GITHUB] {event['repo']}: {event['workflow']} → {event['conclusion']}")
+                self.respond(200, {"status": "ok"})
+            except Exception as e:
+                self.respond(400, {"status": "error", "message": str(e)})
+
+        elif "/health" in self.path:
+            self.respond(200, {"status": "healthy", "events": len(list(EVENT_DIR.glob("*.jsonl")))})
+
+>>>>>>> Stashed changes
         else:
             self.respond(404, {"status": "unknown endpoint"})
 
     def do_GET(self):
         if "/health" in self.path:
+<<<<<<< Updated upstream
             counts = {f.name: sum(1 for _ in open(f)) for f in EVENT_DIR.glob("*.jsonl") if f.stat().st_size>0}
             self.respond(200, {"status": "healthy", "events": counts})
         else:
@@ -148,3 +201,33 @@ if __name__ == "__main__":
     print(f"  GET  /health — status")
     try: server.serve_forever()
     except KeyboardInterrupt: print("\nDone"); server.shutdown()
+=======
+            self.respond(200, {"status": "healthy"})
+        else:
+            self.respond(200, {"status": "webhook server running", "endpoints": ["/lark", "/github", "/health"], "port": 10086})
+
+    def respond(self, code, data):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+
+    def log_message(self, format, *args):
+        pass
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=10086)
+    parser.add_argument("--host", default="0.0.0.0")
+    args = parser.parse_args()
+    server = HTTPServer((args.host, args.port), WebhookHandler)
+    print(f"Webhook server: http://{args.host}:{args.port}")
+    print(f"  Lark endpoint:    POST /lark")
+    print(f"  GitHub endpoint:  POST /github")
+    print(f"  Health:           GET  /health")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down...")
+        server.shutdown()
+>>>>>>> Stashed changes

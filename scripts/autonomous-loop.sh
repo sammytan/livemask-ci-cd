@@ -108,6 +108,8 @@ while true; do  # Run forever
   executor_repair_agent_state 2>/dev/null || true
   executor_repair_ledger 2>/dev/null || true
   executor_cleanup_alerts 2>/dev/null || true
+  monitor_check_consistency 2>/dev/null >> "${LOOP_LOG}" || true
+  monitor_auto_fix_ci 2>/dev/null >> "${LOOP_LOG}" || true
   monitor_learn_from_codex 2>/dev/null >> "" || true
   # Clean up orphaned branches every 10 cycles to prevent disk bloat
   if [[ $((CYCLE_COUNT % 10)) -eq 0 ]]; then
