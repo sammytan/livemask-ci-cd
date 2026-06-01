@@ -20,8 +20,10 @@ source "${SCRIPT_DIR}/lib/memory-fast.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/local-verify.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/ledger-intelligence.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/review-gate.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/monitor-learn.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
 memory_init 2>/dev/null || true
+monitor_init 2>/dev/null || true
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
 DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
@@ -2930,6 +2932,14 @@ for f in findings[:10]:
   echo "    memory_recent_decisions 24"
   echo "    memory_learned_patterns"
   echo ""
+  echo "  Monitor & self-learning commands:"
+  echo "    monitor_watch                     # Observe executor activity (git, CI, tasks)"
+  echo "    monitor_analyze                   # Detect patterns from observations"
+  echo "    monitor_learn                     # Generate executor guidance from patterns"
+  echo "    monitor_self_update               # Apply learnings to improve system"
+  echo "    monitor_full_cycle                # Watch→Analyze→Learn→Update (full cycle)"
+  echo "    monitor_guide_executor [TASK-ID]  # Real-time guidance for executor"
+  echo ""
   echo "  Review gate commands (executor→leader→QA→merge):"
   echo "    executor_submit_review <TASK-ID>   # Submit implementation for review"
   echo "    leader_review <TASK-ID>            # Model reviews code diff + evidence"
@@ -2947,6 +2957,9 @@ for f in findings[:10]:
   echo "    ledger_unblock_impact <TASK-ID>  # What completing this unlocks"
   echo "    ledger_full_report               # Complete intelligence report"
   echo ""
+
+  # Auto-run monitor to observe executor activity and learn
+  monitor_watch 2>/dev/null || true
 
   # Auto-save cycle memory for future retrieval
   local cycle_summary; cycle_summary="role-engine cycle $(date -u +%Y-%m-%dT%H:%MZ): ${total_findings} findings, docs_head=${NOW_SHA}"
