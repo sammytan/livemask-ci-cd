@@ -2842,9 +2842,9 @@ run_all() {
   role_qa || true
   role_task_review || true
 
-  self_heal_clean_state
+  self_heal_clean_state || true
 
-  set +e  # don't let Lark or print failures kill the cycle
+  set +e  # don't let Lark, print, or diagnostic failures kill the cycle
   print_top_actions 5
 
   # ── PM decision layer: diagnose safely, queue mutating actions for humans/PM ──
