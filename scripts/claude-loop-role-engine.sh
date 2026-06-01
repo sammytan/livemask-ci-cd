@@ -408,31 +408,11 @@ PY
   # Create task doc with ALL required sections per check-docs.sh schema
   local task_doc="${DOCS_DIR}/docs/development/tasks/${tid}.md"
   local now_ts; now_ts=$(date -u +%Y-%m-%d)
-  cat > "${task_doc}" << TASKDOC
-# ${tid} — ${title}
-
-Edit provenance:
-- Edited by: Claude Role Engine
-- Window/role: livemask-ci-cd role-engine
-- Date: ${now_ts}
-- TASK ID: ${tid}
-- Reason: auto-created from role-engine finding ${role}/${check}
-
-> Status: ready
-> Repository: ${repo}
-> Priority: ${priority}
-> Source: role-engine ${role}/${check}
-> Created: ${now_ts}
-
-## 1. Background
-
-Role-engine ${role}/${check} detected an actionable gap: ${title}
-
-${body}
-
-### 1.1 Project Context Pack
-
-$(python3 - "${intelligence_file}" <<'PY' 2>/dev/null || echo "- Intelligence pack unavailable; rerun role-engine before dispatch.")
+  local context_pack_md cross_repo_impact_md quality_gates_md
+  local context_pack_file quality_gates_file
+  context_pack_file="${ROLE_CACHE_DIR}/context-pack-${tid}.md"
+  quality_gates_file="${ROLE_CACHE_DIR}/quality-gates-${tid}.md"
+  if python3 - "${intelligence_file}" > "${context_pack_file}" 2>/dev/null <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 print(f"- Intelligence pack: `{sys.argv[1]}`")
@@ -464,7 +444,55 @@ if d.get("duplicate_signals"):
         print(f"  - `{item.get('task_id')}` status={item.get('status')}: {item.get('reason')}")
 print(f"- Comment association rule: {d.get('comment_association')}")
 PY
-)
+  then
+    context_pack_md="$(cat "${context_pack_file}")"
+  else
+    context_pack_md="- Intelligence pack unavailable; rerun role-engine before dispatch."
+  fi
+  cross_repo_impact_md=$(python3 -c "
+repo='${repo}'
+impacts = {'livemask-backend': '- Admin UI, App client, NodeAgent, Job Service, Website, CI/CD smoke', 'livemask-admin': '- CI/CD admin smoke tests', 'livemask-app': '- CI/CD app build/release smoke', 'livemask-nodeagent': '- Backend internal API, CI/CD node smoke', 'livemask-job-service': '- Backend executor endpoints, CI/CD job smoke', 'livemask-ci-cd': '- All repos (CI/CD script changes affect all)', 'livemask-docs': '- All repos (contract/rule changes need implementation)'}
+print(impacts.get(repo, '- Related repos as identified during implementation'))
+" 2>/dev/null)
+  if python3 - "${intelligence_file}" > "${quality_gates_file}" 2>/dev/null <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+gates = d.get("code_quality_gates", [])
+if not gates:
+    print("- Run repo-native checks and document evidence.")
+for gate in gates:
+    print(f"- {gate}")
+PY
+  then
+    quality_gates_md="$(cat "${quality_gates_file}")"
+  else
+    quality_gates_md="- Run repo-native checks and document evidence."
+  fi
+  cat > "${task_doc}" << TASKDOC
+# ${tid} — ${title}
+
+Edit provenance:
+- Edited by: Claude Role Engine
+- Window/role: livemask-ci-cd role-engine
+- Date: ${now_ts}
+- TASK ID: ${tid}
+- Reason: auto-created from role-engine finding ${role}/${check}
+
+> Status: ready
+> Repository: ${repo}
+> Priority: ${priority}
+> Source: role-engine ${role}/${check}
+> Created: ${now_ts}
+
+## 1. Background
+
+Role-engine ${role}/${check} detected an actionable gap: ${title}
+
+${body}
+
+### 1.1 Project Context Pack
+
+${context_pack_md}
 
 ## 2. Scope
 
@@ -490,11 +518,7 @@ PY
 ## 4. Cross-Repo Impact
 
 This task affects **${repo}**. Downstream repos to verify:
-$(python3 -c "
-repo='${repo}'
-impacts = {'livemask-backend': '- Admin UI, App client, NodeAgent, Job Service, Website, CI/CD smoke', 'livemask-admin': '- CI/CD admin smoke tests', 'livemask-app': '- CI/CD app build/release smoke', 'livemask-nodeagent': '- Backend internal API, CI/CD node smoke', 'livemask-job-service': '- Backend executor endpoints, CI/CD job smoke', 'livemask-ci-cd': '- All repos (CI/CD script changes affect all)', 'livemask-docs': '- All repos (contract/rule changes need implementation)'}
-print(impacts.get(repo, '- Related repos as identified during implementation'))
-" 2>/dev/null)
+${cross_repo_impact_md}
 
 ## 5. Validation
 - check-docs.sh PASS
@@ -502,13 +526,7 @@ print(impacts.get(repo, '- Related repos as identified during implementation'))
 - CI/CD pipeline green for affected repos
 
 ### 5.1 Code Quality Gates
-$(python3 - "${intelligence_file}" <<'PY' 2>/dev/null || echo "- Run repo-native checks and document evidence.")
-import json, sys
-d = json.load(open(sys.argv[1]))
-for gate in d.get("code_quality_gates", []):
-    print(f"- {gate}")
-PY
-)
+${quality_gates_md}
 TASKDOC
 
   # Add to ledger with valid field types
@@ -534,6 +552,8 @@ module['tasks'].append({
     'task_doc': 'docs/development/tasks/${tid}.md',
     'issue': (intel.get('github_issue_candidates') or [{}])[0].get('url',''),
     'validation': '',
+    'dev_merge_commit': '',
+    'remote_dev_ref': '',
     'blocked_by': [t.get('task_id') for t in intel.get('related_tasks', [])[:5] if t.get('status') in ('blocked','in_progress')],
     'unlocks': [],
     'notes': 'Auto-created by role-engine ${role}/${check}; context_pack=${intelligence_file}; related_tasks=' + ','.join(t.get('task_id','') for t in intel.get('related_tasks', [])[:8] if t.get('task_id')) + '; github_issues=' + ','.join(i.get('url','') for i in intel.get('github_issue_candidates', [])[:5] if i.get('url')) + '; quality_gates=' + ' | '.join(intel.get('code_quality_gates', [])[:6])
