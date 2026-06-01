@@ -92,30 +92,56 @@ if p.exists(): d=json.loads(p.read_text()); d['phase']='complete'; d['completed_
 event_react_pm_task_accepted() {
   local tid="${1:-}"
   echo "  [PM] Task accepted: ${tid}"
-  # FIX BREAKPOINT 2: Auto-accept — update agent-state + ledger in one shot
-  python3 -c "
-import json,pathlib,datetime; docs=pathlib.Path('${DOCS_DIR}'); root=pathlib.Path('${LIVEMASK_ROOT}')
-# Update ledger
+  # FIX 2: Auto-accept with rollback on failure
+  source "${CI_CD_DIR}/scripts/lib/executor-guard.sh" 2>/dev/null || true
+
+  # Step 1: Acquire task-level lease first (prevents dual-executor race)
+  if ! executor_acquire_task_lease "${tid}" 2>/dev/null; then
+    echo "  [PM] Task lease conflict — another executor may be working on ${tid}"
+    return 1
+  fi
+
+  # Step 2: Update ledger + agent-state (atomically in one python call)
+  local repo; repo=$(python3 -c "
+import json,pathlib,datetime
+docs=pathlib.Path('${DOCS_DIR}'); root=pathlib.Path('${LIVEMASK_ROOT}')
 ledger=json.loads((docs/'docs/development/task-state-ledger.json').read_text())
 repo=''
 for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
         if t.get('task_id')=='${tid}': t['status']='in_progress'; t['notes']=t.get('notes','')+' [accepted by Claude executor]'; repo=t.get('repo','')
 pathlib.Path(str(docs/'docs/development/task-state-ledger.json')).write_text(json.dumps(ledger,indent=2,ensure_ascii=False))
-# Auto-update agent-state
 now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 agent_state={'phase':'implementing','current_task':{'task_id':'${tid}','target_repo':repo,'task_phase':'implementing','accepted_at':now},'last_action':'auto-accepted via event bus','updated_at':now}
 (root/'.claude/agent-state.json').write_text(json.dumps(agent_state,indent=2))
-print(f'  [PM] Agent state: implementing, ledger: in_progress')
+print(repo)
+" 2>/dev/null || echo "")
+
+  # Step 3: Acquire PM lease — ROLLBACK if write fails
+  if ! executor_renew_lease "claude-executor" "${tid}" 2>/dev/null; then
+    echo "  [PM] PM lease write FAILED — rolling back accept"
+    python3 -c "
+import json,pathlib
+docs=pathlib.Path('${DOCS_DIR}'); root=pathlib.Path('${LIVEMASK_ROOT}')
+ledger=json.loads((docs/'docs/development/task-state-ledger.json').read_text())
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id')=='${tid}': t['status']='ready'; t['notes']=t.get('notes','')+' [accept rolled back: PM lease write failed]'
+pathlib.Path(str(docs/'docs/development/task-state-ledger.json')).write_text(json.dumps(ledger,indent=2,ensure_ascii=False))
+d=json.loads((root/'.claude/agent-state.json').read_text()); d['phase']='idle'; d['current_task']={}
+(root/'.claude/agent-state.json').write_text(json.dumps(d,indent=2))
 " 2>/dev/null || true
-  # Auto-acquire PM lease
-  python3 -c "
-import json,pathlib,time
-now_ts=time.time()
-d={'agent':'claude-executor','started_at':'$(date -u +%Y-%m-%dT%H:%M:%SZ)','started_at_epoch':now_ts,'phase':'implementing','docs_head':'$(git -C "${DOCS_DIR}" rev-parse HEAD 2>/dev/null || echo '?')','note':'Auto-acquired via event bus — Codex must skip'}
-pathlib.Path('${HOME}/.claude/role-cache/pm-lease.json').write_text(json.dumps(d,indent=2))
-print('  [PM] PM lease auto-acquired')
-" 2>/dev/null || true
+    executor_release_task_lease "${tid}" 2>/dev/null || true
+    return 1
+  fi
+
+  # Step 4: Start heartbeat
+  executor_start_heartbeat "${tid}" 300 2>/dev/null || true
+
+  # Step 5: Touch liveness file
+  executor_touch_heartbeat 2>/dev/null || true
+
+  echo "  [PM] Task ${tid} fully accepted: task-lease + ledger + agent-state + PM lease + heartbeat"
 }
 
 event_react_product_progress() {
