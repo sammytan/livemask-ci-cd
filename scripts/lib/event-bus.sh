@@ -291,3 +291,15 @@ executor_notify() {
 
 event_history() { event_init; tail -"${2:-20}" "${EVENT_LOG}" 2>/dev/null; }
 event_state()  { event_init; cat "${EVENT_STATE}" 2>/dev/null || echo "{}"; }
+
+executor_pre_submit_gate() {
+  local tid="${1:-}"; [[ -z "${tid}" ]] && return 1
+  local repo; repo=$(python3 -c "import json;l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'));[print(t['repo']) for m in l['modules'] for t in m['tasks'] if t['task_id']=='${tid}']" 2>/dev/null || echo "")
+  echo "=== PRE-SUBMIT GATE: ${tid} ==="
+  local fails=0
+  skill_code_review "${tid}" 2>/dev/null && echo "  [1/3] code-review PASS" || { echo "  [1/3] code-review FAIL"; fails=$((fails+1)); }
+  skill_verify "${repo}" 2>/dev/null && echo "  [2/3] verify PASS" || { echo "  [2/3] verify FAIL"; fails=$((fails+1)); }
+  python3 -c "import re; doc=open('${DOCS_DIR}/docs/development/tasks/${tid}.md').read(); u=len([l for l in doc.split(chr(10)) if '- [ ]' in l]); print(f'  [3/3] acceptance: {u} unchecked'); exit(u)" 2>/dev/null
+  [[ $? -gt 0 ]] && { fails=$((fails+1)); }
+  return "${fails}"
+}
