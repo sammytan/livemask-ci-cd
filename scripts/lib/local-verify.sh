@@ -77,7 +77,7 @@ elif repo == "livemask-ci-cd":
 elif repo == "livemask-backend":
     add_check("go-build", ["go", "build", "./..."], timeout=120)
     add_check("go-vet", ["go", "vet", "./..."], timeout=60)
-    add_check("go-test", ["go", "test", "./..."], timeout=180, required=False)
+    add_check("go-test", ["go", "test", "./..."], timeout=180, required=True)
     # Check OpenAPI/Swagger
     if (r / "internal/swagger").exists():
         add_check("swagger-exists", ["bash", "-c",

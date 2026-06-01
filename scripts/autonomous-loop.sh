@@ -138,7 +138,7 @@ while true; do  # Run forever
   # ── Case A: No work → create tasks ──────────────────────────────────
   if [[ "${queue_count}" -eq 0 && "${pkt_count}" -eq 0 ]]; then
     log_cycle "No work — running role engine to create tasks"
-    (bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" all 2>&1 || true) | tail -10 >> "${LOOP_LOG}" || true
+    bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" all > /tmp/claude/role-engine-daemon.out 2>&1; tail -10 /tmp/claude/role-engine-daemon.out >> "${LOOP_LOG}" || true
 
     # Re-check after role engine
     pkt_count=$(python3 -c 'import pathlib; p=pathlib.Path("'"${DOCS_DIR}"'/docs/development/dispatch-packets"); print(len(list(p.glob("TASK-*.json"))))' 2>/dev/null || echo 0)
@@ -275,6 +275,10 @@ pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json').write_text(j
 
     executor_touch_heartbeat 2>/dev/null || true
     wait_count=$((wait_count + 1))
+      # Remind model every 10 checks (5 min) if still waiting
+      if [[ $((wait_count % 10)) -eq 0 ]]; then
+        log_cycle "REMINDER: ${tid} accepted ${wait_count} checks ago — model should implement and submit"
+      fi
     # SLEEP: Wait for model to implement, checking periodically
     sleep "${WAIT_CHECK}"
   done
