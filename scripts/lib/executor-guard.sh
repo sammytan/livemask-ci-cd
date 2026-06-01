@@ -605,3 +605,19 @@ executor_auto_resolve_conflict() {
   echo "  [MERGE] ${remaining} files still in conflict — manual resolution needed"
   return 1
 }
+
+# ── Push critical alert to human ────────────────────────────────────────
+executor_notify_human() {
+  local severity="${1:-warning}" message="${2:-}"
+  # Write to alerts
+  executor_push_alert "${severity}" "${message}" 2>/dev/null || true
+  # Post to GitHub #68
+  if command -v gh &>/dev/null; then
+    gh issue comment 68 --repo MyAiDevs/livemask-docs \
+      --body "<!-- human-alert --> [$(date -u +%H:%M:%SZ)] **${severity}**: ${message}" 2>/dev/null || true
+  fi
+  # Lark card (if available)
+  source "${CI_CD_DIR}/scripts/lib/lark-card.sh" 2>/dev/null && \
+    lark_card_batch "Engine Alert — ${severity}" "[{\"emoji\":\"🚨\",\"label\":\"${severity}\",\"value\":\"${message:0:200}\"}]" 2>/dev/null || true
+  echo "  [NOTIFY] Human alerted: ${severity} — ${message:0:80}"
+}

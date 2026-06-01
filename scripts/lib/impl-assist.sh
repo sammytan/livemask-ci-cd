@@ -212,3 +212,15 @@ impl_kickoff() {
   echo "  Write the code, verify, commit, then submit for review."
   echo "═══════════════════════════════════════════"
 }
+
+# ── Find all references to a symbol ──────────────────────────────────────
+impl_find_references() {
+  local repo="${1:-}" symbol="${2:-}"; [[ -z "${repo}" || -z "${symbol}" ]] && return 1
+  local dir="${LIVEMASK_ROOT}/${repo}"
+  echo "  [Refs] References to '${symbol}' in ${repo}:"
+  if command -v gopls &>/dev/null && [[ "${repo}" == livemask-*backend* || "${repo}" == *nodeagent* || "${repo}" == *job-service* ]]; then
+    cd "${dir}" && gopls references "$(grep -rl "func ${symbol}\|${symbol} :=" "${dir}" --include="*.go" | head -1)" 2>/dev/null | head -10 || true
+  else
+    grep -rn "${symbol}" "${dir}" --include="*.go" --include="*.ts" --include="*.tsx" --include="*.dart" 2>/dev/null | grep -v "node_modules\|\.git" | head -10
+  fi
+}
