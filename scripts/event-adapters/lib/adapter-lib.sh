@@ -45,6 +45,7 @@ FINDINGS_FILE="${ROLE_CACHE_DIR}/findings.jsonl"
 PM_LEASE_FILE="${ROLE_CACHE_DIR}/pm-lease.json"
 PROJECT_MEMORY_FILE="${ROLE_CACHE_DIR}/project-memory.jsonl"
 DOCS_REPO_DIR="${LIVEMASK_ROOT}/livemask-docs"
+DOCS_DIR="${DOCS_REPO_DIR}/docs"  # Note: autonomous-loop.sh re-exports its own DOCS_DIR after sourcing
 DOCS_DIR="${DOCS_REPO_DIR}/docs"
 DOCS_DEVELOPMENT_DIR="${DOCS_DIR}/development"
 TASK_LEDGER_FILE="${DOCS_DEVELOPMENT_DIR}/task-state-ledger.json"
