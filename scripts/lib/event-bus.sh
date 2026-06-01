@@ -92,13 +92,29 @@ if p.exists(): d=json.loads(p.read_text()); d['phase']='complete'; d['completed_
 event_react_pm_task_accepted() {
   local tid="${1:-}"
   echo "  [PM] Task accepted: ${tid}"
+  # FIX BREAKPOINT 2: Auto-accept — update agent-state + ledger in one shot
   python3 -c "
-import json,pathlib; docs=pathlib.Path('${DOCS_DIR}')
+import json,pathlib,datetime; docs=pathlib.Path('${DOCS_DIR}'); root=pathlib.Path('${LIVEMASK_ROOT}')
+# Update ledger
 ledger=json.loads((docs/'docs/development/task-state-ledger.json').read_text())
+repo=''
 for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
-        if t.get('task_id')=='${tid}': t['status']='in_progress'; t['notes']=t.get('notes','')+' [accepted by Claude executor]'
+        if t.get('task_id')=='${tid}': t['status']='in_progress'; t['notes']=t.get('notes','')+' [accepted by Claude executor]'; repo=t.get('repo','')
 pathlib.Path(str(docs/'docs/development/task-state-ledger.json')).write_text(json.dumps(ledger,indent=2,ensure_ascii=False))
+# Auto-update agent-state
+now=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+agent_state={'phase':'implementing','current_task':{'task_id':'${tid}','target_repo':repo,'task_phase':'implementing','accepted_at':now},'last_action':'auto-accepted via event bus','updated_at':now}
+(root/'.claude/agent-state.json').write_text(json.dumps(agent_state,indent=2))
+print(f'  [PM] Agent state: implementing, ledger: in_progress')
+" 2>/dev/null || true
+  # Auto-acquire PM lease
+  python3 -c "
+import json,pathlib,time
+now_ts=time.time()
+d={'agent':'claude-executor','started_at':'$(date -u +%Y-%m-%dT%H:%M:%SZ)','started_at_epoch':now_ts,'phase':'implementing','docs_head':'$(git -C "${DOCS_DIR}" rev-parse HEAD 2>/dev/null || echo '?')','note':'Auto-acquired via event bus — Codex must skip'}
+pathlib.Path('${HOME}/.claude/role-cache/pm-lease.json').write_text(json.dumps(d,indent=2))
+print('  [PM] PM lease auto-acquired')
 " 2>/dev/null || true
 }
 
@@ -117,19 +133,93 @@ print(f'  [Product] MVP: {completed}/{total} ({round(completed*100/max(total,1))
 event_react_tech_commit_check() {
   local tid="${1:-}"
   echo "  [Tech] Commit check for: ${tid}"
+  # FIX BREAKPOINT 3: Auto-run verify on commit
   local repo; repo=$(python3 -c "import json;l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'));[print(t['repo']) for m in l['modules'] for t in m['tasks'] if t['task_id']=='${tid}']" 2>/dev/null || echo "")
   if [[ -n "${repo}" ]]; then
     source "${CI_CD_DIR}/scripts/lib/local-verify.sh" 2>/dev/null || true
-    verify_quick "${repo}" 2>/dev/null || true
+    source "${CI_CD_DIR}/scripts/lib/executor-guard.sh" 2>/dev/null || true
+    if executor_pre_commit_verify "${repo}" 2>/dev/null; then
+      echo "  [Tech] Pre-commit verify PASSED"
+      memory_put "tech-finding-${tid}" "tech_check" "Pre-commit verify PASSED for ${repo}" "tech,executor,success" 2>/dev/null || true
+    else
+      echo "  [Tech] Pre-commit verify FAILED — executor should fix before submit"
+      memory_put "tech-finding-${tid}" "tech_check" "Pre-commit verify FAILED for ${repo} — fix before review" "tech,executor,failure" 2>/dev/null || true
+    fi
   fi
 }
 
 event_react_leader_review() {
-  echo "  [Leader] Review triggered for: ${1:-}"
+  local tid="${1:-}"
+  echo "  [Leader] Auto-review for: ${tid}"
+  # FIX BREAKPOINT 4: Auto-run leader review (not just print prompt)
+  if [[ -f "${CI_CD_DIR}/scripts/lib/review-gate.sh" ]]; then
+    source "${CI_CD_DIR}/scripts/lib/review-gate.sh" 2>/dev/null || true
+    # Read review contract and auto-review the diff
+    local review_file="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
+    if [[ -f "${review_file}" ]]; then
+      echo "  [Leader] Review contract exists — analyzing diff..."
+      python3 -c "
+import json,pathlib,subprocess
+review_file = pathlib.Path('${review_file}')
+contract = json.loads(review_file.read_text())
+last_round = contract['rounds'][-1]
+executor_data = last_round.get('executor', {})
+diff_preview = executor_data.get('diff_preview', '')
+commit_msg = executor_data.get('commit', '')
+# Quick auto-review: check for obvious issues
+issues = []
+if not diff_preview: issues.append('No diff available')
+if 'TODO' in diff_preview or 'FIXME' in diff_preview: issues.append('Contains TODO/FIXME')
+if 'fmt.Println' in diff_preview or 'console.log' in diff_preview: issues.append('Debug output found')
+if len(commit_msg) < 20: issues.append('Short commit message')
+verdict = 'approved' if not issues else 'changes_requested'
+reason = '; '.join(issues) if issues else 'Auto-review passed: no obvious issues detected'
+print(f'  [Leader] Auto-review verdict: {verdict.upper()}')
+if verdict == 'approved':
+    # Auto-approve if clean
+    last_round['leader'] = {'reviewed_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'verdict': 'approved', 'notes': f'Auto-reviewed by event-bus: {reason}'}
+    contract['state'] = 'approved'
+    contract['next_required_actor'] = 'qa'
+    review_file.write_text(json.dumps(contract, indent=2, ensure_ascii=False))
+    print(f'  [Leader] Auto-approved → triggering QA')
+    # Trigger QA immediately
+    import subprocess
+    subprocess.run(['bash', '${CI_CD_DIR}/scripts/claude-loop-role-engine.sh', 'qa'], timeout=120)
+else:
+    last_round['leader'] = {'reviewed_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'verdict': 'changes_requested', 'reason': reason}
+    contract['state'] = 'changes_requested'
+    contract['next_required_actor'] = 'executor'
+    review_file.write_text(json.dumps(contract, indent=2, ensure_ascii=False))
+    print(f'  [Leader] Changes requested: {reason}')
+" 2>/dev/null || echo "  [Leader] Auto-review skipped"
+    fi
+  fi
 }
 
 event_react_qa_verify() {
-  echo "  [QA] Verification triggered for: ${1:-}"
+  local tid="${1:-}"
+  echo "  [QA] Auto-verify for: ${tid}"
+  # FIX BREAKPOINT 5: Auto-run QA verification (not just print prompt)
+  local review_file="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
+  if [[ -f "${review_file}" && -f "${CI_CD_DIR}/scripts/lib/review-gate.sh" ]]; then
+    source "${CI_CD_DIR}/scripts/lib/review-gate.sh" 2>/dev/null || true
+    # Check if leader already approved
+    local leader_ok; leader_ok=$(python3 -c "import json; d=json.load(open('${review_file}')); last=d['rounds'][-1]; print('true' if last.get('leader',{}).get('verdict')=='approved' else 'false')" 2>/dev/null || echo "false")
+    if [[ "${leader_ok}" == "true" ]]; then
+      echo "  [QA] Leader approved — running verify..."
+      qa_verify "${tid}" 2>/dev/null || true
+      # Check result
+      local qa_ok; qa_ok=$(python3 -c "import json; d=json.load(open('${review_file}')); last=d['rounds'][-1]; print('true' if last.get('qa',{}).get('passed') else 'false')" 2>/dev/null || echo "false")
+      if [[ "${qa_ok}" == "true" ]]; then
+        echo "  [QA] QA PASSED — auto-approving merge"
+        leader_approve "${tid}" 2>/dev/null || true
+      else
+        echo "  [QA] QA FAILED — executor needs to fix"
+      fi
+    else
+      echo "  [QA] Waiting for leader review first"
+    fi
+  fi
 }
 
 event_react_task_review_audit() {

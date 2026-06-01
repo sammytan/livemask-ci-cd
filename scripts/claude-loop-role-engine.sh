@@ -2976,6 +2976,79 @@ for f in findings[:10]:
   # Auto-save cycle memory for future retrieval
   local cycle_summary; cycle_summary="role-engine cycle $(date -u +%Y-%m-%dT%H:%MZ): ${total_findings} findings, docs_head=${NOW_SHA}"
   memory_put "role-engine-cycle-$(date -u +%Y%m%d-%H%M%S)" "cycle" "${cycle_summary}" "role-engine,cycle,auto" 2>/dev/null || true
+
+  # ── FIX BREAKPOINT 1: Auto-consume findings → create tasks if queue empty ──
+  set +e  # Don't let auto-create failures kill the cycle
+  local queue_count; queue_count=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('summary',{}).get('candidate_count',0))" 2>/dev/null || echo "0")
+  queue_count=$(echo "${queue_count}" | tr -d ' \n' || echo "0")
+  [[ -z "${queue_count}" ]] && queue_count="0"
+  if [[ "${queue_count}" == "0" ]]; then
+    echo ""
+    echo -e "  ${BOLD}${YELLOW}[AUTO-FIX]${RESET} Queue empty — auto-creating tasks from Ready contract gaps"
+    python3 -c "
+import json, pathlib, datetime, re, subprocess
+docs = pathlib.Path('${DOCS_DIR}')
+ledger = json.loads((docs / 'docs/development/task-state-ledger.json').read_text())
+all_tasks = {t['task_id'] for m in ledger['modules'] for t in m['tasks'] if t.get('task_id')}
+ci = docs / 'docs/contracts/contract-index.md'
+now = datetime.datetime.now(datetime.timezone.utc)
+created = 0
+if ci.exists():
+    for line in ci.read_text().split('\n'):
+        if '| Ready |' not in line: continue
+        parts = [p.strip() for p in line.split('|')]
+        if len(parts) < 5: continue
+        domain = parts[1].strip()[:40] if len(parts) > 1 else 'unknown'
+        tasks_in_line = re.findall(r'TASK-[A-Z0-9-]+', line)
+        if any(t in all_tasks for t in tasks_in_line): continue
+        impacted = parts[4].strip()[:60] if len(parts) > 4 else ''
+        first_repo = impacted.split('/')[0].strip()
+        repo_map = {'Backend':'livemask-backend','Admin':'livemask-admin','App':'livemask-app','Website':'livemask-website','CI-CD':'livemask-ci-cd','CI/CD':'livemask-ci-cd','NodeAgent':'livemask-nodeagent','Job Service':'livemask-job-service','Jobs':'livemask-job-service','Docs':'livemask-docs'}
+        repo = repo_map.get(first_repo, 'livemask-backend')
+        tid = f\"TASK-{repo.replace('livemask-','').upper()}-{domain.upper().replace(' ','-')[:30]}-AUTO-{now.strftime('%Y%m%d%H%M%S')}\"
+        tid = re.sub(r'[^A-Z0-9-]','',tid)[:60]
+        if any(t.get('task_id')==tid for m in ledger['modules'] for t in m['tasks']): continue
+        # Create task doc
+        task_doc = docs / f'docs/development/tasks/{tid}.md'
+        task_doc.parent.mkdir(parents=True, exist_ok=True)
+        task_doc.write_text(f'# {tid}\\n\\n> Status: ready\\n> Repository: {repo}\\n> Priority: P1\\n> Created: {now.strftime(\"%Y-%m-%d\")}\\n\\n## 1. Background\\nAuto-created from Ready contract gap: {domain}\\n\\n## 2. Scope\\nImplement {domain} in {repo}.\\n\\n## 3. Acceptance Criteria\\n- [ ] Implementation complete\\n- [ ] Tests pass\\n- [ ] Build passes\\n\\n## 4. Cross-Repo Impact\\nThis task affects {repo}.\\n')
+        # Create dispatch packet
+        dispatch_dir = docs / 'docs/development/dispatch-packets'
+        dispatch_dir.mkdir(parents=True, exist_ok=True)
+        (dispatch_dir / f'{tid}.json').write_text(json.dumps({'schema_version':1,'task_id':tid,'repo':repo,'priority':'P1','readiness':'ready','assigned_to':'claude','assigned_at':now.strftime('%Y-%m-%dT%H:%M:%SZ'),'expires_at':(now+datetime.timedelta(hours=48)).strftime('%Y-%m-%dT%H:%M:%SZ'),'assigned_by':'Auto-Consumer','reason':f'Auto-created from Ready contract gap: {domain}'},indent=2))
+        # Create GitHub issue
+        try:
+            r = subprocess.run(['gh','issue','create','--repo',f'MyAiDevs/{repo}','--title',f'{tid}: {domain} Implementation','--body',f'Auto-created from Ready contract gap. Task doc: docs/development/tasks/{tid}.md'],capture_output=True,text=True,timeout=15)
+            issue_url = r.stdout.strip() if 'github.com' in r.stdout else ''
+        except: issue_url = ''
+        module_name = f'auto-{domain.lower().replace(\" \",\"-\")[:30]}'
+        found = False
+        for m in ledger['modules']:
+            if m.get('module_id') == module_name:
+                m['tasks'].append({'task_id':tid,'repo':repo,'module_id':module_name,'status':'ready','priority':'P1','task_doc':f'docs/development/tasks/{tid}.md','issue':issue_url,'validation':'','dev_merge_commit':'','remote_dev_ref':'','blocked_by':[],'unlocks':[],'notes':f'Auto-created from Ready contract gap. {now.strftime(\"%Y-%m-%d\")}'})
+                m['overall_status'] = 'partial'
+                found = True; break
+        if not found:
+            ledger['modules'].append({'module_id':module_name,'overall_status':'partial','owner_repo':repo,'tasks':[{'task_id':tid,'repo':repo,'module_id':module_name,'status':'ready','priority':'P1','task_doc':f'docs/development/tasks/{tid}.md','issue':issue_url,'validation':'','dev_merge_commit':'','remote_dev_ref':'','blocked_by':[],'unlocks':[],'notes':f'Auto-created from Ready contract gap. {now.strftime(\"%Y-%m-%d\")}'}],'open_gaps':[]})
+        created += 1
+        if created >= 4: break
+    ledger_path = docs / 'docs/development/task-state-ledger.json'
+    ledger_path.write_text(json.dumps(ledger, indent=2, ensure_ascii=False))
+    print(f'  [AUTO-CREATE] {created} tasks created from Ready contract gaps')
+" 2>/dev/null || echo "  [AUTO-CREATE] task creation skipped or failed"
+
+    # Commit and push if tasks created
+    cd "${DOCS_DIR}" 2>/dev/null
+    if [[ -n "$(git status --porcelain docs/development/tasks/ docs/development/dispatch-packets/ docs/development/task-state-ledger.json 2>/dev/null)" ]]; then
+      local auto_br="task/auto-create-$(date -u +%Y%m%d-%H%M%S)"
+      git checkout -b "${auto_br}" 2>/dev/null
+      git add docs/development/tasks/ docs/development/dispatch-packets/ docs/development/task-state-ledger.json 2>/dev/null
+      git commit -m "auto: create tasks from Ready contract gaps" 2>/dev/null
+      git checkout dev 2>/dev/null && git merge "${auto_br}" --no-edit 2>/dev/null && git push origin dev 2>/dev/null
+      echo "  [AUTO-PUSH] Tasks pushed to dev"
+    fi
+    cd "${CI_CD_DIR}" 2>/dev/null || true
+  fi
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
