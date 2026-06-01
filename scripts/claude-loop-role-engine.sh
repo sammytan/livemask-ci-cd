@@ -522,6 +522,34 @@ ACT() { echo -e "  ${RED}[ACT]${RESET} $*"; }
 ASK() { echo -e "  ${BOLD}[REASON]${RESET} $*"; }
 NEXT(){ echo -e "  ${BOLD}${GREEN}[NEXT]${RESET} $*"; }
 
+claude_self_audit_gate() {
+  local audit_file="${ROLE_CACHE_DIR}/self-audit.json"
+
+  if [[ ! -f "${DOCS_DIR}/scripts/check-auto-task-artifacts.py" ]] || \
+     ! grep -q "check-auto-task-artifacts.py" "${DOCS_DIR}/scripts/check-docs.sh" 2>/dev/null; then
+    WARN "self-audit: docs TASK-AUTO guard missing; role-engine will not mutate control-plane artifacts"
+    COORDINATION_DECISION="read_only"
+    record_finding "shared" "blocker" "" "SELF-AUDIT" \
+      "TASK-AUTO artifact guard is missing from docs checks" \
+      "pull latest livemask-docs/dev and rerun startup before creating tasks" \
+      "bash ${CI_CD_DIR}/scripts/claude-loop-startup.sh"
+    return 0
+  fi
+
+  if [[ -f "${audit_file}" ]]; then
+    local fresh_overflow
+    fresh_overflow=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print('yes' if any(s.get('type') == 'context_overflow_error' and int(s.get('age_min', 9999)) <= 20 for s in d.get('signals', [])) else '')" "${audit_file}" 2>/dev/null || echo "")
+    if [[ -n "${fresh_overflow}" ]]; then
+      WARN "self-audit: recent Claude context overflow detected; switching role-engine to read-only diagnostics"
+      COORDINATION_DECISION="read_only"
+      record_finding "shared" "blocker" "" "SELF-AUDIT" \
+        "recent Claude context overflow means this session may be repeating stale instructions" \
+        "restart Claude in a fresh session, run startup, and only then mutate control-plane artifacts" \
+        "bash ${CI_CD_DIR}/scripts/claude-loop-startup.sh"
+    fi
+  fi
+}
+
 # ── Shared: findings recording (machine-readable output) ──────────────────────
 # Severity: blocker (must fix) > warning (should fix) > info (FYI)
 record_finding() {
@@ -1643,10 +1671,11 @@ role_tech() {
       fi
 
       # Check for indexes on new column
-      local col_name; col_name=$(echo "${line}" | grep -oE '[a-z_]+' | tail -3 | head -1)
+      local col_name; col_name=$(echo "${line}" | grep -oE '[a-z_]+' | tail -3 | head -1 | tr -d '\n' | xargs)
       if [[ -n "${col_name}" ]]; then
         local has_index; has_index=$(grep -c "INDEX.*${col_name}" "${go_file}" 2>/dev/null || echo "0")
-        [[ "${has_index}" -eq 0 ]] && ASK "   New column '${col_name}' has no index — will queries on this column be slow?"
+        has_index=$(echo "${has_index}" | tr -d '\n' | xargs)
+        [[ -n "${has_index}" && "${has_index}" -eq 0 ]] && ASK "   New column '${col_name}' has no index — will queries on this column be slow?"
       fi
     done <<< "${cols}"
   done
@@ -2044,6 +2073,48 @@ if removed:
     done <<< "${empty_mods}"
   fi
 
+  # 1b. Remove unlinked TASK-AUTO artifacts created by stale Claude contexts.
+  # The docs repo guard is authoritative; this is the automatic cleanup path.
+  if [[ -x "${DOCS_DIR}/scripts/check-auto-task-artifacts.py" ]] && \
+     ! python3 "${DOCS_DIR}/scripts/check-auto-task-artifacts.py" >/tmp/claude-role-engine-auto-task-check.log 2>&1; then
+    local removed_auto; removed_auto=$(python3 - "${DOCS_DIR}" <<'PY' 2>/dev/null
+import json, pathlib, sys
+
+root = pathlib.Path(sys.argv[1])
+ledger = json.loads((root / "docs/development/task-state-ledger.json").read_text(encoding="utf-8"))
+valid = {}
+for module in ledger.get("modules", []):
+    for task in module.get("tasks", []):
+        tid = task.get("task_id")
+        if isinstance(tid, str):
+            valid[tid] = bool(task.get("issue"))
+
+removed = []
+for path in sorted((root / "docs/development/tasks").glob("TASK-AUTO-*.md")):
+    if not valid.get(path.stem):
+        path.unlink()
+        removed.append(path.relative_to(root).as_posix())
+for path in sorted((root / "docs/development/dispatch-packets").glob("TASK-AUTO-*.json")):
+    try:
+        tid = json.loads(path.read_text(encoding="utf-8")).get("task_id")
+    except Exception:
+        tid = path.stem
+    if not valid.get(tid):
+        path.unlink()
+        removed.append(path.relative_to(root).as_posix())
+for item in removed:
+    print(item)
+PY
+)
+    if [[ -n "${removed_auto}" ]]; then
+      while read -r f; do
+        [[ -z "${f}" ]] && continue
+        ACT "SELF-HEAL: removed unlinked stale TASK-AUTO artifact: ${f}"
+        healed=$((healed + 1))
+      done <<< "${removed_auto}"
+    fi
+  fi
+
   # 2. Resolve orphaned fallback SAPs (duplicates from repeated cycles)
   local sap_dir="${DOCS_DIR}/docs/development/supervisor-actions"
   if [[ -d "${sap_dir}" ]]; then
@@ -2169,6 +2240,7 @@ fi
 
 # ── Proactive health check: catch problems before they become bugs ─────────
 health_check_all 2>/dev/null || true
+claude_self_audit_gate 2>/dev/null || true
 
 case "${ROLE}" in
   pm)

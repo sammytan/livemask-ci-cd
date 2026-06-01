@@ -1103,8 +1103,9 @@ case "${MODE}" in
       exit 0
     fi
 
-    # Full startup: recovery + health pulse + preflight + context + channels + cache
+    # Full startup: recovery + self-audit health + preflight + context + channels + cache
     run_recovery || true  # recovery warnings don't block
+    health_check_all 2>/dev/null || true
     quick_health_pulse
     preflight_rc=0
     run_preflight || preflight_rc=$?

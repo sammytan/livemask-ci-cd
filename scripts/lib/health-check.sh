@@ -25,6 +25,103 @@ health_check_all() {
 
   local issues=0 healed=0
 
+  # ── 0. Claude self-audit ──────────────────────────────────────────────────
+  echo "── Claude Self-Audit ──"
+
+  local self_audit_file="${ROLE_CACHE_DIR}/self-audit.json"
+  mkdir -p "${ROLE_CACHE_DIR}" 2>/dev/null || true
+  python3 - "${self_audit_file}" <<'PY' 2>/dev/null || true
+import json, os, pathlib, sys, time
+
+home = pathlib.Path.home()
+now = time.time()
+project_root = home / ".claude" / "projects"
+role_cache = home / ".claude" / "role-cache"
+signals = []
+
+for path in sorted(project_root.glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)[:30]:
+    try:
+        size = path.stat().st_size
+        age_min = int((now - path.stat().st_mtime) / 60)
+        tail = path.read_text(encoding="utf-8", errors="ignore")[-20000:]
+    except Exception:
+        continue
+    if size > 8_000_000:
+        signals.append({
+            "type": "large_claude_context",
+            "path": str(path),
+            "size_mb": round(size / 1_000_000, 1),
+            "age_min": age_min,
+            "action": "restart Claude loop in a fresh session before mutating control-plane artifacts",
+        })
+    if "maximum context length" in tail or "1048576 tokens" in tail:
+        signals.append({
+            "type": "context_overflow_error",
+            "path": str(path),
+            "age_min": age_min,
+            "action": "stop repeating /loop in this session; start fresh and run claude-loop-startup.sh",
+        })
+
+stale_auto = []
+quarantined = []
+quarantine_dir = role_cache / "quarantine"
+for path in role_cache.glob("*TASK-AUTO*"):
+    stale_auto.append(str(path))
+    if path.is_file() and path.name.startswith("task-intelligence-TASK-AUTO"):
+        try:
+            quarantine_dir.mkdir(parents=True, exist_ok=True)
+            target = quarantine_dir / f"{int(now)}-{path.name}"
+            path.replace(target)
+            quarantined.append(str(target))
+        except Exception:
+            pass
+
+pmemory = role_cache / "project-memory.jsonl"
+if pmemory.exists():
+    try:
+        for line in pmemory.read_text(encoding="utf-8", errors="ignore").splitlines()[-200:]:
+            if "TASK-AUTO-Backend -implement-dashboard" in line or "\"Backend\"" in line and "role-engine-auto-create" in line:
+                stale_auto.append(str(pmemory))
+                break
+    except Exception:
+        pass
+
+if stale_auto:
+    signals.append({
+        "type": "stale_task_auto_memory",
+        "paths": sorted(set(stale_auto))[:10],
+        "quarantined": quarantined[:10],
+        "action": "ignore stale TASK-AUTO memory; use ledger, dispatch packets, GitHub issue links, and docs checks as authority",
+    })
+
+out = {
+    "schema_version": 1,
+    "generated_at_epoch": now,
+    "status": "warn" if signals else "ok",
+    "signals": signals,
+}
+pathlib.Path(os.environ.get("SELF_AUDIT_FILE", "") or sys.argv[1]).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+PY
+
+  local self_signal_count; self_signal_count=$(python3 -c "import json; print(len(json.load(open('${self_audit_file}')).get('signals', [])))" 2>/dev/null || echo "0")
+  if [[ "${self_signal_count}" -gt 0 ]]; then
+    WARN "Claude self-audit: ${self_signal_count} stale-context signal(s) — see ${self_audit_file}"
+    python3 - "${self_audit_file}" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+for s in d.get("signals", [])[:5]:
+    print(f"    {s.get('type')}: {s.get('action')}")
+PY
+    issues=$((issues + 1))
+    local quarantined_count; quarantined_count=$(python3 -c "import json; print(sum(len(s.get('quarantined', [])) for s in json.load(open('${self_audit_file}')).get('signals', [])))" 2>/dev/null || echo "0")
+    if [[ "${quarantined_count}" -gt 0 ]]; then
+      FIX "Quarantined ${quarantined_count} stale TASK-AUTO intelligence cache file(s)"
+      healed=$((healed + 1))
+    fi
+  else
+    PASS "Claude self-audit: no stale context signals"
+  fi
+
   # ── 1. Growth warnings ──────────────────────────────────────────────────
   echo "── Growth Boundaries ──"
 
@@ -244,7 +341,8 @@ for tid in found[:5]:
 
   # 5b. CI failure trend (last 3 runs all failing)
   for r in "MyAiDevs/livemask-backend" "MyAiDevs/livemask-admin"; do
-    local fail_count; fail_count=$(gh run list --repo "$r" --branch dev --limit 3 --json conclusion --jq '[.[].conclusion] | join(",")' 2>/dev/null | grep -o "failure" | wc -l | tr -d ' ' || echo "0")
+    local fail_count; fail_count=$( (gh run list --repo "$r" --branch dev --limit 3 --json conclusion --jq '[.[].conclusion] | join(",")' 2>/dev/null | grep -o "failure" | wc -l) || true )
+    fail_count=$(echo "${fail_count:-0}" | awk 'END {print $1 + 0}')
     [[ "${fail_count}" -ge 3 ]] && WARN "CI: $r — last 3 runs all failed (may need fix task)" && issues=$((issues + 1))
   done
 
@@ -273,7 +371,8 @@ for m in ledger.get('modules',[]):
 
   # 5d. CI queue staleness (>30 min queued → may need investigation)
   for r in "MyAiDevs/livemask-ci-cd" "MyAiDevs/livemask-docs"; do
-    local queued_count; queued_count=$(gh run list --repo "$r" --branch dev --limit 3 --json status --jq '[.[].status] | join(",")' 2>/dev/null | grep -o "queued" | wc -l | tr -d ' ' || echo "0")
+    local queued_count; queued_count=$( (gh run list --repo "$r" --branch dev --limit 3 --json status --jq '[.[].status] | join(",")' 2>/dev/null | grep -o "queued" | wc -l) || true )
+    queued_count=$(echo "${queued_count:-0}" | awk 'END {print $1 + 0}')
     if [[ "${queued_count}" -ge 2 ]]; then
       WARN "CI: $r has ${queued_count} queued runs — runners may be stuck"
       issues=$((issues + 1))
@@ -300,9 +399,10 @@ print(count)
     fi
   fi
 
-  # 5f. Docs CI recovery check
-  local docs_ci; docs_ci=$(gh run list --repo MyAiDevs/livemask-docs --branch dev --limit 1 --json conclusion,status --jq '.[0].conclusion // .[0].status' 2>/dev/null || echo "unknown")
-  case "${docs_ci}" in
+	  # 5f. Docs CI recovery check
+	  local docs_ci; docs_ci=$(gh run list --repo MyAiDevs/livemask-docs --branch dev --limit 1 --json conclusion,status --jq '.[0].conclusion // .[0].status' 2>/dev/null || echo "unknown")
+	  docs_ci="${docs_ci:-unknown}"
+	  case "${docs_ci}" in
     success) PASS "Docs CI: latest run passed";;
     failure) WARN "Docs CI: latest run FAILED — check output"; issues=$((issues + 1));;
     queued|in_progress) PASS "Docs CI: ${docs_ci}";;
