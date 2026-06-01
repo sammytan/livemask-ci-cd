@@ -6,7 +6,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
-DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
+export DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
 CI_CD_DIR="${LIVEMASK_ROOT}/livemask-ci-cd"
 ROLE_CACHE_DIR="${HOME}/.claude/role-cache"
 AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
