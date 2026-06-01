@@ -346,15 +346,63 @@ PY
   local issue_linked=""
   issue_linked=$(python3 -c "import json; d=json.load(open('${intelligence_file}')); print('yes' if (d.get('github_issue_candidates') or d.get('ledger_issue_refs')) else '')" 2>/dev/null || echo "")
   if [[ -z "${issue_linked}" ]]; then
-    echo "    (skip auto-create ${tid}: no GitHub issue/comment or ledger issue reference found; see ${intelligence_file})"
-    record_finding "${role}" "warning" "" "${check}" \
-      "auto-create skipped because no GitHub issue/comment linkage was found for ${title}" \
-      "link or create a GitHub issue first, then create a canonical TASK with docs/context and quality gates" \
-      "${intelligence_file}"
-    bash "${ADAPTER_LIB}" memory-add "role-engine-auto-create-skip" "${tid}" "${repo}" \
-      "auto-create skipped because no GitHub issue/comment or ledger issue reference existed for ${title}" \
-      "${intelligence_file}" >/dev/null 2>&1 || true
-    return 0
+    local issue_body issue_url
+    issue_body="${ROLE_CACHE_DIR}/issue-${tid}.md"
+    cat > "${issue_body}" << ISSUEBODY
+Auto-created by Claude role-engine ${role}/${check}.
+
+Task: ${tid}
+Repo: ${repo}
+Priority: ${priority}
+
+Why now:
+${title}
+
+Context:
+${body}
+
+Evidence bundle:
+${intelligence_file}
+
+Rules:
+- This issue is the GitHub linkage for the generated TASK doc, ledger entry, and dispatch packet.
+- The implementer must cite task context, related docs, validation commands, CI/dev evidence, and any residual blockers before closure.
+- Do not close until task doc, task-state-ledger, review contract, validation, and dev evidence agree.
+ISSUEBODY
+    issue_url=$(gh issue create \
+      --repo "MyAiDevs/${repo}" \
+      --title "${tid}: ${title}" \
+      --body-file "${issue_body}" 2>/dev/null || true)
+    if [[ -n "${issue_url}" ]]; then
+      echo "    (created GitHub issue for ${tid}: ${issue_url})"
+      python3 - "${intelligence_file}" "${issue_url}" "${repo}" "${title}" <<'PY' 2>/dev/null || true
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+url, repo, title = sys.argv[2:5]
+d = json.loads(path.read_text(encoding="utf-8"))
+d.setdefault("github_issue_candidates", []).insert(0, {
+    "number": "",
+    "title": title,
+    "state": "OPEN",
+    "url": url,
+    "updatedAt": "",
+    "recent_comments": [],
+    "created_by_role_engine": True,
+})
+path.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
+PY
+      issue_linked="yes"
+    else
+      echo "    (skip auto-create ${tid}: no GitHub issue/comment or ledger issue reference found; see ${intelligence_file})"
+      record_finding "${role}" "warning" "" "${check}" \
+        "auto-create skipped because no GitHub issue/comment linkage was found for ${title}" \
+        "link or create a GitHub issue first, then create a canonical TASK with docs/context and quality gates" \
+        "${intelligence_file}"
+      bash "${ADAPTER_LIB}" memory-add "role-engine-auto-create-skip" "${tid}" "${repo}" \
+        "auto-create skipped because no GitHub issue/comment or ledger issue reference existed for ${title}" \
+        "${intelligence_file}" >/dev/null 2>&1 || true
+      return 0
+    fi
   fi
 
   # Create task doc with ALL required sections per check-docs.sh schema
@@ -913,21 +961,23 @@ acquire_pm_lease() {
   mkdir -p "${ROLE_CACHE_DIR}"
 
   if [[ -f "${PM_LEASE_FILE}" ]]; then
-    local holder holder_start age_min
-    read -r holder holder_start age_min <<< "$(python3 -c "
+    local holder holder_start age_min holder_phase
+    read -r holder holder_start age_min holder_phase <<< "$(python3 -c "
 import json, time
 try:
     d = json.load(open('${PM_LEASE_FILE}'))
     holder = d.get('agent', '?')
     started = d.get('started_at_epoch', 0)
     age = (time.time() - started) / 60
-    print(holder, d.get('started_at','?'), f'{age:.0f}')
-except: print('?','?','999')
+    print(holder, d.get('started_at','?'), f'{age:.0f}', d.get('phase','?'))
+except: print('?','?','999','?')
 " 2>/dev/null || echo "? ? 999")"
 
     if [[ "${holder}" == "${agent}" ]]; then
       # Same agent — renew lease
       :
+    elif [[ "${holder_phase}" == "complete" || "${holder_phase}" == "stale-auto-released" ]]; then
+      echo -e "  ${YELLOW}[LEASE]${RESET} previous PM lease by '${holder}' is terminal (${holder_phase}) — reusing"
     elif [[ "${age_min}" -lt "${PM_LEASE_TTL_MIN}" ]]; then
       echo -e "  ${YELLOW}[WAIT]${RESET} PM lease held by '${holder}' (${age_min}min ago) — skipping to avoid collision"
       echo "  Lease: ${PM_LEASE_FILE}"
@@ -1602,26 +1652,36 @@ if ci.exists():
             parts = [p.strip() for p in line.split('|')]
             domain = parts[1][:40] if len(parts) > 1 else 'unknown'
             repos_raw = parts[5].strip()[:80] if len(parts) > 5 else 'livemask-backend'
-            repo = repos_raw.split('/')[0].strip()
+            first_repo = repos_raw.split('/')[0].strip()
+            repo_map = {
+                'Backend': 'livemask-backend',
+                'Admin': 'livemask-admin',
+                'App': 'livemask-app',
+                'Website': 'livemask-website',
+                'CI-CD': 'livemask-ci-cd',
+                'CI/CD': 'livemask-ci-cd',
+                'NodeAgent': 'livemask-nodeagent',
+                'Job Service': 'livemask-job-service',
+                'Jobs': 'livemask-job-service',
+                'Docs': 'livemask-docs',
+            }
+            repo = repo_map.get(first_repo, first_repo)
             # Check dedup: don't create if TASK-AUTO already exists for this domain
             auto_tid = f\"TASK-AUTO-{domain.lower().replace(' ','-')[:30]}\"
             if auto_tid in auto_existing: continue
             gaps.append(f'{domain}|{repo}|{repos_raw}|{auto_tid}')
     # Only report gaps — auto_create_task() handles creation
-    if gaps: print(f'GAPS_FOUND|{len(gaps)}')
+    if gaps: print(f'GAPS_FOUND|{len(gaps)}|||')
     for g in gaps[:3]: print(g)
-" 2>/dev/null | while IFS='|' read -r label rest; do
-        if [[ "${label}" == "GAPS_FOUND" ]]; then
-          ACT "PM-3: ${rest} Ready contract gaps found — creating implementation tasks via task branch flow"
+" 2>/dev/null | while IFS='|' read -r gap_domain gap_repo gap_repos gap_tid; do
+        if [[ "${gap_domain}" == "GAPS_FOUND" ]]; then
+          ACT "PM-3: ${gap_repo} Ready contract gaps found — creating implementation tasks via task branch flow"
           continue
         fi
-        # Format: domain|repo|repos_raw|auto_tid
-        local gap_domain="${label}"
-        local gap_repo="${rest}"
-        read -r gap_repos gap_tid <<< "$(echo "${rest}" | cut -d'|' -f2-)"
+        [[ -z "${gap_domain}" || -z "${gap_repo}" ]] && continue
         # Use proper auto_create_task (task branch → dev merge → push)
         auto_create_task "pm" "PM-3" "Implement ${gap_domain} (Ready contract, no active implementation)" "P1" "${gap_repo}" \
-          "Ready contract '${gap_domain}' lacks active implementation task. Auto-decomposed by role-engine PM-3 via task branch flow. Not a direct docs: tasks commit."
+          "Ready contract '${gap_domain}' lacks active implementation task. Impacted repos: ${gap_repos}. Auto-decomposed by role-engine PM-3 via task branch flow. Not a direct docs: tasks commit."
       done
     else
       ASK "→ ${blocked} tasks are blocked — the queue IS the blocker list. Resolve root blockers to unblock candidates."

@@ -254,12 +254,16 @@ age_sec = time.time() - d.get('started_at_epoch', 0)
 age_min = age_sec / 60
 ttl_min = 15
 d['age_min'] = round(age_min, 1)
-d['status'] = 'active' if age_min < ttl_min else 'stale'
 agent = d.get('agent','?')
 phase = d.get('phase','?')
-if age_min < ttl_min:
+if phase in ('complete', 'stale-auto-released'):
+    d['status'] = 'terminal'
+    d['note'] = f"PM lease is terminal (phase={phase}, holder={agent}, {round(age_min,1)}min ago). Safe to start a new PM cycle."
+elif age_min < ttl_min:
+    d['status'] = 'active'
     d['note'] = f"Agent '{agent}' is running PM (phase={phase}, {round(age_min,1)}min ago)."
 else:
+    d['status'] = 'stale'
     d['note'] = f"Lease is stale ({round(age_min,1)}min > {ttl_min}min TTL). Safe to take over."
 print(json.dumps(d, indent=2, ensure_ascii=False))
 PY
