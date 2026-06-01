@@ -59,7 +59,7 @@ daemon_watchdog() {
     local recorded_pid; recorded_pid=$(cat "${pid_file}" 2>/dev/null || echo "0")
     if ! kill -0 "${recorded_pid}" 2>/dev/null; then
       echo "[$(date -u +%H:%M:%S)] WATCHDOG: Daemon PID ${recorded_pid} died — restarting" | tee -a "${LOOP_LOG}"
-      nohup bash "${script_path}" &>/tmp/claude/autonomous-loop-stdout.log &
+      kill "${recorded_pid}" 2>/dev/null || true; sleep 1; nohup bash "${script_path}" &>/tmp/claude/autonomous-loop-stdout.log &
       break  # Old watchdog dies, new daemon starts its own watchdog
     fi
   done
