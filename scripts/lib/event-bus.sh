@@ -57,19 +57,19 @@ state_path.write_text(json.dumps(state,indent=2,ensure_ascii=False))
   # Role-specific immediate reactions
   case "${event_type}" in
     task_accepted)
-      event_react_pm_task_accepted "${task_id}" 2>/dev/null || true
-      event_react_product_progress "${task_id}" 2>/dev/null || true ;;
+      (event_react_pm_task_accepted "${task_id}" 2>/dev/null || true) &
+      (event_react_product_progress "${task_id}" 2>/dev/null || true) & ;;
     code_committed)
-      event_react_tech_commit_check "${task_id}" 2>/dev/null || true
+      (event_react_tech_commit_check "${task_id}" 2>/dev/null || true) &
       # Auto-trigger skills on commit: code-review + security-review + verify
       skill_code_review "${task_id}" 2>/dev/null || true
       skill_security_review "${task_id}" 2>/dev/null || true
       (skill_verify "${repo}" 2>/dev/null || true) &  # Async: don't block the event chain
       executor_renew_lease "claude-executor" "${task_id}" 2>/dev/null || true ;;
     review_submitted)
-      event_react_leader_review "${task_id}" 2>/dev/null || true
-      event_react_qa_verify "${task_id}" 2>/dev/null || true
-      event_react_task_review_audit "${task_id}" 2>/dev/null || true ;;
+      (event_react_leader_review "${task_id}" 2>/dev/null || true) &
+      (event_react_qa_verify "${task_id}" 2>/dev/null || true) &
+      (event_react_task_review_audit "${task_id}" 2>/dev/null || true) & ;;
     changes_requested)
       executor_load_learnings "${task_id}" 2>/dev/null || true ;;
     qa_passed)
@@ -93,8 +93,9 @@ state_path.write_text(json.dumps(state,indent=2,ensure_ascii=False))
       executor_release_task_lease "${task_id}" 2>/dev/null || true
       ;;
     task_completed)
+      skill_update_config 2>/dev/null || true  # Sync rules after task completion
       event_react_pm_cycle_close "${task_id}" 2>/dev/null || true
-      event_react_product_progress "${task_id}" 2>/dev/null || true
+      (event_react_product_progress "${task_id}" 2>/dev/null || true) &
       monitor_analyze_event "task_completed" "${task_id}" 2>/dev/null || true
       python3 -c "import json,pathlib; p=pathlib.Path('${HOME}/.claude/role-cache/pm-lease.json');
 if p.exists(): d=json.loads(p.read_text()); d['phase']='complete'; d['completed_at']='$(date -u +%Y-%m-%dT%H:%M:%SZ)'; p.write_text(json.dumps(d,indent=2))" 2>/dev/null || true
