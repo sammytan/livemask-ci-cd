@@ -95,7 +95,33 @@ while [[ "${CYCLE_COUNT}" -lt "${MAX_CYCLES}" ]]; do
   tid=$(python3 -c "import json;print(json.load(open('${top_pkt}'))['task_id'])" 2>/dev/null || echo "")
   [[ -z "${tid}" ]] && { log_cycle "Could not parse task ID"; continue; }
 
-  log_cycle "ACCEPTING: ${tid}"
+  # ── DEAD-LOOP DETECTION: Track task attempt count ──────────────────
+  ATTEMPT_FILE="${ROLE_CACHE_DIR}/task-attempts/${tid}.count"
+  mkdir -p "$(dirname "${ATTEMPT_FILE}")" 2>/dev/null
+  attempt_count=$(cat "${ATTEMPT_FILE}" 2>/dev/null || echo "0")
+  attempt_count=$((attempt_count + 1))
+  echo "${attempt_count}" > "${ATTEMPT_FILE}"
+
+  if [[ "${attempt_count}" -gt 3 ]]; then
+    log_cycle "DEAD-LOOP DETECTED: ${tid} attempted ${attempt_count} times — SKIPPING"
+    # Mark task as blocked in ledger
+    python3 -c "
+import json,pathlib
+ledger=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        if t.get('task_id')=='${tid}': t['status']='blocked'; t['notes']=t.get('notes','')+' [BLOCKED: dead-loop detected after ${attempt_count} failed attempts]'
+pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json').write_text(json.dumps(ledger,indent=2,ensure_ascii=False))
+" 2>/dev/null || true
+    # Remove dispatch packet so it won't be re-accepted
+    rm -f "${top_pkt}" 2>/dev/null || true
+    # Alert
+    executor_push_alert "dead_loop" "${tid} blocked after ${attempt_count} failed implementation attempts" 2>/dev/null || true
+    sleep "${SLEEP_BETWEEN}"
+    continue
+  fi
+
+  log_cycle "ACCEPTING: ${tid} (attempt ${attempt_count}/3)"
 
   # Step 1: Accept task
   if ! event_emit "task_accepted" "${tid}" '{"source":"autonomous-loop"}' 2>/dev/null; then
