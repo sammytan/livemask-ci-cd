@@ -17,6 +17,10 @@ REVIEW_DIR="${DOCS_DIR}/docs/development/review-contracts"
 AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 MEMORY_DIR="${HOME}/.claude/projects/-Users-sammytan-Developer-LiveMask/memory"
 
+# Source event bus for role notifications
+source "${CI_CD_DIR}/scripts/lib/event-bus.sh" 2>/dev/null || true
+event_init 2>/dev/null || true
+
 # ── Phase 1: Executor submits for review ─────────────────────────────────
 executor_submit_review() {
   local tid="${1:-}"
@@ -130,6 +134,9 @@ pathlib.Path('${AGENT_STATE}').write_text(json.dumps(d, indent=2))
   echo ""
   echo "  Review contract: ${review_file}"
   echo "  Next: leader reviews → qa verifies → leader approves → merge"
+
+  # Event: notify all roles that review was submitted
+  event_emit "review_submitted" "${tid}" '{}' 2>/dev/null || true
 }
 
 # ── Phase 2: Leader reviews implementation ───────────────────────────────
@@ -316,6 +323,13 @@ print(json.dumps({
     "next": "leader_approve" if qa_passed else "executor_fix"
 }, indent=2))
 PY
+
+  # Event: notify roles of QA result
+  if [[ "${qa_passed}" == "true" ]]; then
+    event_emit "qa_passed" "${tid}" '{}' 2>/dev/null || true
+  else
+    event_emit "qa_failed" "${tid}" '{}' 2>/dev/null || true
+  fi
 }
 
 # ── Phase 4: Leader approves → merge to dev ──────────────────────────────
@@ -400,6 +414,9 @@ for m in ledger.get('modules',[]):
   # Save decision to memory
   source "${CI_CD_DIR}/scripts/lib/memory-fast.sh" 2>/dev/null || true
   memory_save_decision "${tid}" "LEADER_APPROVED: code review + QA passed, ready to merge" "Model-verified review: diff reviewed, tests passed, acceptance criteria met" 2>/dev/null || true
+
+  # Event: notify all roles of leader approval
+  event_emit "leader_approved" "${tid}" '{}' 2>/dev/null || true
 }
 
 # ── Phase 5: Leader requests changes ─────────────────────────────────────
@@ -446,6 +463,9 @@ pathlib.Path('${AGENT_STATE}').write_text(json.dumps(d, indent=2))
   echo ""
   echo "  CHANGES REQUESTED: ${reason}"
   echo "  Next: executor fixes issues and re-submits with executor_submit_review ${tid}"
+
+  # Event: notify roles of changes requested
+  event_emit "changes_requested" "${tid}" "{\"reason\": \"${reason}\"}" 2>/dev/null || true
 }
 
 # ── Status: Check review state ────────────────────────────────────────────
