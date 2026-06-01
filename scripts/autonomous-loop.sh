@@ -136,7 +136,7 @@ while [[ "${CYCLE_COUNT}" -lt "${MAX_CYCLES}" ]]; do
   wait_count=0
   while [[ "${wait_count}" -lt 120 ]]; do  # Max 60 min wait
     # Check if task is completed
-    task_status; task_status=$(python3 -c "import json;l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'));[print(t['status']) for m in l['modules'] for t in m['tasks'] if t['task_id']=='${tid}']" 2>/dev/null || echo "unknown")
+    task_status=$(python3 -c "import json;l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'));[print(t['status']) for m in l['modules'] for t in m['tasks'] if t['task_id']=='${tid}']" 2>/dev/null || echo "unknown")
 
     if [[ "${task_status}" == "completed" || "${task_status}" == "completed_with_skip" ]]; then
       log_cycle "TASK COMPLETED: ${tid} (status=${task_status})"
