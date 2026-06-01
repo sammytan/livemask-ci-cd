@@ -82,9 +82,16 @@ cleanup_workspace() {
     git checkout dev 2>/dev/null || true
   fi
 
-  # 2. Clean up leftover task branches from this run
+  # 2. Clean up leftover task branches from this run.
+  # Preserve any branch whose tip has not reached dev; otherwise a failed
+  # merge/guard can leave only a dangling commit and hide real control-plane
+  # work from the next loop.
   for br in $(git branch --list "task/pm-auto-reconcile-*" "task/auto-create-*" "task/role-*" "task/fallback-sap-*" --format='%(refname:short)' 2>/dev/null); do
-    git branch -D "${br}" 2>/dev/null || true
+    if git merge-base --is-ancestor "${br}" dev 2>/dev/null; then
+      git branch -D "${br}" 2>/dev/null || true
+    else
+      echo "  [CLEANUP] preserving unmerged branch ${br}"
+    fi
   done
 
   # 3. Release PM lease if held
@@ -1389,6 +1396,7 @@ else: print(state, 'no_verdict')
     # ── AUTO-RECONCILE: resolve conflict when evidence is clear ────────────────
     local auto_fixed=0
     local target_status=""
+    local issue_state=""
 
     # Rule 1: Review contract approved → sync both to completed
     if [[ "${rstate:-}" == "approved" || "${verdict:-}" == "approved" ]]; then
@@ -1408,6 +1416,38 @@ else: print(state, 'no_verdict')
     # Rule 4: No contract, no merge → leave as conflict for human/Codex
     else
       WARN "Cannot auto-resolve — no review contract and no dev merge. Needs human decision."
+    fi
+
+    if [[ "${auto_fixed}" -eq 1 && "${target_status}" == "completed" && -n "${issue}" ]]; then
+      issue_state=$(ISSUE_URL="${issue}" python3 - <<'PY'
+import os, re, subprocess
+url = os.environ.get("ISSUE_URL", "")
+m = re.search(r"github\.com/([^/]+/[^/]+)/issues/([0-9]+)", url)
+if not m:
+    print("UNKNOWN")
+    raise SystemExit(0)
+repo, num = m.group(1), m.group(2)
+try:
+    out = subprocess.check_output(
+        ["gh", "issue", "view", num, "--repo", repo, "--json", "state", "--jq", ".state"],
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=15,
+    ).strip()
+    print(out or "UNKNOWN")
+except Exception:
+    print("UNKNOWN")
+PY
+)
+      if [[ "${issue_state}" != "CLOSED" ]]; then
+        WARN "skip auto-reconcile ${tid} → completed: linked issue state=${issue_state} (${issue})"
+        record_finding "pm" "warning" "${tid}" "PM-2" \
+          "auto-reconcile to completed blocked by linked issue state=${issue_state}" \
+          "keep task non-terminal until GitHub issue, task doc, ledger, review contract, and validation evidence agree" \
+          ""
+        auto_fixed=0
+        target_status=""
+      fi
     fi
 
     if [[ "${auto_fixed}" -eq 1 && -n "${target_status}" ]]; then
