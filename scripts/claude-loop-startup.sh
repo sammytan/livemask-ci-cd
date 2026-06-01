@@ -1120,6 +1120,82 @@ for r in rows:
   echo "    - If a task is already active, continue that task's recovery path instead of switching."
 }
 
+# ── Step 3.7: WORK_AVAILABLE triage without planner tunnel vision ────────────
+work_available_triage() {
+  header "Step 3.7: Work-Available Triage"
+
+  echo ""
+  echo -e "  ${BOLD}${CYAN}WORK_AVAILABLE is not always a planner task.${RESET}"
+  echo "  Claude must classify the signal source before declaring idle or asking for new direction."
+  echo ""
+
+  echo "  adapter status:"
+  bash "${ADAPTER_LIB}" pm-status 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(f\"    pm:       {d.get('status', d.get('pm_lease','?'))} {d.get('note','')[:160]}\")
+" 2>/dev/null || echo "    pm:       unavailable"
+
+  bash "${ADAPTER_LIB}" dispatch-status 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+packets=d.get('packets', []) if isinstance(d, dict) else []
+print(f\"    dispatch: {len(packets)} packet(s)\")
+for p in packets[:5]:
+    print(f\"      - {p.get('task_id','?')} repo={p.get('repo','?')} assigned={p.get('assigned_to','?')}\")
+" 2>/dev/null || echo "    dispatch: unavailable"
+
+  python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+s=d.get('summary', {})
+print(f\"    planner:  candidates={s.get('candidate_count',0)} blocked_open={s.get('blocked_open_count',0)} evidence_missing={s.get('evidence_missing_count',0)}\")
+for r in d.get('global_next', [])[:5]:
+    print(f\"      - {r.get('task_id','?')} repo={r.get('repo','?')} readiness={r.get('readiness','?')}\")
+" 2>/dev/null || echo "    planner:  unavailable"
+
+  local findings_json="/tmp/claude/startup-work-available-findings.json"
+  bash "${ADAPTER_LIB}" findings-search "" 20 > "${findings_json}" 2>/dev/null || true
+  if [[ -s "${findings_json}" ]]; then
+    python3 - "${findings_json}" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+items = d.get("findings", [])
+print(f"    findings: {len(items)} shown of {d.get('total', d.get('matching', len(items)))}")
+for f in items[:6]:
+    print(f"      - [{f.get('severity','?')}] actor={f.get('actor_hint','?')} {f.get('role','?')}/{f.get('check','?')}: {f.get('finding','')[:180]}")
+    if f.get("cmd"):
+        print(f"        cmd: {f.get('cmd')}")
+PY
+  else
+    echo "    findings: unavailable"
+  fi
+
+  if [[ -f "${HOME}/.claude/role-cache/decision-summary.json" ]]; then
+    python3 - "${HOME}/.claude/role-cache/decision-summary.json" <<'PY' 2>/dev/null || true
+import json, sys
+d=json.load(open(sys.argv[1]))
+print(f"    role decision: classification={d.get('classification')} next_actor={d.get('next_required_actor')}")
+for item in d.get("top_actions", [])[:5]:
+    print(f"      - {item.get('role','?')}/{item.get('check','?')}: {item.get('next','')[:180]}")
+PY
+  fi
+
+  echo ""
+  echo "  required next-step selection:"
+  echo "    1. If dispatch packet or planner candidate exists: build task context and accept it."
+  echo "    2. If findings/control-channel comments exist but planner is empty: run the matching role-engine role or task-review; do not report idle."
+  echo "    3. If role-engine warnings are evidence-chain gaps: verify GitHub issue + task doc + ledger before reopening/closing."
+  echo "    4. If no writable action is safe because another actor holds coordination: produce diagnostics and memory handoff."
+  echo ""
+  echo "  useful commands:"
+  echo "    bash ${ADAPTER_LIB} findings-search"
+  echo "    bash ${ADAPTER_LIB} pm-status"
+  echo "    bash ${ADAPTER_LIB} dispatch-status"
+  echo "    bash ${CI_CD_DIR}/scripts/claude-loop-role-engine.sh task-review"
+  echo "    bash ${CI_CD_DIR}/scripts/claude-loop-role-engine.sh all"
+}
+
 # ── Step 4: Fixed channels ───────────────────────────────────────────────────
 check_fixed_channels() {
   header "Step 4: Fixed Control Channels"
@@ -1265,11 +1341,12 @@ decision_summary() {
 
   # ── WORK_AVAILABLE: must accept work, CANNOT enter monitoring ───────────
   if [[ "${pf_rc}" -eq 1 ]]; then
+    work_available_triage
     if [[ "${review_ct}" -eq 0 && "${reconcile_ct}" -eq 0 ]]; then
       echo ""
-      echo -e "  ${BOLD}${GREEN}>>> WORK_AVAILABLE: Must accept task from planner queue${RESET}"
+      echo -e "  ${BOLD}${GREEN}>>> WORK_AVAILABLE: Must act on the signal source above${RESET}"
       echo ""
-      echo "  HARD RULE: preflight exit=1 means work exists. Declaring idle is a PROCESS_DEFECT."
+      echo "  HARD RULE: preflight exit=1 means work exists. Declaring idle or asking for a new direction is a PROCESS_DEFECT."
       echo ""
       echo "  BEFORE implementing:"
       echo "  1. Read ALL required_first_reads from the context bundle above"
@@ -1278,6 +1355,7 @@ decision_summary() {
       echo "  4. Read the task doc under docs/development/tasks/"
       echo "  5. Run the recommended searches for existing references"
       echo "  6. Update agent-state.json: phase=implementing"
+      echo "  7. If no planner task exists, consume findings/control-channel comments via role-engine task-review/all"
     fi
     return 0
   fi

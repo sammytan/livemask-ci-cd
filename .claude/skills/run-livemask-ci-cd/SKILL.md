@@ -19,6 +19,36 @@ interface for the three things an agent actually does here:
 2. **Infra** — start/stop/status of the local Docker Compose runtime.
 3. **Smoke** — run individual smoke scripts against a running backend.
 
+## Agent Operating Standard
+
+Before changing CI/CD, loop, or runtime automation:
+
+```bash
+git switch dev
+git pull --ff-only origin dev
+bash scripts/event-adapters/lib/adapter-lib.sh pm-status
+bash scripts/event-adapters/lib/adapter-lib.sh dispatch-status
+bash scripts/event-adapters/lib/adapter-lib.sh findings-search
+bash scripts/event-adapters/lib/adapter-lib.sh knowledge-search "<task-or-domain-keyword>" 20
+```
+
+Then verify the target repo and task context. Do not run repo-native commands
+from `livemask-docs` by accident; use `(cd ../livemask-backend && go test ./...)`
+style subshells when the task belongs to another repo.
+
+If preflight reports `WORK_AVAILABLE` while the planner queue is empty, treat
+role-engine findings, fixed-channel comments, task-review warnings, and runtime
+log audits as the work source. Do not ask for a new task or report idle.
+
+Use local memory as a hint layer:
+
+```bash
+bash scripts/event-adapters/lib/adapter-lib.sh memory-search "<TASK-ID-or-repo>" 10
+```
+
+Memory never replaces GitHub issue body/comments, `task-state-ledger.json`, task
+docs, review contracts, or CI evidence.
+
 ## Prerequisites
 
 ```bash
@@ -52,6 +82,22 @@ bash .claude/skills/run-livemask-ci-cd/driver.sh validate-dev-ref     # Check th
 The driver exits 0 when all checks pass, non-zero when any fail. Output uses
 `[PASS]` / `[FAIL]` tags for scripting.
 
+For loop-script edits, minimum validation is:
+
+```bash
+bash -n scripts/claude-loop-startup.sh scripts/claude-loop-role-engine.sh scripts/claude-loop-preflight.sh
+bash .claude/skills/run-livemask-ci-cd/driver.sh validate-shell
+git diff --check
+```
+
+After pushing `dev`, wait for GitHub Actions to reach a terminal conclusion
+instead of stopping at queued/in_progress:
+
+```bash
+gh run list --repo MyAiDevs/livemask-ci-cd --branch dev --limit 5 \
+  --json databaseId,workflowName,headSha,status,conclusion,url,createdAt,updatedAt
+```
+
 ## Lint a single script
 
 ```bash
@@ -76,6 +122,7 @@ bash scripts/local-dev.sh start
 # Status / logs:
 bash .claude/skills/run-livemask-ci-cd/driver.sh infra-status
 bash scripts/local-dev.sh logs --services backend
+bash scripts/runtime-log-audit.sh --env local --tail 250 --create-issue
 
 # Stop (only when explicitly asked):
 bash .claude/skills/run-livemask-ci-cd/driver.sh infra-down
@@ -83,6 +130,10 @@ bash .claude/skills/run-livemask-ci-cd/driver.sh infra-down
 
 The local dev runtime is persistent by default. Do NOT run `stop`/`down`/`restart`
 unless the user explicitly requests it.
+
+Runtime log errors matter even when unrelated to the current task. Run
+`scripts/runtime-log-audit.sh`; if it finds unrelated errors, preserve the JSON
+artifact and create/link a GitHub issue instead of silently ignoring them.
 
 Fixed local ports:
 | Service   | URL                     |
@@ -116,6 +167,11 @@ LIVEMASK_BACKEND_HTTP_PORT=18080 bash scripts/smoke.sh
 Smoke scripts that hit the NodeAgent config endpoint expect HMAC-signed
 requests — the smoke handles the 403 gracefully and falls back to the admin
 config list.
+
+Prefer local smoke for broad/full-stack validation. Remote or GitHub-hosted
+staging smoke is only an acceptance gate when the task, user, or rules
+explicitly opt in. Otherwise record local evidence and treat remote smoke as
+supplementary.
 
 ## Run (human path)
 
@@ -157,3 +213,6 @@ useless for headless/CI environments. Use the driver's `validate-*` and
 | `compose config` fails with "no such service" | Check that env vars (`LIVEMASK_BACKEND_HTTP_PORT`, etc.) are set |
 | Backend health check returns empty | Wait for `docker compose up -d --wait` to report healthy |
 | Smoke script fails on Config Center Redis check | Expected when running against the local runtime — the smoke's `docker exec redis-cli` command targets a container name from the staging compose file |
+| Claude says planner is 0 but preflight is WORK_AVAILABLE | Run `findings-search`, `dispatch-status`, `pm-status`, then `claude-loop-role-engine.sh task-review`; findings/control comments are actionable work |
+| `gh api` says API connection failed but `gh issue view` works | Use the preflight fallback path or rerun outside the sandbox; do not turn error text into issue state |
+| Context length / 1048576 token error | Restart Claude in a fresh session, run `claude-loop-startup.sh`, and rely on adapter memory/search instead of repeating the same huge prompt |
