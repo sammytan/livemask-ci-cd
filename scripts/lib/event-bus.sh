@@ -74,7 +74,20 @@ state_path.write_text(json.dumps(state,indent=2,ensure_ascii=False))
       executor_load_learnings "${task_id}" 2>/dev/null || true
       executor_check_qa_retries "${task_id}" 2>/dev/null || true ;;
     leader_approved)
-      event_react_pm_ledger_update "${task_id}" 2>/dev/null || true ;;
+      event_react_pm_ledger_update "${task_id}" 2>/dev/null || true
+      # FIX: Auto-merge + auto-complete the task
+      local merge_repo; merge_repo=$(python3 -c "import json;l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'));[print(t['repo']) for m in l['modules'] for t in m['tasks'] if t['task_id']=='${task_id}']" 2>/dev/null || echo "")
+      if [[ -n "${merge_repo}" ]]; then
+        source "${CI_CD_DIR}/scripts/lib/executor-guard.sh" 2>/dev/null || true
+        local merge_br; merge_br=$(git -C "${LIVEMASK_ROOT}/${merge_repo}" branch --show-current 2>/dev/null || echo "")
+        if executor_safe_merge "${task_id}" "${merge_repo}" "${merge_br}" 2>/dev/null; then
+          event_emit "task_completed" "${task_id}" "{\"merge_repo\":\"${merge_repo}\"}" 2>/dev/null || true
+        fi
+      fi
+      # Stop heartbeat
+      executor_stop_heartbeat 2>/dev/null || true
+      executor_release_task_lease "${task_id}" 2>/dev/null || true
+      ;;
     task_completed)
       event_react_pm_cycle_close "${task_id}" 2>/dev/null || true
       event_react_product_progress "${task_id}" 2>/dev/null || true
