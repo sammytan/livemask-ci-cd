@@ -76,6 +76,7 @@ log_cycle "DAEMON STARTED (PID: $$, adapter=$(test -f "${ADAPTER_LIB}" && echo O
 
 while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
   CYCLE_COUNT=$((CYCLE_COUNT + 1))
+  set +e  # NEVER exit — daemon tolerates all failures
 
   # ── SLEEP: Prevent rapid CPU burn between every cycle ──────────────
   sleep "${SLEEP_CYCLE}"
@@ -87,7 +88,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
 
   # ── Phase 1: Check work availability ────────────────────────────────
   queue_count=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('summary',{}).get('candidate_count',0))" 2>/dev/null || echo "0")
-  pkt_count=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -name "TASK-*.json" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+  pkt_count=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -name "TASK-*.json" 2>/dev/null | wc -l | tr -d ' \n' || echo "0")
   log_cycle "Queue: ${queue_count} candidates, ${pkt_count} packets, ${CONSECUTIVE_BLOCKS} consecutive blocks"
 
   # ── ALL-TASKS-BLOCKED DETECTION ─────────────────────────────────────
@@ -111,7 +112,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
     bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" all 2>&1 | tail -10 >> "${LOOP_LOG}" || true
 
     # Re-check after role engine
-    pkt_count=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -name "TASK-*.json" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    pkt_count=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -name "TASK-*.json" 2>/dev/null | wc -l | tr -d ' \n' || echo "0")
     if [[ "${pkt_count}" == "0" ]]; then
       log_cycle "Still no work — syncing knowledge base"
       sync_knowledge "task creation gap" 2>/dev/null || true
