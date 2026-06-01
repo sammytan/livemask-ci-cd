@@ -35,6 +35,8 @@ source "${SCRIPT_DIR}/lib/impl-assist.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/memory-fast.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/monitor-learn.sh" 2>/dev/null || true
 source "${ADAPTER_LIB}" 2>/dev/null || true
+# CRITICAL: adapter-lib.sh overrides DOCS_DIR to DOCS_REPO_DIR/docs — restore ours
+export DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
 event_init 2>/dev/null || true
 monitor_init 2>/dev/null || true
 memory_init 2>/dev/null || true
@@ -116,6 +118,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
   # ── Phase 1: Check work availability ────────────────────────────────
   queue_count=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('summary',{}).get('candidate_count',0))" 2>/dev/null || echo "0")
   pkt_count=$(python3 -c 'import pathlib; p=pathlib.Path("'"${DOCS_DIR}"'/docs/development/dispatch-packets"); print(len(list(p.glob("TASK-*.json"))))' 2>/dev/null || echo 0)
+  echo "DEBUG pkt_count=[${pkt_count}] DOCS_DIR=[${DOCS_DIR}]" >> "${LOOP_LOG}"
   log_cycle "Queue: ${queue_count} candidates, ${pkt_count} packets, ${CONSECUTIVE_BLOCKS} consecutive blocks"
 
   # ── ALL-TASKS-BLOCKED DETECTION ─────────────────────────────────────
@@ -140,6 +143,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
 
     # Re-check after role engine
     pkt_count=$(python3 -c 'import pathlib; p=pathlib.Path("'"${DOCS_DIR}"'/docs/development/dispatch-packets"); print(len(list(p.glob("TASK-*.json"))))' 2>/dev/null || echo 0)
+  echo "DEBUG pkt_count=[${pkt_count}] DOCS_DIR=[${DOCS_DIR}]" >> "${LOOP_LOG}"
     if [[ "${pkt_count}" -eq 0 ]]; then
       log_cycle "Still no work — syncing knowledge base"
       sync_knowledge "task creation gap" 2>/dev/null || true
