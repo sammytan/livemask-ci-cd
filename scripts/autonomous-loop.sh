@@ -87,7 +87,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
 
   # ── Phase 1: Check work availability ────────────────────────────────
   queue_count=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('summary',{}).get('candidate_count',0))" 2>/dev/null || echo "0")
-  pkt_count=$(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+  pkt_count=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -name "TASK-*.json" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
   log_cycle "Queue: ${queue_count} candidates, ${pkt_count} packets, ${CONSECUTIVE_BLOCKS} consecutive blocks"
 
   # ── ALL-TASKS-BLOCKED DETECTION ─────────────────────────────────────
@@ -111,7 +111,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
     bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" all 2>&1 | tail -10 >> "${LOOP_LOG}" || true
 
     # Re-check after role engine
-    pkt_count=$(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    pkt_count=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -name "TASK-*.json" 2>/dev/null | wc -l | tr -d ' ' || echo "0")
     if [[ "${pkt_count}" == "0" ]]; then
       log_cycle "Still no work — syncing knowledge base"
       sync_knowledge "task creation gap" 2>/dev/null || true
@@ -148,7 +148,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
   fi
 
   # ── Case C: Work exists + agent idle → ACCEPT ───────────────────────
-  top_pkt=$(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | head -1)
+  top_pkt=$(find "${DOCS_DIR}/docs/development/dispatch-packets" -maxdepth 1 -name "TASK-*.json" 2>/dev/null | head -1)
   [[ -z "${top_pkt}" ]] && { log_cycle "No dispatch packet"; sleep "${SLEEP_IDLE}"; continue; }
 
   tid=$(python3 -c "import json;print(json.load(open('${top_pkt}'))['task_id'])" 2>/dev/null || echo "")
