@@ -269,6 +269,11 @@ executor_safe_merge() {
     # FIX 6a: Merge conflict recovery
     echo "  [MERGE] Merge failed — attempting recovery"
     git merge --abort 2>/dev/null || true
+      # Try auto-resolution before aborting
+      if executor_auto_resolve_conflict "${repo}" 2>/dev/null; then
+        echo "  [MERGE] Conflict auto-resolved"
+        return 0
+      fi
     git checkout "${saved_br}" 2>/dev/null || true
 
     # FIX 6b: Rollback ledger if push failed
@@ -541,4 +546,53 @@ executor_system_health() {
   echo "  GitHub: $(executor_gh_available && echo 'OK' || echo 'DOWN')"
   echo "  Alerts: $(ls "${ROLE_CACHE_DIR}/alerts"/*.json 2>/dev/null | wc -l | tr -d ' ' || echo '0')"
   echo ""
+}
+
+# ── Auto-resolve simple merge conflicts ────────────────────────────────
+executor_auto_resolve_conflict() {
+  local repo="${1:-}"; [[ -z "${repo}" ]] && return 1
+  local repo_dir="${LIVEMASK_ROOT}/${repo}"
+  cd "${repo_dir}" 2>/dev/null || return 1
+
+  # Check if we're in a merge conflict state
+  if ! git status --porcelain 2>/dev/null | grep -q "^UU\|^AA\|^DD"; then
+    return 0  # No conflict
+  fi
+
+  echo "  [MERGE] Conflict detected in ${repo} — attempting auto-resolution"
+
+  # Strategy 1: If conflict is in task-state-ledger.json, accept ours (newer tasks)
+  local conflict_files; conflict_files=$(git diff --name-only --diff-filter=U 2>/dev/null)
+  local auto_resolved=0
+
+  for f in ${conflict_files}; do
+    # For docs/ledger files, use 'ours' strategy (keep our additions)
+    if echo "${f}" | grep -q "task-state-ledger.json\|CODEX_LOOP_RULES\|CLAUDE.md\|dispatch-packets/"; then
+      git checkout --ours "${f}" 2>/dev/null && git add "${f}" 2>/dev/null
+      echo "  [MERGE] Auto-resolved (ours): ${f}"
+      auto_resolved=$((auto_resolved + 1))
+    # For code files, use 'theirs' strategy (accept incoming if ours hasn't changed)
+    elif echo "${f}" | grep -q "\.go$\|\.ts$\|\.tsx$\|\.dart$\|\.sh$\|\.py$"; then
+      # Check if our side has real changes vs just boilerplate
+      local our_changes; our_changes=$(git diff HEAD...MERGE_HEAD -- "${f}" 2>/dev/null | grep "^[+-]" | grep -v "^[+-][+-][+-]" | wc -l | tr -d ' ')
+      local their_changes; their_changes=$(git diff MERGE_HEAD...HEAD -- "${f}" 2>/dev/null | grep "^[+-]" | grep -v "^[+-][+-][+-]" | wc -l | tr -d ' ')
+      if [[ "${our_changes}" -le 2 && "${their_changes}" -gt 0 ]]; then
+        git checkout --theirs "${f}" 2>/dev/null && git add "${f}" 2>/dev/null
+        echo "  [MERGE] Auto-resolved (theirs, our=${our_changes} their=${their_changes}): ${f}"
+        auto_resolved=$((auto_resolved + 1))
+      fi
+    fi
+  done
+
+  # If all conflicts resolved, complete the merge
+  local remaining; remaining=$(git diff --name-only --diff-filter=U 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "${remaining}" -eq 0 && "${auto_resolved}" -gt 0 ]]; then
+    if git commit --no-edit 2>/dev/null; then
+      echo "  [MERGE] Auto-merge completed (${auto_resolved} files auto-resolved)"
+      return 0
+    fi
+  fi
+
+  echo "  [MERGE] ${remaining} files still in conflict — manual resolution needed"
+  return 1
 }
