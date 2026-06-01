@@ -2,7 +2,7 @@
 # autonomous-loop.sh — Continuous autonomous development daemon v2.
 # Integrates adapter-lib.sh shared knowledge + GitHub issues/comments.
 # Every sleep is labeled with WHY. Never stops unless explicitly killed.
-set -euo pipefail
+set -euo pipefail  # Top-level safety; overridden by set +e in loop
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
@@ -49,6 +49,27 @@ cleanup_loop() {
 }
 trap cleanup_loop EXIT
 
+# ── Watchdog: auto-restart daemon if it dies ─────────────────────────
+daemon_watchdog() {
+  local pid_file="${LOOP_PID_FILE}"
+  local script_path="${CI_CD_DIR}/scripts/autonomous-loop.sh"
+  while true; do
+    sleep 60
+    if [[ ! -f "${pid_file}" ]]; then break; fi
+    local recorded_pid; recorded_pid=$(cat "${pid_file}" 2>/dev/null || echo "0")
+    if ! kill -0 "${recorded_pid}" 2>/dev/null; then
+      echo "[$(date -u +%H:%M:%S)] WATCHDOG: Daemon PID ${recorded_pid} died — restarting" | tee -a "${LOOP_LOG}"
+      nohup bash "${script_path}" &>/tmp/claude/autonomous-loop-stdout.log &
+      break  # Old watchdog dies, new daemon starts its own watchdog
+    fi
+  done
+}
+# Start watchdog in background (only if not already watched)
+if [[ -z "${WATCHDOG_ACTIVE:-}" ]]; then
+  export WATCHDOG_ACTIVE=1
+  daemon_watchdog &
+fi
+
 log_cycle() { echo "[$(date -u +%H:%M:%S)] CYCLE#${CYCLE_COUNT} $*" | tee -a "${LOOP_LOG}"; }
 
 # ── GitHub status update ──────────────────────────────────────────────────
@@ -85,10 +106,16 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
   executor_repair_agent_state 2>/dev/null || true
   executor_repair_ledger 2>/dev/null || true
   executor_cleanup_alerts 2>/dev/null || true
+  # Clean up orphaned branches every 10 cycles to prevent disk bloat
+  if [[ $((CYCLE_COUNT % 10)) -eq 0 ]]; then
+    log_cycle "Running branch cleanup (every 10 cycles)"
+    bash "${CI_CD_DIR}/scripts/cleanup-branches.sh" 2>&1 | tail -3 >> "${LOOP_LOG}" || true
+    sleep 5  # SLEEP: let git operations settle
+  fi
 
   # ── Phase 1: Check work availability ────────────────────────────────
   queue_count=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('summary',{}).get('candidate_count',0))" 2>/dev/null || echo "0")
-  pkt_count=$(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | wc -l | tr -d "[:space:]" || echo 0)
+  pkt_count=$(bash -c "ls ${DOCS_DIR}/docs/development/dispatch-packets/TASK-*.json 2>/dev/null | wc -l" | tr -d "[:space:]" || echo 0)
   log_cycle "Queue: ${queue_count} candidates, ${pkt_count} packets, ${CONSECUTIVE_BLOCKS} consecutive blocks"
 
   # ── ALL-TASKS-BLOCKED DETECTION ─────────────────────────────────────
@@ -112,7 +139,7 @@ while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
     bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" all 2>&1 | tail -10 >> "${LOOP_LOG}" || true
 
     # Re-check after role engine
-    pkt_count=$(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | wc -l | tr -d "[:space:]" || echo 0)
+    pkt_count=$(bash -c "ls ${DOCS_DIR}/docs/development/dispatch-packets/TASK-*.json 2>/dev/null | wc -l" | tr -d "[:space:]" || echo 0)
     if [[ "${pkt_count}" -eq 0 ]]; then
       log_cycle "Still no work — syncing knowledge base"
       sync_knowledge "task creation gap" 2>/dev/null || true
