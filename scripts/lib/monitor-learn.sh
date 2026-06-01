@@ -298,3 +298,71 @@ print(json.dumps({
 }, indent=2))
 PY
 }
+
+# ── Learn from Codex reconcile patterns ────────────────────────────────
+monitor_learn_from_codex() {
+  echo "  [CodexLearn] Analyzing Codex reconcile patterns..."
+  cd "${DOCS_DIR}" 2>/dev/null || return 0
+  git log --oneline --since="24 hours ago" --grep="reconcile" 2>/dev/null | head -20 | python3 -c "
+import sys,re
+lines = sys.stdin.readlines()
+completed = [l for l in lines if 'completed' in l.lower() or 'mark' in l.lower()]
+skipped = [l for l in lines if 'skip' in l.lower() or 'blocked' in l.lower()]
+patterns = []
+for l in completed[:5]:
+    tid = re.findall(r'TASK-[A-Z0-9-]+', l)
+    if tid: patterns.append(f'Codex completed {tid[0]}')
+for l in skipped[:3]:
+    tid = re.findall(r'TASK-[A-Z0-9-]+', l)
+    if tid: patterns.append(f'Codex skipped {tid[0]}')
+for p in patterns: print(f'  [CodexLearn] {p}')
+if not patterns: print('  [CodexLearn] No recent Codex activity')
+" 2>/dev/null || true
+}
+
+# ── Track verify performance over time ──────────────────────────────────
+monitor_performance_track() {
+  local perf_file="${ROLE_CACHE_DIR}/monitor/perf-stats.jsonl"
+  mkdir -p "$(dirname "${perf_file}")" 2>/dev/null
+  for repo in livemask-backend livemask-admin livemask-docs; do
+    local repo_dir="${LIVEMASK_ROOT}/${repo}"
+    [[ ! -d "${repo_dir}" ]] && continue
+    local start; start=$(python3 -c "import time; print(int(time.time()))")
+    case "${repo}" in
+      livemask-backend) cd "${repo_dir}" && go build ./... 2>/dev/null ;;
+      livemask-admin) cd "${repo_dir}" && npm run build 2>/dev/null | tail -1 ;;
+      livemask-docs) cd "${repo_dir}" && bash scripts/check-docs.sh 2>/dev/null | tail -1 ;;
+    esac
+    local elapsed; elapsed=$(python3 -c "import time; print(int(time.time())-${start})")
+    python3 -c "import json,pathlib; d={'repo':'${repo}','elapsed_s':${elapsed},'at':'$(date -u +%Y-%m-%dT%H:%M:%SZ)'}; f=open('${perf_file}','a'); f.write(json.dumps(d)+'\n')" 2>/dev/null || true
+  done
+  # Show trend
+  python3 -c "
+import json,pathlib
+from collections import defaultdict
+f=pathlib.Path('${perf_file}')
+if f.exists():
+    data=[json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+    by_repo=defaultdict(list)
+    for d in data: by_repo[d['repo']].append(d['elapsed_s'])
+    for repo,times in sorted(by_repo.items()):
+        avg=sum(times)/len(times)
+        trend='↑' if len(times)>1 and times[-1]>times[-2] else '↓' if len(times)>1 else '→'
+        print(f'  [Perf] {repo}: avg={avg:.1f}s over {len(times)} builds {trend}')
+" 2>/dev/null || true
+}
+
+# ── Scan for TODOs and create tech-debt tasks ──────────────────────────
+monitor_scan_techdebt() {
+  echo "  [TechDebt] Scanning for TODOs..."
+  local todo_count=0
+  for repo in livemask-backend livemask-admin livemask-app livemask-nodeagent livemask-job-service; do
+    local dir="${LIVEMASK_ROOT}/${repo}"
+    [[ ! -d "${dir}" ]] && continue
+    local count; count=$(grep -r "TODO\|FIXME\|HACK\|XXX" "${dir}" --include="*.go" --include="*.ts" --include="*.tsx" --include="*.dart" 2>/dev/null | grep -v "node_modules\|\.git\|vendor" | wc -l | tr -d ' ')
+    todo_count=$((todo_count + count))
+    [[ "${count}" -gt 5 ]] && echo "  [TechDebt] ${repo}: ${count} TODOs"
+  done
+  echo "  [TechDebt] Total TODOs across repos: ${todo_count}"
+  [[ "${todo_count}" -gt 50 ]] && executor_notify_human "tech_debt" "${todo_count} TODOs across codebase"
+}
