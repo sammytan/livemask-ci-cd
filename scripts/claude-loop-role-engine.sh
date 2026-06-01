@@ -615,6 +615,15 @@ pathlib.Path('${dp_file}').write_text(json.dumps(dp, indent=2))
   if git diff --cached --quiet 2>/dev/null; then
     git checkout "${saved_br}" 2>/dev/null || true
   else
+    # Gate: run docs checks before pushing — reject unlinked TASK-AUTO artifacts
+    if ! bash "${DOCS_DIR}/scripts/check-docs.sh" >/tmp/claude-role-engine-auto-create-check.log 2>&1; then
+      WARN "auto-create ${tid} failed docs checks; reverting staged artifacts"
+      git reset HEAD docs/development/tasks/ docs/development/dispatch-packets/ docs/development/task-state-ledger.json 2>/dev/null || true
+      git checkout -- docs/development/tasks/ docs/development/dispatch-packets/ docs/development/task-state-ledger.json 2>/dev/null || true
+      git checkout "${saved_br}" 2>/dev/null || true
+      git branch -D "${cr_br}" 2>/dev/null || true
+      return 0
+    fi
     git commit -m "role-engine: auto-create ${tid}" 2>/dev/null
     git checkout dev 2>/dev/null && git merge "${cr_br}" --no-edit 2>/dev/null && git push origin dev 2>/dev/null
     git checkout "${saved_br}" 2>/dev/null || git checkout dev 2>/dev/null
