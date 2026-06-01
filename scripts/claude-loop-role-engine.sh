@@ -6,7 +6,7 @@
 # Principle: Every detection MUST answer "why did this happen?" and produce
 # a concrete next action. Nothing is just printed and forgotten.
 #
-# Roles: pm | product | tech | qa | deep-review | closure-audit | impact-analysis
+# Roles: pm | product | tech | qa | task-review | deep-review | closure-audit | impact-analysis
 # Usage: bash scripts/claude-loop-role-engine.sh <role> [TASK-ID]
 set -euo pipefail
 
@@ -55,11 +55,13 @@ cleanup_workspace() {
 
   # 3. Release PM lease if held
   if [[ -f "${PM_LEASE_FILE:-}" ]]; then
+    local cleanup_agent="${ROLE:-unknown}"
+    [[ "${cleanup_agent}" == "all" ]] && cleanup_agent="claude-pm-backup"
     python3 -c "
 import json, pathlib
 try:
     d = json.load(open('${PM_LEASE_FILE}'))
-    if d.get('phase') != 'complete':
+    if d.get('agent') == '${cleanup_agent}' and d.get('phase') != 'complete':
         d['phase'] = 'complete'
         d['completed_at'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
         pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d, indent=2))
@@ -861,7 +863,7 @@ sync_all() {
 # ── PM Mutual Exclusion: prevent Claude and Codex from colliding ──────────────
 # Acquire PM lease before touching shared state. Stale leases (>15min) can be
 # taken over. Returns 0 if lease acquired, 1 if another agent is active.
-PM_LEASE_FILE="${ROLE_CACHE_DIR}/pm-lease.json"
+PM_LEASE_FILE="${PM_LEASE_FILE:-${ROLE_CACHE_DIR}/pm-lease.json}"
 PM_LEASE_TTL_MIN=15
 
 acquire_pm_lease() {
@@ -911,14 +913,25 @@ pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d, indent=2))
 
 release_pm_lease() {
   if [[ -f "${PM_LEASE_FILE}" ]]; then
-    python3 -c "
+    local release_agent="${ROLE:-unknown}"
+    [[ "${release_agent}" == "all" ]] && release_agent="claude-pm-backup"
+    local released
+    released=$(python3 -c "
 import json, pathlib
 d = json.load(open('${PM_LEASE_FILE}'))
-d['phase'] = 'complete'
-d['completed_at'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
-pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d, indent=2))
-" 2>/dev/null
-    echo "  [LEASE] PM lock released"
+if d.get('agent') == '${release_agent}':
+    d['phase'] = 'complete'
+    d['completed_at'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+    pathlib.Path('${PM_LEASE_FILE}').write_text(json.dumps(d, indent=2))
+    print('released')
+else:
+    print('held-by-' + str(d.get('agent', '?')))
+" 2>/dev/null || echo "unknown")
+    if [[ "${released}" == "released" ]]; then
+      echo "  [LEASE] PM lock released"
+    else
+      echo "  [LEASE] PM lock not released (${released})"
+    fi
   fi
 }
 
@@ -1083,9 +1096,10 @@ load_cache() {
 save_cache() {
   local role_name="$1"
   local summary="$2"
+  local sha="${NOW_SHA:-}"
   python3 -c "
 import json, time, pathlib
-cache = {'schema_version':2, 'role':'${role_name}', 'updated_at':'$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'updated_at_epoch':time.time(), 'last_sha':'${NOW_SHA}', 'summary':'${summary}'}
+cache = {'schema_version':2, 'role':'${role_name}', 'updated_at':'$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'updated_at_epoch':time.time(), 'last_sha':'${sha}', 'summary':'${summary}'}
 pathlib.Path('${ROLE_CACHE_DIR}/${role_name}-cache.json').write_text(json.dumps(cache, indent=2))
 " 2>/dev/null
 }
@@ -1982,6 +1996,363 @@ for m in ledger.get('modules',[]):
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TASK REVIEW: GitHub/task evidence-chain auditor
+# ══════════════════════════════════════════════════════════════════════════════
+
+role_task_review() {
+  H1 "TASK REVIEW — GitHub Issue / Ledger Evidence Chain"
+  load_cache "task-review"
+  if ! preflight_context; then
+    WARN "task-review skipped because PM lease/coordination guard is active"
+    finish_role "task-review" "skipped_by_pm_lease"
+    return 0
+  fi
+
+  local limit="${TASK_REVIEW_LIMIT:-30}"
+  local reopen="${TASK_REVIEW_REOPEN:-true}"
+  local comment_open="${TASK_REVIEW_COMMENT_OPEN:-false}"
+  local report="${ROLE_CACHE_DIR}/task-review-report.json"
+
+  H1 "TASK-REVIEW-1: Closed Issue Completion Claims"
+  echo "  scope: recent ${limit} issues per repo; reopen=${reopen}; comment_open=${comment_open}"
+
+  TASK_REVIEW_LIMIT="${limit}" TASK_REVIEW_REOPEN="${reopen}" TASK_REVIEW_COMMENT_OPEN="${comment_open}" \
+    DOCS_DIR="${DOCS_DIR}" LIVEMASK_ROOT="${LIVEMASK_ROOT}" python3 - "${report}" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+out = Path(sys.argv[1])
+docs_dir = Path(os.environ["DOCS_DIR"])
+limit = int(os.environ.get("TASK_REVIEW_LIMIT", "30"))
+reopen_enabled = os.environ.get("TASK_REVIEW_REOPEN", "true").lower() == "true"
+comment_open = os.environ.get("TASK_REVIEW_COMMENT_OPEN", "false").lower() == "true"
+owner = "MyAiDevs"
+repos = [
+    "livemask-docs",
+    "livemask-ci-cd",
+    "livemask-backend",
+    "livemask-admin",
+    "livemask-app",
+    "livemask-nodeagent",
+    "livemask-job-service",
+    "livemask-website",
+]
+task_re = re.compile(r"\bTASK-[A-Z0-9][A-Z0-9-]{8,}\b")
+bad_claim_re = re.compile(
+    r"\b(unverified|not\s+verified|not\s+implemented|todo|blocked|skip|skipped|placeholder|"
+    r"manual\s+only|failed|failure|error|没有验证|未验证|未完成|占位)\b",
+    re.I,
+)
+good_evidence_re = re.compile(
+    r"\b(pass|passed|success|succeeded|green|origin/dev|dev merge|merged|commit|sha|"
+    r"go test|npm test|flutter test|check-docs|smoke|build|deploy|validated|verified)\b",
+    re.I,
+)
+marker_prefix = "<!-- livemask-task-review-reopen:"
+
+
+def run(cmd, timeout=40):
+    try:
+        p = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
+        return p.returncode, p.stdout.strip(), p.stderr.strip()
+    except Exception as exc:
+        return 124, "", str(exc)
+
+
+def read_json(path, default):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def normalize_task_ids(values):
+    out = set()
+    for value in values:
+        tid = str(value).strip().rstrip("-.,;:)]}")
+        if tid:
+            out.add(tid)
+    return out
+
+
+ledger = read_json(docs_dir / "docs/development/task-state-ledger.json", {"modules": []})
+review_dir = docs_dir / "docs/development/review-contracts"
+tasks_by_id = {}
+issues_to_tasks = {}
+for module in ledger.get("modules", []):
+    for task in module.get("tasks", []):
+        tid = str(task.get("task_id", "")).strip()
+        if not tid:
+            continue
+        tasks_by_id[tid] = task
+        issue = str(task.get("issue", "")).strip()
+        if issue:
+            for repo in repos:
+                short = repo.replace("livemask-", "")
+                patterns = [
+                    rf"{re.escape(owner)}/{re.escape(repo)}#(\d+)",
+                    rf"{re.escape(repo)}#(\d+)",
+                    rf"github\.com/{re.escape(owner)}/{re.escape(repo)}/issues/(\d+)",
+                    rf"\b{re.escape(short)}#(\d+)",
+                ]
+                for pattern in patterns:
+                    m = re.search(pattern, issue, re.I)
+                    if m:
+                        issues_to_tasks.setdefault((repo, int(m.group(1))), set()).add(tid)
+
+
+def task_doc_has_evidence(tid):
+    path = docs_dir / f"docs/development/tasks/{tid}.md"
+    if not path.exists():
+        return False, "missing task doc"
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    if not good_evidence_re.search(text):
+        return False, "task doc lacks validation/commit/merge evidence"
+    return True, "task doc evidence present"
+
+
+def validation_strong(task):
+    text = " ".join(str(task.get(k, "")) for k in ("validation", "notes", "completed_at", "dev_merge_sha", "origin_dev_sha"))
+    return len(text.strip()) >= 30 and bool(good_evidence_re.search(text))
+
+
+def review_contract_ok(tid):
+    path = review_dir / f"{tid}-review.json"
+    if not path.exists():
+        return False, "missing review contract"
+    data = read_json(path, {})
+    state = str(data.get("state", "")).lower()
+    verdicts = []
+    for round_data in data.get("rounds", []):
+        codex = round_data.get("codex") or {}
+        if codex.get("verdict"):
+            verdicts.append(str(codex.get("verdict")).lower())
+    if state not in ("closed", "complete", "completed") and "approved" not in verdicts:
+        return False, f"review contract not closed/approved (state={state or 'unknown'}, verdicts={verdicts or ['none']})"
+    return True, "review contract closed/approved"
+
+
+def issue_has_task_signal(issue, body, comments):
+    labels = [str((label or {}).get("name", "")).lower() for label in issue.get("labels", [])]
+    text = "\n".join([issue.get("title", ""), body or ""] + comments)
+    return bool(task_re.search(text)) or any("task" in label or "codex" in label or "claude" in label for label in labels)
+
+
+def dedup_marker(repo, number):
+    return f"{marker_prefix}{repo}#{number} -->"
+
+
+def maybe_comment_or_reopen(repo, number, state, defects, evidence, comments):
+    marker = dedup_marker(repo, number)
+    if any(marker in c for c in comments):
+        return "deduped"
+    if state == "CLOSED" and reopen_enabled:
+        body = "\n".join([
+            marker,
+            "Task Review reopened this issue because the completion evidence chain is incomplete.",
+            "",
+            "Evidence gaps:",
+            *[f"- {d}" for d in defects[:8]],
+            "",
+            "Checked evidence:",
+            *[f"- {e}" for e in evidence[:8]],
+            "",
+            "Required before closing again: task doc + ledger + review contract + local validation + dev merge/CI evidence must all agree.",
+        ])
+        run(["gh", "issue", "reopen", str(number), "--repo", f"{owner}/{repo}"], timeout=30)
+        rc, _, err = run(["gh", "issue", "comment", str(number), "--repo", f"{owner}/{repo}", "--body", body], timeout=30)
+        return "reopened" if rc == 0 else f"reopen_comment_failed:{err[:120]}"
+    if state == "OPEN" and comment_open:
+        body = "\n".join([
+            marker,
+            "Task Review found an incomplete evidence chain on this still-open issue.",
+            "",
+            *[f"- {d}" for d in defects[:8]],
+        ])
+        rc, _, err = run(["gh", "issue", "comment", str(number), "--repo", f"{owner}/{repo}", "--body", body], timeout=30)
+        return "commented" if rc == 0 else f"comment_failed:{err[:120]}"
+    return "recorded"
+
+
+def evaluate_issue(repo, issue):
+    number = int(issue["number"])
+    full_repo = f"{owner}/{repo}"
+    rc, raw, err = run([
+        "gh", "issue", "view", str(number), "--repo", full_repo,
+        "--json", "number,title,state,url,body,labels,comments,closedAt,updatedAt",
+    ])
+    if rc != 0:
+        return [{
+            "repo": repo,
+            "issue_number": number,
+            "issue_url": issue.get("url", ""),
+            "state": issue.get("state", "UNKNOWN"),
+            "task_ids": [],
+            "severity": "warning",
+            "defects": [f"could not load issue details: {err[:160]}"],
+            "evidence": ["gh issue view failed"],
+            "action": "recorded",
+        }]
+    detail = json.loads(raw)
+    body = detail.get("body") or ""
+    comments = [str(c.get("body", "")) for c in (detail.get("comments") or [])]
+    text = "\n".join([detail.get("title", ""), body] + comments)
+    linked_tasks = normalize_task_ids(task_re.findall(text))
+    linked_tasks.update(issues_to_tasks.get((repo, number), set()))
+
+    if detail.get("state") == "CLOSED" and not linked_tasks and not issue_has_task_signal(detail, body, comments):
+        return []
+
+    defects = []
+    evidence = []
+    if not linked_tasks:
+        defects.append("GitHub issue has task/agent signal but no TASK ID or ledger issue linkage")
+        evidence.append("no TASK-* reference in title/body/comments and no ledger issue match")
+
+    for tid in sorted(linked_tasks):
+        task = tasks_by_id.get(tid)
+        if not task:
+            defects.append(f"{tid} is referenced by issue but missing from task-state-ledger.json")
+            evidence.append(f"{tid}: no ledger entry")
+            continue
+        status = str(task.get("status", ""))
+        repo_field = str(task.get("repo", ""))
+        if repo_field and repo_field != repo and repo != "livemask-docs":
+            evidence.append(f"{tid}: ledger repo={repo_field}, issue repo={repo}")
+        if status not in ("completed", "completed_with_skip", "verified"):
+            defects.append(f"{tid} ledger status is {status or 'blank'}, not completed/verified")
+        else:
+            evidence.append(f"{tid}: ledger status={status}")
+        if not validation_strong(task):
+            defects.append(f"{tid} ledger validation evidence is missing or weak")
+        else:
+            evidence.append(f"{tid}: ledger validation has pass/commit/merge signal")
+        doc_ok, doc_msg = task_doc_has_evidence(tid)
+        evidence.append(f"{tid}: {doc_msg}")
+        if not doc_ok:
+            defects.append(f"{tid} {doc_msg}")
+        review_ok, review_msg = review_contract_ok(tid)
+        evidence.append(f"{tid}: {review_msg}")
+        if not review_ok:
+            defects.append(f"{tid} {review_msg}")
+
+    if detail.get("state") == "CLOSED" and bad_claim_re.search(text) and not any("accepted skip" in e.lower() for e in evidence):
+        defects.append("closed issue comments/body include unverified, skipped, failed, blocked, TODO, or placeholder signal")
+
+    if not defects:
+        return []
+
+    severity = "blocker" if detail.get("state") == "CLOSED" else "warning"
+    action = maybe_comment_or_reopen(repo, number, detail.get("state", "UNKNOWN"), defects, evidence, comments)
+    return [{
+        "repo": repo,
+        "issue_number": number,
+        "issue_url": detail.get("url", issue.get("url", "")),
+        "state": detail.get("state", "UNKNOWN"),
+        "title": detail.get("title", ""),
+        "task_ids": sorted(linked_tasks),
+        "severity": severity,
+        "defects": defects,
+        "evidence": evidence,
+        "action": action,
+    }]
+
+
+findings = []
+repo_errors = []
+for repo in repos:
+    rc, raw, err = run([
+        "gh", "issue", "list", "--repo", f"{owner}/{repo}", "--state", "all",
+        "--limit", str(limit), "--json", "number,title,state,url,labels,updatedAt,closedAt",
+    ])
+    if rc != 0:
+        repo_errors.append({"repo": repo, "error": err[:240]})
+        continue
+    try:
+        issues = json.loads(raw)
+    except Exception as exc:
+        repo_errors.append({"repo": repo, "error": f"json parse failed: {exc}"})
+        continue
+    for issue in issues:
+        findings.extend(evaluate_issue(repo, issue))
+
+report = {
+    "schema_version": 1,
+    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "limit_per_repo": limit,
+    "reopen_enabled": reopen_enabled,
+    "comment_open": comment_open,
+    "repos": repos,
+    "repo_errors": repo_errors,
+    "finding_count": len(findings),
+    "reopened_count": sum(1 for f in findings if f.get("action") == "reopened"),
+    "findings": findings,
+}
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+
+print(f"  report: {out}")
+print(f"  findings={len(findings)} reopened={report['reopened_count']} repo_errors={len(repo_errors)}")
+for err in repo_errors[:5]:
+    print(f"  repo_error {err['repo']}: {err['error']}")
+for f in findings[:10]:
+    tids = ",".join(f.get("task_ids") or ["NO_TASK"])
+    print(f"  [{f['severity'].upper()}] {f['repo']}#{f['issue_number']} {f['state']} action={f['action']} tasks={tids}")
+    for defect in f.get("defects", [])[:3]:
+        print(f"    - {defect}")
+PY
+
+  if [[ ! -f "${report}" ]]; then
+    record_finding "task-review" "blocker" "" "TASK-REVIEW" \
+      "task review report was not produced" \
+      "inspect gh auth/network and rerun task-review" \
+      "bash ${CI_CD_DIR}/scripts/claude-loop-role-engine.sh task-review"
+    finish_role "task-review" "report_missing"
+    return 0
+  fi
+
+  while IFS='|' read -r severity tid repo_issue action defect; do
+    [[ -z "${severity}" ]] && continue
+    local audit_cmd="bash ${CI_CD_DIR}/scripts/claude-loop-role-engine.sh task-review"
+    [[ -n "${tid}" ]] && audit_cmd="bash ${CI_CD_DIR}/scripts/claude-loop-role-engine.sh --closure-audit ${tid}"
+    record_finding "task-review" "${severity}" "${tid}" "TASK-REVIEW" \
+      "${repo_issue}: ${defect} (action=${action})" \
+      "reopen or keep open until ledger, task doc, review contract, validation, and CI/dev evidence agree" \
+      "${audit_cmd}"
+  done < <(python3 - "${report}" <<'PY'
+import json
+import sys
+
+d = json.load(open(sys.argv[1]))
+for f in d.get("findings", [])[:50]:
+    tids = f.get("task_ids") or [""]
+    tid = tids[0] if tids else ""
+    repo_issue = f"{f.get('repo')}#{f.get('issue_number')}"
+    defect = "; ".join(f.get("defects", [])[:3]).replace("|", "/")[:500]
+    print("|".join([f.get("severity", "warning"), tid, repo_issue, f.get("action", "recorded"), defect]))
+PY
+)
+
+  local count reopened errors
+  read -r count reopened errors <<< "$(python3 - "${report}" <<'PY'
+import json, sys
+d=json.load(open(sys.argv[1]))
+print(d.get("finding_count",0), d.get("reopened_count",0), len(d.get("repo_errors",[])))
+PY
+)"
+  [[ "${count}" -eq 0 ]] && OK "no closed/open issue evidence-chain defects found in reviewed window"
+  [[ "${count}" -gt 0 ]] && WARN "task-review found ${count} evidence-chain defect(s), reopened=${reopened}, repo_errors=${errors}"
+
+  H1 "TASK REVIEW complete."
+  finish_role "task-review" "findings=${count} reopened=${reopened} errors=${errors}"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # DEEP ANALYSIS: single-task deep dives (cross-cutting)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2272,6 +2643,7 @@ run_all() {
   role_product || true
   role_tech || true
   role_qa || true
+  role_task_review || true
 
   self_heal_clean_state
 
@@ -2324,7 +2696,7 @@ for f in findings[:10]:
   # Lark: aggregate summary card
   local total_findings; total_findings=$(wc -l < "${FINDINGS_FILE}" 2>/dev/null | tr -d ' ' || echo "0")
   lark_card_batch "Role Engine All — $(date -u +%H:%M)Z" \
-    "[{\"emoji\":\"📋\",\"label\":\"PM\",\"value\":\"${total_findings} findings\"},{\"emoji\":\"🎯\",\"label\":\"Product\",\"value\":\"MVP audit done\"},{\"emoji\":\"🔧\",\"label\":\"Tech\",\"value\":\"Swagger/DB/API check\"},{\"emoji\":\"🔍\",\"label\":\"QA\",\"value\":\"Evidence + bugs verified\"}]" 2>/dev/null || true
+    "[{\"emoji\":\"📋\",\"label\":\"PM\",\"value\":\"${total_findings} findings\"},{\"emoji\":\"🎯\",\"label\":\"Product\",\"value\":\"MVP audit done\"},{\"emoji\":\"🔧\",\"label\":\"Tech\",\"value\":\"Swagger/DB/API check\"},{\"emoji\":\"🔍\",\"label\":\"QA\",\"value\":\"Evidence + bugs verified\"},{\"emoji\":\"🧾\",\"label\":\"Task Review\",\"value\":\"GitHub evidence chain\"}]" 2>/dev/null || true
   set -e
 
   push_changes "role-engine: full cycle $(date -u +%Y-%m-%dT%H:%MZ)"
@@ -2386,6 +2758,12 @@ case "${ROLE}" in
     print_top_actions 3
     echo "  Machine-readable findings: ${FINDINGS_FILE}"
     ;;
+  task-review)
+    role_task_review
+    print_top_actions 3
+    echo "  Machine-readable findings: ${FINDINGS_FILE}"
+    echo "  Task review report: ${ROLE_CACHE_DIR}/task-review-report.json"
+    ;;
   all)               run_all;;
   --deep-review)     deep_review "${ARG2}";;
   --closure-audit)   closure_audit "${ARG2}";;
@@ -2398,6 +2776,7 @@ case "${ROLE}" in
     echo "    product  — Contract gaps, MVP progress, inbox processing"
     echo "    tech     — API/Swagger drift, DB migration safety, interface breakage"
     echo "    qa       — Evidence verification, bug triage, regression risk"
+    echo "    task-review — GitHub issue/comment + ledger/task-doc evidence-chain audit"
     echo "    all      — All roles + push changes"
     echo ""
     echo "  Deep dives (single task, full reasoning):"
