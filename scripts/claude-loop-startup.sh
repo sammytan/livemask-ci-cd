@@ -190,6 +190,27 @@ print(json.dumps({
 PY
 }
 
+verify_memory_write() {
+  local task_id="$1" repo="$2" summary="$3" context_path="$4"
+  local memory_result=""
+
+  memory_result="$(bash "${ADAPTER_LIB}" memory-add "startup" "${task_id}" "${repo}" "${summary}" "${context_path}" 2>&1)" || {
+    warn "memory write failed: ${memory_result}"
+    echo "  repair:         mkdir -p ${HOME}/.claude/role-cache && bash ${ADAPTER_LIB} memory-add startup ${task_id} ${repo} '<summary>' ${context_path}"
+    return 1
+  }
+
+  if ! bash "${ADAPTER_LIB}" memory-search "${task_id}" 3 >/dev/null 2>&1; then
+    warn "memory search failed after write; local memory is degraded"
+    echo "  memory_file:    ${HOME}/.claude/role-cache/project-memory.jsonl"
+    return 1
+  fi
+
+  ok "memory write verified"
+  echo "  memory_result:  ${memory_result}"
+  return 0
+}
+
 # ── Step 0: Read agent state ──────────────────────────────────────────────────
 read_agent_state() {
   header "Step 0: Agent State"
@@ -625,7 +646,7 @@ import json, sys
 d = json.load(sys.stdin)
 print(f\"startup context: issue={d.get('issue') or 'none'} coordination={d.get('coordination_decision','unknown')} next={d.get('coordination_next_actor','unknown')} docs_hit_groups={d.get('knowledge_hit_groups',0)} memory_matches={d.get('memory_matches',0)} findings={d.get('findings',0)} planner_rows={d.get('planner_rows',0)} terms={','.join(d.get('knowledge_terms',[])[:6])}\")
 " 2>/dev/null || echo "startup context generated")
-    bash "${ADAPTER_LIB}" memory-add "startup" "${task_id}" "${repo}" "${memory_summary}" "${intelligence_path}" >/dev/null 2>&1 || true
+    verify_memory_write "${task_id}" "${repo}" "${memory_summary}" "${intelligence_path}" || true
     echo "  memory:          bash ${ADAPTER_LIB} memory-search ${task_id}"
   else
     warn "startup intelligence pack unavailable"
@@ -1018,7 +1039,8 @@ decision_summary() {
     echo "  1. Read the stale ledger entries listed in preflight above"
     echo "  2. Update task-state-ledger.json and/or task doc on a task/* branch"
     echo "  3. Run bash scripts/check-docs.sh && git diff --check"
-    echo "  4. Merge through dev-merge-guard.sh"
+    echo "  4. Merge through dev-merge-guard.sh:"
+    echo "     bash ${CI_CD_DIR}/scripts/dev-merge-guard.sh --repo ${DOCS_DIR} --task-branch <task/branch> --task-id <TASK-ID> --push"
     echo "  5. DO NOT report Clean/idle while RECONCILE_REQUIRED signals remain"
   fi
 

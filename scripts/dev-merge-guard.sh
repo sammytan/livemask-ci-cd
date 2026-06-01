@@ -10,6 +10,7 @@ usage() {
   cat <<'EOF'
 Usage:
   bash scripts/dev-merge-guard.sh --repo PATH --task-branch BRANCH --task-id TASK-XXXX [options]
+  bash scripts/dev-merge-guard.sh task/branch-name
 
 Required:
   --repo PATH              Target repository path.
@@ -28,6 +29,8 @@ Options:
 
 Rules:
   - Merges exactly one task branch.
+  - The legacy one-argument form infers --repo from cwd and --task-id from
+    changed docs/development/tasks/TASK-*.md files or the branch commit subject.
   - Refuses dirty worktrees and in-progress merge/rebase/cherry-pick states.
   - Creates rescue/<repo>-dev-before-<TASK>-<timestamp> from origin/dev.
   - Tests merge on integration/<TASK>-<timestamp> before touching dev.
@@ -52,6 +55,14 @@ push_dev=false
 dry_run=false
 allow_local_branch=false
 validation_cmds=()
+
+legacy_single_branch=""
+if [[ $# -eq 1 && "${1:-}" == task/* ]]; then
+  legacy_single_branch="$1"
+  repo="$(pwd -P)"
+  task_branch="${legacy_single_branch}"
+  push_dev=true
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -87,6 +98,13 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
+    task/*)
+      if [[ -n "${legacy_single_branch}" && "$1" == "${legacy_single_branch}" ]]; then
+        shift
+      else
+        die "positional task branch is only supported as the sole argument; prefer --repo PATH --task-branch BRANCH --task-id TASK-XXXX --push"
+      fi
+      ;;
     *)
       die "unknown argument: $1"
       ;;
@@ -95,13 +113,49 @@ done
 
 [[ -n "${repo}" ]] || die "--repo is required"
 [[ -n "${task_branch}" ]] || die "--task-branch is required"
-[[ -n "${task_id}" ]] || die "--task-id is required"
-[[ "${task_id}" =~ ^TASK-[A-Z0-9]+(-[A-Z0-9]+)*$ ]] || die "--task-id must look like TASK-XXXX"
 [[ "${task_branch}" != *","* && "${task_branch}" != *" "* ]] || die "batch branch lists are forbidden; merge one task branch at a time"
 [[ "${task_branch}" != "dev" && "${task_branch}" != "main" ]] || die "refusing to merge protected branch '${task_branch}' as a task branch"
 
 repo="$(cd -- "${repo}" && pwd -P)"
 [[ -d "${repo}/.git" ]] || die "not a git repository: ${repo}"
+
+git_in_repo() {
+  git -C "${repo}" "$@"
+}
+
+infer_task_id_from_branch() {
+  local branch="$1"
+  local inferred=""
+
+  inferred="$(git_in_repo diff --name-only origin/dev..."${branch}" 2>/dev/null \
+    | sed -n 's#^docs/development/tasks/\(TASK-[A-Z0-9-]*\)\.md$#\1#p' \
+    | head -1 || true)"
+  if [[ -n "${inferred}" ]]; then
+    echo "${inferred}"
+    return 0
+  fi
+
+  inferred="$(git_in_repo log -1 --format=%s "${branch}" 2>/dev/null \
+    | grep -Eo 'TASK-[A-Z0-9]+(-[A-Z0-9]+)*' \
+    | head -1 || true)"
+  if [[ -n "${inferred}" ]]; then
+    echo "${inferred}"
+    return 0
+  fi
+
+  return 1
+}
+
+if [[ -z "${task_id}" && -n "${legacy_single_branch}" ]]; then
+  git_in_repo fetch origin dev >/dev/null 2>&1 || true
+  git_in_repo fetch origin "${task_branch}" >/dev/null 2>&1 || true
+  task_id="$(infer_task_id_from_branch "origin/${task_branch}" 2>/dev/null || infer_task_id_from_branch "${task_branch}" 2>/dev/null || true)"
+  [[ -n "${task_id}" ]] || die "legacy one-argument form could not infer TASK-ID; rerun with --task-id TASK-XXXX"
+  info "legacy invocation detected; inferred --repo ${repo} --task-branch ${task_branch} --task-id ${task_id} --push"
+fi
+
+[[ -n "${task_id}" ]] || die "--task-id is required"
+[[ "${task_id}" =~ ^TASK-[A-Z0-9]+(-[A-Z0-9]+)*$ ]] || die "--task-id must look like TASK-XXXX"
 
 repo_name="$(basename "${repo}")"
 timestamp="$(date +%Y%m%d%H%M%S)"
@@ -109,10 +163,6 @@ safe_task_id="$(echo "${task_id}" | tr '[:upper:]' '[:lower:]')"
 safe_branch="$(echo "${task_branch}" | tr '/:@ ' '----' | tr -cd 'A-Za-z0-9._-')"
 rescue_branch="rescue/${repo_name}-dev-before-${safe_task_id}-${timestamp}"
 integration_branch="integration/${safe_task_id}-${safe_branch}-${timestamp}"
-
-git_in_repo() {
-  git -C "${repo}" "$@"
-}
 
 ensure_no_operation_in_progress() {
   [[ ! -e "$(git_in_repo rev-parse --git-path MERGE_HEAD)" ]] || die "merge in progress in ${repo}"

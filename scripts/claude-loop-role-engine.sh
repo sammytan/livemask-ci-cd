@@ -1011,7 +1011,7 @@ Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
 
   echo ""
   echo "  Branch '${br}' created with ${changes} changes."
-  echo "  To merge: bash ${CI_CD_DIR}/scripts/dev-merge-guard.sh ${br}"
+  echo "  To merge: bash ${CI_CD_DIR}/scripts/dev-merge-guard.sh --repo ${DOCS_DIR} --task-branch ${br} --task-id ${tid} --push"
   echo "  Or manually: git checkout dev && git merge ${br} --no-edit && git push origin dev"
   echo ""
   WARN "Changes saved to branch but NOT merged to dev. Merge requires explicit action."
@@ -1304,9 +1304,15 @@ print('auto-reconciled: ${tid} → ${target_status}')
     git commit -m "docs: auto-reconcile ${auto_count} task(s) to completed (dev merge evidence)
 $(echo ${AUTO_FIXED_TASKS} | tr ' ' '\n' | sed 's/^/  - /')
 Co-Authored-By: Claude Role Engine <noreply@anthropic.com>" 2>/dev/null
-    # Merge to dev via dev-merge-guard
-    if bash "${CI_CD_DIR}/scripts/dev-merge-guard.sh" "${auto_br}" 2>/dev/null; then
-      git push origin dev 2>/dev/null && OK "auto-pushed ${auto_count} reconciled task(s) via task branch flow" || WARN "push failed"
+    # Merge to dev via dev-merge-guard. The guard owns the final dev push.
+    local first_auto_task
+    first_auto_task="$(echo "${AUTO_FIXED_TASKS}" | awk '{print $1}')"
+    if bash "${CI_CD_DIR}/scripts/dev-merge-guard.sh" \
+      --repo "${DOCS_DIR}" \
+      --task-branch "${auto_br}" \
+      --task-id "${first_auto_task}" \
+      --push 2>/dev/null; then
+      OK "auto-pushed ${auto_count} reconciled task(s) via task branch flow"
     else
       WARN "dev-merge-guard failed — changes saved on ${auto_br}, manual merge needed"
     fi
