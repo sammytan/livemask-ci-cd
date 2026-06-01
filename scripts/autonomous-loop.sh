@@ -2,7 +2,7 @@
 # autonomous-loop.sh — Continuous autonomous development daemon v2.
 # Integrates adapter-lib.sh shared knowledge + GitHub issues/comments.
 # Every sleep is labeled with WHY. Never stops unless explicitly killed.
-set -euo pipefail  # Top-level safety; overridden by set +e in loop
+# Daemon MUST NEVER exit on error. All error handling is explicit.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"

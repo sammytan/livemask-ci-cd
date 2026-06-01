@@ -27,7 +27,7 @@ for repo in "${REPOS[@]}"; do
         git branch -D "${br}" 2>/dev/null && cleaned=$((cleaned + 1)) || true
       else
         # Unmerged branch — check age
-        local age_days; age_days=$(git log -1 --format="%ct" "${br}" 2>/dev/null | python3 -c "import sys,time; print(int((time.time()-int(sys.stdin.read().strip()))/86400))" 2>/dev/null || echo "0")
+        age_days; age_days=$(git log -1 --format="%ct" "${br}" 2>/dev/null | python3 -c "import sys,time; print(int((time.time()-int(sys.stdin.read().strip()))/86400))" 2>/dev/null || echo "0")
         if [[ "${age_days}" -gt 7 ]]; then
           echo "  [OLD] ${repo}: ${br} (${age_days}d old, unmerged) — preserving"
           preserved=$((preserved + 1))
