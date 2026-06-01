@@ -1,0 +1,30 @@
+name: Webhook Notify
+
+on:
+  workflow_run:
+    workflows: ["Docs Check", "Backend CI", "Admin CI", "App CI", "NodeAgent CI", "Job Service CI", "Website CI", "CI/CD Syntax Guard", "Dev Runtime Deploy"]
+    types: [completed]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send webhook
+        run: |
+          curl -sS -X POST "${{ secrets.WEBHOOK_URL }}/github" \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Token: ${{ secrets.WEBHOOK_TOKEN }}" \
+            -d "$(cat <<EVENT
+          {
+            "action": "${{ github.event.action }}",
+            "workflow_run": {
+              "name": "${{ github.event.workflow_run.name }}",
+              "conclusion": "${{ github.event.workflow_run.conclusion }}",
+              "html_url": "${{ github.event.workflow_run.html_url }}"
+            },
+            "repository": {
+              "name": "${{ github.event.repository.name }}"
+            }
+          }
+          EVENT
+          )"
