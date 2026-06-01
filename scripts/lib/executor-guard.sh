@@ -264,6 +264,15 @@ executor_safe_merge() {
 
   if bash "${CI_CD_DIR}/scripts/dev-merge-guard.sh" --repo "${repo_dir}" --task-branch "${branch:-$(git branch --show-current)}" --task-id "${tid}" --push 2>&1; then
     echo "  [MERGE] Successfully merged to dev"
+    # Wait 30s for CI to start, then check status
+    sleep 30
+    local ci_status; ci_status=$(gh run list --repo "MyAiDevs/${repo}" --limit 1 --json conclusion,status 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[0].get(\"conclusion\",\"\") if d else \"\")" 2>/dev/null || echo "")
+    if [[ "${ci_status}" == "failure" ]]; then
+      echo "  [MERGE] CI failed after merge — reverting"
+      git revert HEAD --no-edit 2>/dev/null && git push origin dev 2>/dev/null
+      echo "  [MERGE] Reverted — CI failure on origin/dev"
+      return 1
+    fi
     return 0
   else
     # FIX 6a: Merge conflict recovery
