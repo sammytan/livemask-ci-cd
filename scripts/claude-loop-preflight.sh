@@ -26,7 +26,9 @@ gh_retry() {
   local attempt rc out
   out=""
   for attempt in 1 2 3; do
-    if out="$("$@" 2>&1)"; then
+    out="$("$@" 2>&1)"
+    rc=$?
+    if [[ "${rc}" -eq 0 ]]; then
       if echo "${out}" | grep -qiE "error connecting to api\.github\.com|check your internet connection|githubstatus\.com"; then
         rc=1
         [[ "${attempt}" -lt 3 ]] && sleep 2
@@ -35,7 +37,6 @@ gh_retry() {
       printf '%s' "${out}"
       return 0
     fi
-    rc=$?
     [[ "${attempt}" -lt 3 ]] && sleep 2
   done
   printf '%s' "${out}"
@@ -267,8 +268,16 @@ echo "--- Channel 4: GitHub Issues ---"
 for ISSUE_REPO in "MyAiDevs/livemask-docs:68" "MyAiDevs/livemask-ci-cd:14"; do
   REPO="${ISSUE_REPO%%:*}"
   NUM="${ISSUE_REPO##*:}"
+  unset ISSUE_RC
   ISSUE_OUT=$(gh_retry gh api "repos/${REPO}/issues/${NUM}" --jq '.state') || ISSUE_RC=$?
   ISSUE_RC=${ISSUE_RC:-0}
+  if [[ "${ISSUE_RC}" -ne 0 || ! "${ISSUE_OUT:-}" =~ ^(open|closed|OPEN|CLOSED)$ ]]; then
+    if ISSUE_OUT=$(gh_retry gh issue view "${NUM}" --repo "${REPO}" --json state --jq '.state'); then
+      ISSUE_RC=0
+    else
+      ISSUE_RC=$?
+    fi
+  fi
   ISSUE_STATE="$(echo "${ISSUE_OUT:-UNKNOWN}" | tr '[:lower:]' '[:upper:]')"
   # #14 and #68 are PERMANENT control channels (per supervisor rules Section 1A).
   # They are designed to stay OPEN indefinitely. Being OPEN is normal state,
@@ -292,6 +301,11 @@ for ISSUE_REPO in "MyAiDevs/livemask-docs:68" "MyAiDevs/livemask-ci-cd:14"; do
   COMMENT_INFO=$(gh_retry gh api "repos/${REPO}/issues/${NUM}/comments" --jq '
     [.[-3:][] | {id: .id, author: .user.login, created: .created_at, prefix: .body[0:120]}]
   ' 2>/dev/null || echo '[]')
+  if ! echo "${COMMENT_INFO}" | python3 -m json.tool >/dev/null 2>&1; then
+    COMMENT_INFO=$(gh_retry gh issue view "${NUM}" --repo "${REPO}" --json comments --jq '
+      [.comments[-3:][] | {id: .id, author: .author.login, created: .createdAt, prefix: .body[0:120]}]
+    ' 2>/dev/null || echo '[]')
+  fi
   COMMENT_COUNT=$(echo "${COMMENT_INFO}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
   echo "  ${REPO}#${NUM}: ${COMMENT_COUNT} recent comment(s)"
 
@@ -316,6 +330,9 @@ done
 echo "--- Channel 5: CI/CD ---"
 for CI_REPO in "MyAiDevs/livemask-docs" "MyAiDevs/livemask-ci-cd" "MyAiDevs/livemask-backend" "MyAiDevs/livemask-admin"; do
   CI_HEAD_SHA=$(gh_retry gh api "repos/${CI_REPO}/branches/dev" --jq '.commit.sha' 2>/dev/null || true)
+  if [[ -z "${CI_HEAD_SHA}" || ! "${CI_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+    CI_HEAD_SHA=$(gh_retry gh run list --repo "${CI_REPO}" --branch dev --limit 1 --json headSha --jq '.[0].headSha // ""' 2>/dev/null || true)
+  fi
   if [[ -z "${CI_HEAD_SHA}" || ! "${CI_HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
     block "CI: ${CI_REPO} could not determine dev head"
     continue
