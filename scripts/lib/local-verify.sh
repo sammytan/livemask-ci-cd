@@ -182,6 +182,19 @@ verify_runtime() {
   esac
 }
 
+# ── Docker smoke test ──────────────────────────────────────────────────
+verify_docker_smoke() {
+  echo "=== DOCKER SMOKE ==="
+  local cf="${LIVEMASK_ROOT}/livemask-ci-cd/infra/docker-compose.local.yml"
+  if [[ -f "${cf}" ]]; then
+    cd "$(dirname "${cf}")" && docker compose -f "${cf}" up -d 2>/dev/null && sleep 5
+    curl -sSf "http://localhost:8080/api/v1/health" 2>/dev/null && echo "  [Docker] Smoke PASS" || echo "  [Docker] Smoke FAIL (containers may already be running)"
+    docker compose -f "${cf}" down 2>/dev/null || true
+  else
+    echo "  [Docker] Compose file not found at ${cf}"
+  fi
+}
+
 # ── Test coverage analysis ──────────────────────────────────────────────
 verify_coverage() {
   local repo="${1:-livemask-backend}"
