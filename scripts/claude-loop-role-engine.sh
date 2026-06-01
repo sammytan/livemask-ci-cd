@@ -14,7 +14,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/lark-card.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/health-check.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/reasoning-engine.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/github-ops.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/memory-fast.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/local-verify.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
+memory_init 2>/dev/null || true
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
 DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
@@ -2896,6 +2901,37 @@ for f in findings[:10]:
   echo -e "  Machine-readable findings: ${FINDINGS_FILE}"
   echo "  Decision summary: ${ROLE_CACHE_DIR}/decision-summary.json"
   echo "  Consume: bash ${ADAPTER_LIB} findings-search"
+
+  # ── Model Reasoning Handoff ──────────────────────────────────────────
+  # The role engine has collected data. Now hand off to the model for reasoning.
+  # The model MUST read the findings and decision summary, then:
+  # 1. Reason about root causes (WHY each finding exists)
+  # 2. Prioritize actions (what to fix first)
+  # 3. Execute fixes (not just report)
+  echo ""
+  echo -e "${BOLD}${CYAN}═══ Model Reasoning Handoff ═══${RESET}"
+  echo ""
+  echo "  The role engine has finished data collection."
+  echo "  The MODEL must now reason about these findings and take action."
+  echo ""
+  echo "  Quick reasoning commands:"
+  echo "    source ${CI_CD_DIR}/scripts/lib/reasoning-engine.sh"
+  echo "    reasoning_startup_decision    # What to work on and why"
+  echo "    reasoning_flow_diagnosis       # Why is work not flowing?"
+  echo "    reasoning_self_heal            # What can be auto-fixed?"
+  echo "    reasoning_local_verify <repo>   # Verify a repo locally"
+  echo "    reasoning_github_context <repo> # Get GitHub context"
+  echo ""
+  echo "  Memory commands:"
+  echo "    memory_save_decision <ctx> <decision> <reasoning>"
+  echo "    memory_search <query>"
+  echo "    memory_recent_decisions 24"
+  echo "    memory_learned_patterns"
+  echo ""
+
+  # Auto-save cycle memory for future retrieval
+  local cycle_summary; cycle_summary="role-engine cycle $(date -u +%Y-%m-%dT%H:%MZ): ${total_findings} findings, docs_head=${NOW_SHA}"
+  memory_put "role-engine-cycle-$(date -u +%Y%m%d-%H%M%S)" "cycle" "${cycle_summary}" "role-engine,cycle,auto" 2>/dev/null || true
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
