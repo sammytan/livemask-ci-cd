@@ -64,3 +64,19 @@ skill_update_config() {
 }
 
 echo "Skill bridge loaded. Commands: skill_code_review, skill_security_review, skill_verify, skill_run, skill_loop, skill_update_config"
+
+# ── Enhanced security scan with gosec/npm audit ─────────────────────────
+skill_security_scan() {
+  local repo="${1:-livemask-backend}"
+  echo "=== SECURITY SCAN: ${repo} ==="
+  case "${repo}" in
+    livemask-backend|livemask-nodeagent|livemask-job-service)
+      if command -v gosec &>/dev/null; then
+        cd "${LIVEMASK_ROOT}/${repo}" && gosec -quiet ./... 2>/dev/null | head -10
+      else
+        echo "  (gosec not installed — run: go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest)"
+      fi ;;
+    livemask-admin|livemask-website)
+      cd "${LIVEMASK_ROOT}/${repo}" && npm audit --production 2>/dev/null | grep -E "high|critical" | head -5 || echo "  No high/critical vulnerabilities" ;;
+  esac
+}

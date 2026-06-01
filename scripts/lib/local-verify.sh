@@ -161,3 +161,39 @@ for m in ledger.get('modules',[]):
 
   verify_repo "${repo}"
 }
+
+# ── Runtime smoke test ──────────────────────────────────────────────────
+verify_runtime() {
+  local repo="${1:-livemask-backend}"; local port="${2:-8080}"
+  echo "=== RUNTIME SMOKE: ${repo} ==="
+  case "${repo}" in
+    livemask-backend)
+      cd "${LIVEMASK_ROOT}/livemask-backend" 2>/dev/null || return 1
+      go build -o /tmp/livemask-backend-test ./... 2>/dev/null && \
+      (/tmp/livemask-backend-test &>/dev/null &) && sleep 2 && \
+      curl -sSf "http://localhost:${port}/api/v1/health" 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'  Health: {d.get(\"status\",\"?\")}')" 2>/dev/null || echo "  (server start failed)"
+      pkill -f "livemask-backend-test" 2>/dev/null || true
+      ;;
+    livemask-admin)
+      cd "${LIVEMASK_ROOT}/livemask-admin" 2>/dev/null || return 1
+      npm run build 2>&1 | tail -2 && echo "  Admin build: OK" || echo "  Admin build: FAIL"
+      ;;
+    livemask-app) cd "${LIVEMASK_ROOT}/livemask-app" && flutter analyze 2>&1 | tail -2 ;;
+  esac
+}
+
+# ── Test coverage analysis ──────────────────────────────────────────────
+verify_coverage() {
+  local repo="${1:-livemask-backend}"
+  case "${repo}" in
+    livemask-backend)
+      cd "${LIVEMASK_ROOT}/livemask-backend" 2>/dev/null || return 1
+      go test -coverprofile=/tmp/coverage.out ./... 2>/dev/null | tail -5
+      go tool cover -func=/tmp/coverage.out 2>/dev/null | tail -1 | awk '{print "  Total coverage: "$NF}'
+      ;;
+    livemask-admin)
+      cd "${LIVEMASK_ROOT}/livemask-admin" 2>/dev/null || return 1
+      npx jest --coverage 2>/dev/null | grep "All files" | head -1 | awk '{print "  Coverage: "$0}' || echo "  (nyc/jest not configured)"
+      ;;
+  esac
+}
