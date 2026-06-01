@@ -33,6 +33,40 @@ COORDINATION_NEXT_ACTOR="claude-role-engine"
 COORDINATION_STATUS_FILE="/tmp/claude/role-engine-coordination-status.json"
 ROLE="${1:-pm}"
 ARG2="${2:-}"
+ROLE_ENGINE_START_DIR="$(pwd)"
+SELF_SCRIPT="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+SELF_ARGS=("$@")
+SELF_CI_CD_HEAD_AT_START="$(git -C "${CI_CD_DIR}" rev-parse HEAD 2>/dev/null || echo "")"
+
+hot_reload_if_ci_cd_updated() {
+  local reason="${1:-ci-cd sync}"
+  local current_head changed
+
+  current_head="$(git -C "${CI_CD_DIR}" rev-parse HEAD 2>/dev/null || echo "")"
+  [[ -z "${SELF_CI_CD_HEAD_AT_START}" || -z "${current_head}" ]] && return 0
+  [[ "${current_head}" == "${SELF_CI_CD_HEAD_AT_START}" ]] && return 0
+
+  changed="$(git -C "${CI_CD_DIR}" diff --name-only "${SELF_CI_CD_HEAD_AT_START}" "${current_head}" -- \
+    scripts/claude-loop-role-engine.sh \
+    scripts/claude-loop-startup.sh \
+    scripts/lib \
+    scripts/event-adapters/lib/adapter-lib.sh 2>/dev/null | head -1 || true)"
+  [[ -z "${changed}" ]] && return 0
+
+  if [[ "${CLAUDE_LOOP_HOT_RELOADED:-}" == "role-engine:${current_head}" ]]; then
+    echo "  [HOT-RELOAD] role-engine already attempted for ${current_head:0:7}; continuing"
+    return 0
+  fi
+
+  echo ""
+  echo "  [HOT-RELOAD] role-engine code changed during ${reason}: ${SELF_CI_CD_HEAD_AT_START:0:7} -> ${current_head:0:7}"
+  echo "  changed: ${changed}"
+  echo "  exec: bash ${SELF_SCRIPT} ${SELF_ARGS[*]:-}"
+  export CLAUDE_LOOP_HOT_RELOADED="role-engine:${current_head}"
+  cd "${ROLE_ENGINE_START_DIR}" 2>/dev/null || true
+  trap - EXIT
+  exec bash "${SELF_SCRIPT}" "${SELF_ARGS[@]}"
+}
 
 # ── Workspace guard: NEVER leave the working tree dirty ──────────────────────
 # Trap EXIT ensures cleanup runs even if the script crashes mid-cycle
@@ -856,6 +890,7 @@ print(f'Total findings: {len(findings)} (${FINDINGS_FILE})')
 sync_all() {
   cd "${DOCS_DIR}" && git pull --ff-only origin dev 2>/dev/null || true
   cd "${CI_CD_DIR}" && git pull --ff-only origin dev 2>/dev/null || true
+  hot_reload_if_ci_cd_updated "sync_all"
   NOW_SHA=$(git -C "${DOCS_DIR}" rev-parse --short HEAD 2>/dev/null || echo "?")
   NOW_SHA_FULL=$(git -C "${DOCS_DIR}" rev-parse HEAD 2>/dev/null || echo "")
 }

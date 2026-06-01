@@ -22,6 +22,9 @@ AGENT_STATE="${LIVEMASK_ROOT}/.claude/agent-state.json"
 ADAPTER_LIB="${CI_CD_DIR}/scripts/event-adapters/lib/adapter-lib.sh"
 
 MODE="${1:-full}"
+SELF_SCRIPT="${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"
+SELF_ARGS=("$@")
+SELF_CI_CD_HEAD_AT_START="$(git -C "${CI_CD_DIR}" rev-parse HEAD 2>/dev/null || echo "")"
 COORDINATION_DECISION="proceed"
 COORDINATION_NEXT_ACTOR="claude-startup"
 COORDINATION_STATUS_FILE="/tmp/claude/startup-coordination-status.json"
@@ -53,6 +56,35 @@ ok()      { echo -e "  ${GREEN}[OK]${RESET} $*"; }
 warn()    { echo -e "  ${YELLOW}[WARN]${RESET} $*"; }
 fail()    { echo -e "  ${RED}[FAIL]${RESET} $*"; }
 info()    { echo -e "  ${CYAN}[..]${RESET} $*"; }
+
+hot_reload_if_ci_cd_updated() {
+  local reason="${1:-ci-cd sync}"
+  local current_head changed
+
+  current_head="$(git -C "${CI_CD_DIR}" rev-parse HEAD 2>/dev/null || echo "")"
+  [[ -z "${SELF_CI_CD_HEAD_AT_START}" || -z "${current_head}" ]] && return 0
+  [[ "${current_head}" == "${SELF_CI_CD_HEAD_AT_START}" ]] && return 0
+
+  changed="$(git -C "${CI_CD_DIR}" diff --name-only "${SELF_CI_CD_HEAD_AT_START}" "${current_head}" -- \
+    scripts/claude-loop-startup.sh \
+    scripts/claude-loop-role-engine.sh \
+    scripts/lib \
+    scripts/event-adapters/lib/adapter-lib.sh 2>/dev/null | head -1 || true)"
+  [[ -z "${changed}" ]] && return 0
+
+  if [[ "${CLAUDE_LOOP_HOT_RELOADED:-}" == "startup:${current_head}" ]]; then
+    warn "hot reload already attempted for startup at ${current_head:0:7}; continuing"
+    return 0
+  fi
+
+  echo ""
+  echo -e "  ${BOLD}${GREEN}[HOT-RELOAD]${RESET} startup code changed during ${reason}: ${SELF_CI_CD_HEAD_AT_START:0:7} → ${current_head:0:7}"
+  echo "  changed: ${changed}"
+  echo "  exec: bash ${SELF_SCRIPT} ${SELF_ARGS[*]:-}"
+  export CLAUDE_LOOP_HOT_RELOADED="startup:${current_head}"
+  cd "${STARTUP_START_DIR}" 2>/dev/null || true
+  exec bash "${SELF_SCRIPT}" "${SELF_ARGS[@]}"
+}
 
 collect_startup_intelligence() {
   local task_id="$1" repo="$2"
@@ -482,6 +514,7 @@ run_recovery() {
   if git switch dev 2>/dev/null && git pull --ff-only origin dev 2>/dev/null; then
     CI_CD_HEAD=$(git rev-parse --short HEAD)
     ok "ci-cd/dev at ${CI_CD_HEAD}"
+    hot_reload_if_ci_cd_updated "recovery sync"
   else
     warn "ci-cd/dev sync failed — running with local scripts, may miss updates"
   fi
@@ -948,7 +981,10 @@ active_idle_poll() {
 
   local baseline_sha
   baseline_sha=$(git -C "${DOCS_DIR}" ls-remote origin dev | awk '{print $1}')
-  echo "  baseline: ${baseline_sha:0:7}"
+  local baseline_ci_sha
+  baseline_ci_sha=$(git -C "${CI_CD_DIR}" ls-remote origin dev 2>/dev/null | awk '{print $1}')
+  echo "  docs baseline:  ${baseline_sha:0:7}"
+  echo "  ci-cd baseline: ${baseline_ci_sha:0:7}"
 
   while [[ "${cycle}" -lt "${max_cycles}" ]]; do
     sleep "${poll_seconds}"
@@ -956,7 +992,18 @@ active_idle_poll() {
 
     local current_sha
     current_sha=$(git -C "${DOCS_DIR}" ls-remote origin dev 2>/dev/null | awk '{print $1}')
-    [[ -z "${current_sha}" ]] && continue
+    local current_ci_sha
+    current_ci_sha=$(git -C "${CI_CD_DIR}" ls-remote origin dev 2>/dev/null | awk '{print $1}')
+    [[ -z "${current_sha}" && -z "${current_ci_sha}" ]] && continue
+
+    if [[ -n "${current_ci_sha}" && -n "${baseline_ci_sha}" && "${current_ci_sha}" != "${baseline_ci_sha}" ]]; then
+      echo ""
+      echo -e "  ${BOLD}${GREEN}[WAKE] ci-cd origin/dev changed: ${baseline_ci_sha:0:7} → ${current_ci_sha:0:7}${RESET}"
+      cd "${CI_CD_DIR}" && git switch dev >/dev/null 2>&1 && git pull --ff-only origin dev 2>/dev/null
+      hot_reload_if_ci_cd_updated "idle monitor ci-cd update"
+      baseline_ci_sha="${current_ci_sha}"
+      echo "  (ci-cd changed outside startup dependencies, continuing to poll)"
+    fi
 
     if [[ "${current_sha}" != "${baseline_sha}" ]]; then
       echo ""
@@ -966,6 +1013,7 @@ active_idle_poll() {
       # Pull new state
       cd "${DOCS_DIR}" && git pull --ff-only origin dev 2>/dev/null
       cd "${CI_CD_DIR}" && git pull --ff-only origin dev 2>/dev/null
+      hot_reload_if_ci_cd_updated "idle monitor docs wake"
 
       # Re-run preflight to check for new work
       local new_rc=0
