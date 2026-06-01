@@ -1509,6 +1509,12 @@ else: print(state, 'no_verdict')
     else
       ASK "→ No review contract exists — completion without review is a PROCESS_DEFECT"
       NEXT "Action: create review contract retroactively, mark task as evidence_missing until reviewed"
+      # Skip protected tasks — Codex must not reconcile these
+      is_protected=
+      if [[ "" == "yes" ]]; then
+        echo "  [PM-2] SKIP protected task  — Codex must not reconcile"
+        continue
+      fi
       record_finding "pm" "warning" "${tid}" "PM-2" "doc/ledger conflict without review contract" "create review contract or reconcile ledger" ""
     fi
 
@@ -1521,6 +1527,13 @@ else: print(state, 'no_verdict')
     local target_status=""
     local issue_state=""
 
+    # Rule 0: NEVER reconcile protected tasks (assigned to Claude executor)
+    is_protected=0
+    python3 -c "import json;l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'));exec(\"for m in l['modules']:\n for t in m['tasks']:\n  if t['task_id']=='${tid}' and 'PROTECTED' in t.get('notes',''): print(1);break\")" 2>/dev/null | grep -q 1 && is_protected=1
+    if [[ ${is_protected} -eq 1 ]]; then
+      echo "  [PM-2] SKIP protected task ${tid}"
+      continue
+    fi
     # Rule 1: Review contract approved → sync both to completed
     if [[ "${rstate:-}" == "approved" || "${verdict:-}" == "approved" ]]; then
       target_status="completed"
