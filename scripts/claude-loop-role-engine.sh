@@ -1346,10 +1346,12 @@ for s,c in statuses.most_common(8): print(f'{s}: {c}')
       echo "      status distribution:"
       echo "${status_dist}" | while read -r line; do echo "        ${line}"; done
 
-      NEXT "Action: if MVP complete → mark milestone. If tasks stuck → diagnose each stuck status. If no tasks → trigger Product decomposition."
-      record_finding "pm" "warning" "" "PM-3" "dispatch queue empty (candidate_count=0)" "run product decomposition or audit backlog" "bash scripts/claude-loop-role-engine.sh product"
-      ACT "PM-3: queue empty; direct auto-create is disabled. Codex must decompose and dispatch canonical tasks."
-      local gap_info; gap_info=$(python3 -c "
+      NEXT "Action: if MVP complete → mark milestone. If tasks stuck → diagnose each stuck status. If no tasks → self-decompose from contracts."
+      record_finding "pm" "warning" "" "PM-3" "dispatch queue empty (candidate_count=0)" "self-decompose from Ready contracts" "bash scripts/claude-loop-role-engine.sh product"
+      ACT "PM-3: queue empty — self-decomposing from Ready contracts (task branch flow, no direct commits)"
+      # Use auto_create_task() which follows proper task/* branch → dev merge → push flow
+      # Dedup: auto_create_task checks existing TASK IDs in ledger, no duplicate creation
+      python3 -c "
 import json, re
 from pathlib import Path
 docs = Path('${DOCS_DIR}')
@@ -1358,28 +1360,44 @@ all_tasks = set()
 for m in ledger.get('modules',[]):
     for t in m.get('tasks',[]):
         if t.get('task_id'): all_tasks.add(t['task_id'])
+# Also check for already-created TASK-AUTO tasks (to prevent duplicates)
+auto_existing = set()
+for m in ledger.get('modules',[]):
+    for t in m.get('tasks',[]):
+        tid = t.get('task_id','')
+        if tid.startswith('TASK-AUTO-'):
+            auto_existing.add(tid)
 ci = docs / 'docs/contracts/contract-index.md'
 if ci.exists():
+    gaps = []
     for line in ci.read_text().split('\n'):
-        if '| Ready |' in line and 'TASK-' in line:
-            match = re.search(r'TASK-[A-Z0-9-]+', line)
-            if match and match.group(0) not in all_tasks:
-                parts = [p.strip() for p in line.split('|')]
-                domain = parts[1].strip()[:80] if len(parts) > 1 else 'unknown'
-                repos = parts[5].strip()[:80] if len(parts) > 5 else 'livemask-backend'
-                print(f'{domain}|{repos}|{match.group(0)}')
-                break
-" 2>/dev/null)
-      if [[ -n "${gap_info}" ]]; then
-        local gap_domain gap_repo gap_task
-        gap_domain="${gap_info%%|*}"; gap_info="${gap_info#*|}"
-        gap_repo="${gap_info%%|*}"; gap_task="${gap_info##*|}"
-        record_finding "pm" "warning" "" "PM-3" \
-          "Ready contract gap requires Codex decomposition: ${gap_domain}; parent=${gap_task}; repos=${gap_repo}" \
-          "Codex must create canonical TASK IDs, valid ledger repos, GitHub issue links, and dispatch packets" \
-          ""
-        WARN "PM-3 found Ready contract gap (${gap_domain}) but did not auto-create TASK-AUTO artifacts"
-      fi
+        if '| Ready |' not in line or 'TASK-' not in line: continue
+        for match in re.finditer(r'TASK-[A-Z0-9-]+', line):
+            if match.group(0) in all_tasks: continue
+            parts = [p.strip() for p in line.split('|')]
+            domain = parts[1][:40] if len(parts) > 1 else 'unknown'
+            repos_raw = parts[5].strip()[:80] if len(parts) > 5 else 'livemask-backend'
+            repo = repos_raw.split('/')[0].strip()
+            # Check dedup: don't create if TASK-AUTO already exists for this domain
+            auto_tid = f\"TASK-AUTO-{domain.lower().replace(' ','-')[:30]}\"
+            if auto_tid in auto_existing: continue
+            gaps.append(f'{domain}|{repo}|{repos_raw}|{auto_tid}')
+    # Only report gaps — auto_create_task() handles creation
+    if gaps: print(f'GAPS_FOUND|{len(gaps)}')
+    for g in gaps[:3]: print(g)
+" 2>/dev/null | while IFS='|' read -r label rest; do
+        if [[ "${label}" == "GAPS_FOUND" ]]; then
+          ACT "PM-3: ${rest} Ready contract gaps found — creating implementation tasks via task branch flow"
+          continue
+        fi
+        # Format: domain|repo|repos_raw|auto_tid
+        local gap_domain="${label}"
+        local gap_repo="${rest}"
+        read -r gap_repos gap_tid <<< "$(echo "${rest}" | cut -d'|' -f2-)"
+        # Use proper auto_create_task (task branch → dev merge → push)
+        auto_create_task "pm" "PM-3" "Implement ${gap_domain} (Ready contract, no active implementation)" "P1" "${gap_repo}" \
+          "Ready contract '${gap_domain}' lacks active implementation task. Auto-decomposed by role-engine PM-3 via task branch flow. Not a direct docs: tasks commit."
+      done
     else
       ASK "→ ${blocked} tasks are blocked — the queue IS the blocker list. Resolve root blockers to unblock candidates."
       NEXT "Action: run PM-1 blocker analysis for each blocked task"
