@@ -22,9 +22,11 @@ source "${SCRIPT_DIR}/lib/ledger-intelligence.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/review-gate.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/monitor-learn.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/executor-guard.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/event-bus.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
 memory_init 2>/dev/null || true
 monitor_init 2>/dev/null || true
+event_init 2>/dev/null || true
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
 DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
