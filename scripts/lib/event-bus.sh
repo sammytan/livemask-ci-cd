@@ -110,6 +110,7 @@ if p.exists(): d=json.loads(p.read_text()); d['phase']='complete'; d['completed_
 event_react_pm_task_accepted() {
   local tid="${1:-}"
   echo "  [PM] Task accepted: ${tid}"
+  source "${CI_CD_DIR}/scripts/lib/lark-notify.sh" 2>/dev/null && lark_notify_task_accepted "${tid}" "${repo}" "P1" 2>/dev/null || true
   # FIX 2: Auto-accept with rollback on failure
   source "${CI_CD_DIR}/scripts/lib/executor-guard.sh" 2>/dev/null || true
 
@@ -195,6 +196,7 @@ event_react_tech_commit_check() {
 event_react_leader_review() {
   local tid="${1:-}"
   echo "  [Leader] Auto-review for: ${tid}"
+  source "${CI_CD_DIR}/scripts/lib/lark-notify.sh" 2>/dev/null && lark_notify_review_result "${tid}" "approved" "Auto-reviewed" 2>/dev/null || true
   source "${CI_CD_DIR}/scripts/lib/executor-guard.sh" 2>/dev/null || true
   # FIX 4: Use executor_auto_review which handles docs-only changes + atomicity
   executor_auto_review "${tid}" 2>/dev/null || echo "  [Leader] Auto-review skipped"
@@ -205,6 +207,7 @@ event_react_leader_review() {
 event_react_qa_verify() {
   local tid="${1:-}"
   echo "  [QA] Auto-verify for: ${tid}"
+  source "${CI_CD_DIR}/scripts/lib/lark-notify.sh" 2>/dev/null && lark_notify_qa_result "${tid}" "${qa_ok:-false}" "" 2>/dev/null || true
   local review_file="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
   if [[ -f "${review_file}" && -f "${CI_CD_DIR}/scripts/lib/review-gate.sh" ]]; then
     source "${CI_CD_DIR}/scripts/lib/review-gate.sh" 2>/dev/null || true
