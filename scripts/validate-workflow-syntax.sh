@@ -32,7 +32,7 @@ require "yaml"
 workflow_contracts = {
   ".github/workflows/staging-smoke.yml" => {
     "name" => "Staging Smoke",
-    "on" => ["push", "workflow_dispatch", "repository_dispatch"],
+    "on" => ["workflow_dispatch"],
     "jobs" => ["smoke", "notify-lark"],
   },
   ".github/workflows/dev-runtime-deploy.yml" => {
