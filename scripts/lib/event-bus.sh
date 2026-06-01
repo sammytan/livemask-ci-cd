@@ -151,73 +151,34 @@ event_react_tech_commit_check() {
 event_react_leader_review() {
   local tid="${1:-}"
   echo "  [Leader] Auto-review for: ${tid}"
-  # FIX BREAKPOINT 4: Auto-run leader review (not just print prompt)
-  if [[ -f "${CI_CD_DIR}/scripts/lib/review-gate.sh" ]]; then
-    source "${CI_CD_DIR}/scripts/lib/review-gate.sh" 2>/dev/null || true
-    # Read review contract and auto-review the diff
-    local review_file="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
-    if [[ -f "${review_file}" ]]; then
-      echo "  [Leader] Review contract exists — analyzing diff..."
-      python3 -c "
-import json,pathlib,subprocess
-review_file = pathlib.Path('${review_file}')
-contract = json.loads(review_file.read_text())
-last_round = contract['rounds'][-1]
-executor_data = last_round.get('executor', {})
-diff_preview = executor_data.get('diff_preview', '')
-commit_msg = executor_data.get('commit', '')
-# Quick auto-review: check for obvious issues
-issues = []
-if not diff_preview: issues.append('No diff available')
-if 'TODO' in diff_preview or 'FIXME' in diff_preview: issues.append('Contains TODO/FIXME')
-if 'fmt.Println' in diff_preview or 'console.log' in diff_preview: issues.append('Debug output found')
-if len(commit_msg) < 20: issues.append('Short commit message')
-verdict = 'approved' if not issues else 'changes_requested'
-reason = '; '.join(issues) if issues else 'Auto-review passed: no obvious issues detected'
-print(f'  [Leader] Auto-review verdict: {verdict.upper()}')
-if verdict == 'approved':
-    # Auto-approve if clean
-    last_round['leader'] = {'reviewed_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'verdict': 'approved', 'notes': f'Auto-reviewed by event-bus: {reason}'}
-    contract['state'] = 'approved'
-    contract['next_required_actor'] = 'qa'
-    review_file.write_text(json.dumps(contract, indent=2, ensure_ascii=False))
-    print(f'  [Leader] Auto-approved → triggering QA')
-    # Trigger QA immediately
-    import subprocess
-    subprocess.run(['bash', '${CI_CD_DIR}/scripts/claude-loop-role-engine.sh', 'qa'], timeout=120)
-else:
-    last_round['leader'] = {'reviewed_at': '$(date -u +%Y-%m-%dT%H:%M:%SZ)', 'verdict': 'changes_requested', 'reason': reason}
-    contract['state'] = 'changes_requested'
-    contract['next_required_actor'] = 'executor'
-    review_file.write_text(json.dumps(contract, indent=2, ensure_ascii=False))
-    print(f'  [Leader] Changes requested: {reason}')
-" 2>/dev/null || echo "  [Leader] Auto-review skipped"
-    fi
-  fi
+  source "${CI_CD_DIR}/scripts/lib/executor-guard.sh" 2>/dev/null || true
+  # FIX 4: Use executor_auto_review which handles docs-only changes + atomicity
+  executor_auto_review "${tid}" 2>/dev/null || echo "  [Leader] Auto-review skipped"
+  # FIX 9: Push active alert
+  executor_push_alert "review" "Leader auto-reviewed ${tid}" 2>/dev/null || true
 }
 
 event_react_qa_verify() {
   local tid="${1:-}"
   echo "  [QA] Auto-verify for: ${tid}"
-  # FIX BREAKPOINT 5: Auto-run QA verification (not just print prompt)
   local review_file="${DOCS_DIR}/docs/development/review-contracts/${tid}-review.json"
   if [[ -f "${review_file}" && -f "${CI_CD_DIR}/scripts/lib/review-gate.sh" ]]; then
     source "${CI_CD_DIR}/scripts/lib/review-gate.sh" 2>/dev/null || true
-    # Check if leader already approved
+    source "${CI_CD_DIR}/scripts/lib/executor-guard.sh" 2>/dev/null || true
     local leader_ok; leader_ok=$(python3 -c "import json; d=json.load(open('${review_file}')); last=d['rounds'][-1]; print('true' if last.get('leader',{}).get('verdict')=='approved' else 'false')" 2>/dev/null || echo "false")
     if [[ "${leader_ok}" == "true" ]]; then
+      # FIX 10: Only run QA if leader approved (atomic gate)
       echo "  [QA] Leader approved — running verify..."
       qa_verify "${tid}" 2>/dev/null || true
-      # Check result
       local qa_ok; qa_ok=$(python3 -c "import json; d=json.load(open('${review_file}')); last=d['rounds'][-1]; print('true' if last.get('qa',{}).get('passed') else 'false')" 2>/dev/null || echo "false")
       if [[ "${qa_ok}" == "true" ]]; then
         echo "  [QA] QA PASSED — auto-approving merge"
         leader_approve "${tid}" 2>/dev/null || true
       else
-        echo "  [QA] QA FAILED — executor needs to fix"
+        # FIX 5: Enforce retry limit
+        executor_check_qa_retries "${tid}" 2>/dev/null || true
+        executor_push_alert "qa_failed" "${tid} QA failed" 2>/dev/null || true
       fi
-    else
-      echo "  [QA] Waiting for leader review first"
     fi
   fi
 }
