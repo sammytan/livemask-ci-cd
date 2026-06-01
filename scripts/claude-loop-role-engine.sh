@@ -3009,6 +3009,18 @@ ci = docs / 'docs/contracts/contract-index.md'
 now = datetime.datetime.now(datetime.timezone.utc)
 created = 0
 if ci.exists():
+
+        # Validate contract format: check column count consistency
+        col_counts = set()
+        for line in ci.read_text().split('"'"'
+'"'"'):
+            if '"'"'| Ready |'"'"' in line or '"'"'| Stable |'"'"' in line:
+                parts = [p.strip() for p in line.split('"'"'|'"'"')]
+                col_counts.add(len(parts))
+        if len(col_counts) > 1:
+            print(f'"'"'  [PM-3] WARNING: contract-index.md has inconsistent column counts: {col_counts} — may cause mapping errors'"'"')
+            # Default to using max columns
+            pass
     for line in ci.read_text().split('\n'):
         if '| Ready |' not in line: continue
         parts = [p.strip() for p in line.split('|')]
