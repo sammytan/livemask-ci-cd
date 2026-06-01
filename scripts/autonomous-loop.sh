@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# autonomous-loop.sh — Continuous autonomous development daemon.
-# Never stops. Runs the full cycle: detect → create → accept → implement → review → QA → merge → repeat.
-# Uses PM lease + heartbeat to ensure only one instance runs.
+# autonomous-loop.sh — Continuous autonomous development daemon v2.
+# Integrates adapter-lib.sh shared knowledge + GitHub issues/comments.
+# Every sleep is labeled with WHY. Never stops unless explicitly killed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,8 +14,18 @@ PM_LEASE_FILE="${ROLE_CACHE_DIR}/pm-lease.json"
 LOOP_PID_FILE="${ROLE_CACHE_DIR}/autonomous-loop.pid"
 LOOP_LOG="/tmp/claude/autonomous-loop.log"
 CYCLE_COUNT=0
-MAX_CYCLES=${MAX_CYCLES:-1000}
-SLEEP_BETWEEN=${SLEEP_BETWEEN:-60}  # Sleep between cycles when idle
+CONSECUTIVE_BLOCKS=0
+MAX_CONSECUTIVE_BLOCKS=6  # Stop creating tasks after 6 consecutive blocks
+SLEEP_IDLE=60    # Sleep when no work
+SLEEP_BUSY=30    # Sleep when agent is busy
+SLEEP_CYCLE=5    # Minimum sleep between cycles
+SLEEP_RETRY=60   # Sleep after failure before retry
+SLEEP_CRASH=60   # Sleep after crash recovery
+SLEEP_DEADLOOP=120 # Sleep after dead-loop detection
+MAX_ATTEMPTS=3   # Max attempts per task before skip
+WAIT_CHECK=30    # Check interval while waiting for model
+WAIT_MAX=120     # Max checks before timeout (60 min)
+ADAPTER_LIB="${CI_CD_DIR}/scripts/event-adapters/lib/adapter-lib.sh"
 
 source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/event-bus.sh" 2>/dev/null || true
@@ -24,178 +34,236 @@ source "${SCRIPT_DIR}/lib/review-gate.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/impl-assist.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/memory-fast.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/monitor-learn.sh" 2>/dev/null || true
+source "${ADAPTER_LIB}" 2>/dev/null || true
 event_init 2>/dev/null || true
 monitor_init 2>/dev/null || true
 memory_init 2>/dev/null || true
 mkdir -p /tmp/claude "$(dirname "${LOOP_PID_FILE}")"
 
-# ── Write PID ────────────────────────────────────────────────────────────
 echo $$ > "${LOOP_PID_FILE}"
 
-# ── Cleanup on exit ──────────────────────────────────────────────────────
 cleanup_loop() {
-  echo "[$(date -u +%H:%M:%S)] Autonomous loop exiting after ${CYCLE_COUNT} cycles" | tee -a "${LOOP_LOG}"
+  echo "[$(date -u +%H:%M:%S)] Daemon exiting after ${CYCLE_COUNT} cycles" | tee -a "${LOOP_LOG}"
   rm -f "${LOOP_PID_FILE}"
   executor_stop_heartbeat 2>/dev/null || true
 }
 trap cleanup_loop EXIT
 
-# ── Log helper ────────────────────────────────────────────────────────────
 log_cycle() { echo "[$(date -u +%H:%M:%S)] CYCLE#${CYCLE_COUNT} $*" | tee -a "${LOOP_LOG}"; }
 
-# ── Main autonomous loop ─────────────────────────────────────────────────
-log_cycle "AUTONOMOUS DEVELOPMENT DAEMON STARTED (PID: $$, MAX: ${MAX_CYCLES})"
+# ── GitHub status update ──────────────────────────────────────────────────
+post_github_status() {
+  local context="$1" message="$2"
+  # Post to #68 (control channel) for cross-role visibility
+  if command -v gh &>/dev/null && executor_gh_available 2>/dev/null; then
+    gh issue comment 68 --repo MyAiDevs/livemask-docs \
+      --body "<!-- autonomous-loop --> [$(date -u +%H:%M:%SZ)] ${context}: ${message}" 2>/dev/null || true
+  fi
+}
 
-while [[ "${CYCLE_COUNT}" -lt "${MAX_CYCLES}" ]]; do
+# ── Adapter knowledge sync ────────────────────────────────────────────────
+sync_knowledge() {
+  # Search recent knowledge for the current task context
+  if [[ -n "${1:-}" ]]; then
+    bash "${ADAPTER_LIB}" knowledge-search "${1}" 8 2>/dev/null | head -5 >> "${LOOP_LOG}" || true
+  fi
+  # Query PM status
+  bash "${ADAPTER_LIB}" pm-status 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(f'PM: {d.get(\"pm_lease\",\"?\")}')" 2>/dev/null >> "${LOOP_LOG}" || true
+}
+
+# ── Main autonomous loop ─────────────────────────────────────────────────
+log_cycle "DAEMON STARTED (PID: $$, adapter=$(test -f "${ADAPTER_LIB}" && echo OK || echo MISSING))"
+
+while [[ "${CYCLE_COUNT}" -lt 1000 ]]; do
   CYCLE_COUNT=$((CYCLE_COUNT + 1))
 
-  # Prevent rapid cycling — small sleep between iterations
-  sleep 2
+  # ── SLEEP: Prevent rapid CPU burn between every cycle ──────────────
+  sleep "${SLEEP_CYCLE}"
 
   # ── Phase 0: System health ──────────────────────────────────────────
   executor_repair_agent_state 2>/dev/null || true
   executor_repair_ledger 2>/dev/null || true
   executor_cleanup_alerts 2>/dev/null || true
 
-  # ── Phase 1: Check for work ─────────────────────────────────────────
+  # ── Phase 1: Check work availability ────────────────────────────────
   queue_count=$(python3 "${DOCS_DIR}/scripts/plan-next-tasks.py" --format json 2>/dev/null | python3 -c "import json,sys;print(json.load(sys.stdin).get('summary',{}).get('candidate_count',0))" 2>/dev/null || echo "0")
   pkt_count=$(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+  log_cycle "Queue: ${queue_count} candidates, ${pkt_count} packets, ${CONSECUTIVE_BLOCKS} consecutive blocks"
 
-  log_cycle "Queue: ${queue_count} candidates, ${pkt_count} dispatch packets"
+  # ── ALL-TASKS-BLOCKED DETECTION ─────────────────────────────────────
+  if [[ "${CONSECUTIVE_BLOCKS}" -ge "${MAX_CONSECUTIVE_BLOCKS}" ]]; then
+    log_cycle "CRITICAL: ${CONSECUTIVE_BLOCKS} consecutive blocked tasks — stopping task creation"
+    post_github_status "BLOCKED_CASCADE" "${CONSECUTIVE_BLOCKS} consecutive tasks blocked. Human review needed."
+    # Write to adapter knowledge base
+    bash "${ADAPTER_LIB}" memory-add "autonomous-loop" "" "livemask-ci-cd" \
+      "ALL_TASKS_BLOCKED: ${CONSECUTIVE_BLOCKS} consecutive blocks. Daemon paused task creation." \
+      "${LOOP_LOG}" 2>/dev/null || true
+    # SLEEP: Long sleep waiting for human intervention
+    log_cycle "Sleeping 300s — waiting for human to unblock tasks"
+    sleep 300
+    CONSECUTIVE_BLOCKS=0  # Reset to try again
+    continue
+  fi
 
-  # ── Case A: No work → create tasks or idle ──────────────────────────
+  # ── Case A: No work → create tasks ──────────────────────────────────
   if [[ "${queue_count}" == "0" && "${pkt_count}" == "0" ]]; then
     log_cycle "No work — running role engine to create tasks"
-    bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" all 2>&1 | grep -E "AUTO|dispatch|queue|complete" | tail -5 >> "${LOOP_LOG}" || true
+    bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" all 2>&1 | tail -10 >> "${LOOP_LOG}" || true
 
-    # Re-check
+    # Re-check after role engine
     pkt_count=$(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | wc -l | tr -d ' ' || echo "0")
     if [[ "${pkt_count}" == "0" ]]; then
-      log_cycle "Still no work — sleeping ${SLEEP_BETWEEN}s"
-      sleep "${SLEEP_BETWEEN}"
+      log_cycle "Still no work — syncing knowledge base"
+      sync_knowledge "task creation gap" 2>/dev/null || true
+      # Post to GitHub for visibility
+      post_github_status "QUEUE_EMPTY" "No dispatchable tasks. Role engine found no gaps." 2>/dev/null || true
+      # SLEEP: No work available, wait before re-checking
+      log_cycle "Sleeping ${SLEEP_IDLE}s — waiting for new tasks to appear"
+      sleep "${SLEEP_IDLE}"
       continue
     fi
   fi
 
-  # ── Case B: Work exists but agent is already busy ───────────────────
+  # ── Case B: Agent busy → monitor ────────────────────────────────────
   agent_phase=$(python3 -c "import json;print(json.load(open('${AGENT_STATE}')).get('phase','?'))" 2>/dev/null || echo "?")
   if [[ "${agent_phase}" != "idle" ]]; then
     log_cycle "Agent busy (phase=${agent_phase}) — checking liveness"
     if ! executor_check_liveness 2>/dev/null; then
-      log_cycle "Agent appears DEAD — running crash recovery"
-      executor_crash_recovery 2>&1 | tail -3 >> "${LOOP_LOG}" || true
+      log_cycle "Agent DEAD — running crash recovery"
+      executor_crash_recovery 2>&1 | tail -5 >> "${LOOP_LOG}" || true
+      # Sync with adapter
+      bash "${ADAPTER_LIB}" memory-add "autonomous-loop" "" "livemask-ci-cd" \
+        "Crash recovery triggered: agent was ${agent_phase}, liveness check failed" \
+        "${LOOP_LOG}" 2>/dev/null || true
+      # SLEEP: Cool down after crash recovery before re-accepting
+      log_cycle "Sleeping ${SLEEP_CRASH}s — cooldown after crash recovery"
+      sleep "${SLEEP_CRASH}"
+      continue
     else
-      log_cycle "Agent alive — waiting ${SLEEP_BETWEEN}s"
-      sleep "${SLEEP_BETWEEN}"
+      log_cycle "Agent alive — waiting"
+      # SLEEP: Agent is doing work, wait before checking again
+      sleep "${SLEEP_BUSY}"
       continue
     fi
   fi
 
-  # ── Case C: Work exists + agent idle → ACCEPT AND IMPLEMENT ─────────
+  # ── Case C: Work exists + agent idle → ACCEPT ───────────────────────
   top_pkt=$(ls "${DOCS_DIR}/docs/development/dispatch-packets"/TASK-*.json 2>/dev/null | head -1)
-  [[ -z "${top_pkt}" ]] && { log_cycle "No dispatch packet found"; sleep "${SLEEP_BETWEEN}"; continue; }
+  [[ -z "${top_pkt}" ]] && { log_cycle "No dispatch packet"; sleep "${SLEEP_IDLE}"; continue; }
 
   tid=$(python3 -c "import json;print(json.load(open('${top_pkt}'))['task_id'])" 2>/dev/null || echo "")
-  [[ -z "${tid}" ]] && { log_cycle "Could not parse task ID"; continue; }
+  [[ -z "${tid}" ]] && { log_cycle "Bad packet"; sleep "${SLEEP_RETRY}"; continue; }
 
-  # ── DEAD-LOOP DETECTION: Track task attempt count ──────────────────
+  # ── DEAD-LOOP DETECTION ─────────────────────────────────────────────
   ATTEMPT_FILE="${ROLE_CACHE_DIR}/task-attempts/${tid}.count"
   mkdir -p "$(dirname "${ATTEMPT_FILE}")" 2>/dev/null
   attempt_count=$(cat "${ATTEMPT_FILE}" 2>/dev/null || echo "0")
   attempt_count=$((attempt_count + 1))
   echo "${attempt_count}" > "${ATTEMPT_FILE}"
 
-  if [[ "${attempt_count}" -gt 3 ]]; then
-    log_cycle "DEAD-LOOP DETECTED: ${tid} attempted ${attempt_count} times — SKIPPING"
-    # Mark task as blocked in ledger
+  if [[ "${attempt_count}" -gt "${MAX_ATTEMPTS}" ]]; then
+    log_cycle "DEAD-LOOP: ${tid} failed ${attempt_count} times — SKIPPING"
+    CONSECUTIVE_BLOCKS=$((CONSECUTIVE_BLOCKS + 1))
+    # Mark blocked in ledger
     python3 -c "
 import json,pathlib
-ledger=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
-for m in ledger.get('modules',[]):
-    for t in m.get('tasks',[]):
-        if t.get('task_id')=='${tid}': t['status']='blocked'; t['notes']=t.get('notes','')+' [BLOCKED: dead-loop detected after ${attempt_count} failed attempts]'
-pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json').write_text(json.dumps(ledger,indent=2,ensure_ascii=False))
+l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'))
+for m in l['modules']:
+    for t in m['tasks']:
+        if t.get('task_id')=='${tid}': t['status']='blocked'; t['notes']=t.get('notes','')+' [BLOCKED: dead-loop after ${attempt_count} attempts]'
+pathlib.Path('${DOCS_DIR}/docs/development/task-state-ledger.json').write_text(json.dumps(l,indent=2,ensure_ascii=False))
 " 2>/dev/null || true
-    # Remove dispatch packet so it won't be re-accepted
     rm -f "${top_pkt}" 2>/dev/null || true
-    # Alert
-    executor_push_alert "dead_loop" "${tid} blocked after ${attempt_count} failed implementation attempts" 2>/dev/null || true
-    sleep "${SLEEP_BETWEEN}"
+    executor_push_alert "dead_loop" "${tid} blocked (${attempt_count} attempts)" 2>/dev/null || true
+    post_github_status "DEAD_LOOP" "${tid} blocked after ${attempt_count} failed implementation attempts" 2>/dev/null || true
+    bash "${ADAPTER_LIB}" memory-add "autonomous-loop" "${tid}" "livemask-ci-cd" \
+      "DEAD-LOOP: ${tid} blocked after ${attempt_count} failed attempts" \
+      "${LOOP_LOG}" 2>/dev/null || true
+    # SLEEP: Long pause after detecting a dead loop
+    log_cycle "Sleeping ${SLEEP_DEADLOOP}s — dead-loop cooldown"
+    sleep "${SLEEP_DEADLOOP}"
     continue
   fi
 
-  log_cycle "ACCEPTING: ${tid} (attempt ${attempt_count}/3)"
+  log_cycle "ACCEPTING: ${tid} (attempt ${attempt_count}/${MAX_ATTEMPTS})"
 
-  # Step 1: Accept task
+  # ── ACCEPT TASK ─────────────────────────────────────────────────────
   if ! event_emit "task_accepted" "${tid}" '{"source":"autonomous-loop"}' 2>/dev/null; then
-    log_cycle "Failed to accept ${tid} — retrying later"
-    sleep "${SLEEP_BETWEEN}"
+    log_cycle "Accept failed — retrying after sleep"
+    sleep "${SLEEP_RETRY}"
     continue
   fi
 
-  # Step 2: Generate implementation plan
-  log_cycle "Generating implementation plan for ${tid}"
+  # ── Generate implementation plan ────────────────────────────────────
+  log_cycle "Generating implementation plan"
   impl_generate_plan "${tid}" 2>&1 | head -20 >> "${LOOP_LOG}" || true
 
-  # Step 3: Get repo context
+  # Get repo context
   repo=$(python3 -c "import json;l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'));[print(t['repo']) for m in l['modules'] for t in m['tasks'] if t['task_id']=='${tid}']" 2>/dev/null || echo "")
   [[ -n "${repo}" ]] && impl_repo_context "${repo}" 2>&1 | head -10 >> "${LOOP_LOG}" || true
 
-  # Step 4: Implement code (THE MODEL MUST WRITE CODE HERE)
-  log_cycle "IMPLEMENTATION REQUIRED: ${tid} in ${repo}"
-  log_cycle "Task doc: docs/development/tasks/${tid}.md"
-  log_cycle "The model (Claude) must now write the implementation code."
-  log_cycle "After implementation, the model should:"
-  log_cycle "  1. Write code in ${LIVEMASK_ROOT}/${repo}"
-  log_cycle "  2. Run: source ${CI_CD_DIR}/scripts/lib/event-bus.sh && executor_notify commit ${tid}"
-  log_cycle "  3. Run: source ${CI_CD_DIR}/scripts/lib/review-gate.sh && executor_submit_review ${tid}"
-  log_cycle "  4. Run: qa_verify ${tid}"
-  log_cycle "  5. Run: leader_approve ${tid}"
-  log_cycle "  6. Run: executor_notify complete ${tid}"
+  # ── Sync knowledge base ────────────────────────────────────────────
+  sync_knowledge "${tid}" 2>/dev/null || true
 
-  # The autonomous loop pauses here — the MODEL does the implementation.
-  # After implementation is committed, the event chain takes over:
-  #   code_committed → verify
-  #   review_submitted → leader auto-review
-  #   qa_passed → leader_approve
-  #   leader_approved → auto-merge + task_completed
-  log_cycle "Waiting for model to implement... (monitoring heartbeat)"
+  # ── Post GitHub status ──────────────────────────────────────────────
+  post_github_status "TASK_ACCEPTED" "${tid} in ${repo} (attempt ${attempt_count}/${MAX_ATTEMPTS})" 2>/dev/null || true
 
-  # Monitor: wait for task_completed event, checking every 30s
+  # ── Model implementation instructions ───────────────────────────────
+  log_cycle "WAITING FOR MODEL: ${tid} in ${repo}"
+  log_cycle "Model must: 1) write code 2) executor_notify commit ${tid} 3) executor_submit_review ${tid}"
+
+  # ── Monitor loop: wait for model ────────────────────────────────────
   wait_count=0
-  while [[ "${wait_count}" -lt 120 ]]; do  # Max 60 min wait
-    # Check if task is completed
+  while [[ "${wait_count}" -lt "${WAIT_MAX}" ]]; do
     task_status=$(python3 -c "import json;l=json.load(open('${DOCS_DIR}/docs/development/task-state-ledger.json'));[print(t['status']) for m in l['modules'] for t in m['tasks'] if t['task_id']=='${tid}']" 2>/dev/null || echo "unknown")
 
-    if [[ "${task_status}" == "completed" || "${task_status}" == "completed_with_skip" ]]; then
-      log_cycle "TASK COMPLETED: ${tid} (status=${task_status})"
-      event_emit "task_completed" "${tid}" '{"source":"autonomous-loop","auto_detected":true}' 2>/dev/null || true
-      break
-    fi
+    case "${task_status}" in
+      completed|completed_with_skip)
+        log_cycle "TASK COMPLETED: ${tid}"
+        event_emit "task_completed" "${tid}" '{"source":"autonomous-loop"}' 2>/dev/null || true
+        CONSECUTIVE_BLOCKS=0  # Reset block counter on success
+        # Write success to adapter memory
+        bash "${ADAPTER_LIB}" memory-add "autonomous-loop" "${tid}" "${repo}" \
+          "Task completed successfully after ${attempt_count} attempt(s)" \
+          "${LOOP_LOG}" 2>/dev/null || true
+        post_github_status "TASK_COMPLETED" "${tid} completed successfully" 2>/dev/null || true
+        break
+        ;;
+      blocked)
+        log_cycle "Task ${tid} was blocked externally — moving on"
+        CONSECUTIVE_BLOCKS=$((CONSECUTIVE_BLOCKS + 1))
+        break
+        ;;
+    esac
 
-    # Check liveness
+    # Check executor liveness
     if ! executor_check_liveness 2>/dev/null; then
-      log_cycle "WARNING: Executor appears dead — recovering"
+      log_cycle "Executor appears DEAD — crash recovery"
       executor_crash_recovery 2>&1 | tail -3 >> "${LOOP_LOG}" || true
       break
     fi
 
-    # Touch heartbeat to show the loop is alive
     executor_touch_heartbeat 2>/dev/null || true
-
     wait_count=$((wait_count + 1))
-    sleep 30
+    # SLEEP: Wait for model to implement, checking periodically
+    sleep "${WAIT_CHECK}"
   done
 
-  if [[ "${wait_count}" -ge 120 ]]; then
+  if [[ "${wait_count}" -ge "${WAIT_MAX}" ]]; then
     log_cycle "TIMEOUT: ${tid} not completed within 60 min — releasing"
     executor_stop_heartbeat 2>/dev/null || true
     executor_release_task_lease "${tid}" 2>/dev/null || true
+    CONSECUTIVE_BLOCKS=$((CONSECUTIVE_BLOCKS + 1))
+    post_github_status "IMPLEMENTATION_TIMEOUT" "${tid} timed out after 60min" 2>/dev/null || true
   fi
 
-  log_cycle "Cycle ${CYCLE_COUNT} complete — starting next cycle"
-  log_cycle "Sleeping ${SLEEP_BETWEEN}s between cycles"
-  sleep "${SLEEP_BETWEEN}"
+  # ── End of cycle ────────────────────────────────────────────────────
+  log_cycle "Cycle complete"
+  # Reset agent for next cycle
+  python3 -c "import json,pathlib; d=json.load(open('${AGENT_STATE}')); d['phase']='idle'; d['current_task']={}; d['updated_at']='$(date -u +%Y-%m-%dT%H:%M:%SZ)'; pathlib.Path('${AGENT_STATE}').write_text(json.dumps(d,indent=2))" 2>/dev/null || true
+
+  # SLEEP: Pause between full cycles
+  log_cycle "Sleeping ${SLEEP_CYCLE}s between cycles"
 done
 
-log_cycle "MAX_CYCLES (${MAX_CYCLES}) reached — exiting"
+log_cycle "MAX_CYCLES reached — exiting"
