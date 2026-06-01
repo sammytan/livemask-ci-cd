@@ -13,7 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/lib/logging.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/lark-card.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/health-check.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/executor-guard.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/memory-fast.sh" 2>/dev/null || true
 log_setup "startup" 2>/dev/null || true
+memory_init 2>/dev/null || true
 
 LIVEMASK_ROOT="/Users/sammytan/Developer/LiveMask"
 DOCS_DIR="${LIVEMASK_ROOT}/livemask-docs"
@@ -519,7 +522,26 @@ run_recovery() {
     warn "ci-cd/dev sync failed — running with local scripts, may miss updates"
   fi
 
-  # 1b. Check for orphaned task branches
+  # 1b. Crash recovery: if executor was mid-implementation and crashed,
+  # save uncommitted work to a recovery branch and reset agent state.
+  info "checking for executor crash recovery..."
+  if [[ -f "${AGENT_STATE}" ]]; then
+    local agent_phase; agent_phase=$(python3 -c "import json; print(json.load(open('${AGENT_STATE}')).get('phase',''))" 2>/dev/null || echo "")
+    if [[ "${agent_phase}" == "implementing" || "${agent_phase}" == "under_review" ]]; then
+      # Check PM lease staleness — if >30min, executor likely crashed
+      local lease_file="${HOME}/.claude/role-cache/pm-lease.json"
+      if [[ -f "${lease_file}" ]]; then
+        local lease_age; lease_age=$(python3 -c "import json,time; d=json.load(open('${lease_file}')); print(int((time.time()-d.get('started_at_epoch',0))/60))" 2>/dev/null || echo "0")
+        if [[ "${lease_age}" -gt 30 ]]; then
+          warn "executor appears to have crashed (phase=${agent_phase}, lease=${lease_age}min stale)"
+          source "${CI_CD_DIR}/scripts/lib/executor-guard.sh" 2>/dev/null || true
+          executor_crash_recovery 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+
+  # 1c. Check for orphaned task branches
   info "scanning for orphaned task branches..."
   local orphaned=0
   for repo_dir in "${LIVEMASK_ROOT}"/livemask-*/; do

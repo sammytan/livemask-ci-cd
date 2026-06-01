@@ -21,6 +21,7 @@ source "${SCRIPT_DIR}/lib/local-verify.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/ledger-intelligence.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/review-gate.sh" 2>/dev/null || true
 source "${SCRIPT_DIR}/lib/monitor-learn.sh" 2>/dev/null || true
+source "${SCRIPT_DIR}/lib/executor-guard.sh" 2>/dev/null || true
 log_setup "role-engine" 2>/dev/null || true
 memory_init 2>/dev/null || true
 monitor_init 2>/dev/null || true
@@ -2931,6 +2932,15 @@ for f in findings[:10]:
   echo "    memory_search <query>"
   echo "    memory_recent_decisions 24"
   echo "    memory_learned_patterns"
+  echo ""
+  echo "  Executor guard commands (crash recovery, lease renewal, verify gate):"
+  echo "    executor_full_guard <TASK-ID> <repo>  # Full guard cycle before/after commit"
+  echo "    executor_renew_lease <agent> <TASK>   # Renew PM lease (every 10min)"
+  echo "    executor_crash_recovery               # Recover from executor crash"
+  echo "    executor_pre_commit_verify <repo>     # Build/test/lint before commit"
+  echo "    executor_load_learnings [TASK-ID]     # Load learned patterns + tips"
+  echo "    executor_check_review_timeout         # Check for stale reviews"
+  echo "    executor_check_qa_retries [TASK-ID]   # Check QA retry limits"
   echo ""
   echo "  Monitor & self-learning commands:"
   echo "    monitor_watch                     # Observe executor activity (git, CI, tasks)"
