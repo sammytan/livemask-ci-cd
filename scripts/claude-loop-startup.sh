@@ -173,6 +173,7 @@ summary = {
         "Search existing helpers and task history before adding new abstractions.",
         "Cite linked issue and recent relevant comments in completion or blocked report.",
         "Run repo-native tests plus git diff --check; update docs/contracts when behavior changes.",
+        "Never run repo-native validation from the control-plane repo; cd into the target repo or use a subshell command.",
         "Before coding, verify local repo freshness, remote dev runtime freshness, and container logs.",
         "Unrelated runtime/container errors must become a finding and GitHub issue instead of being ignored.",
     ],
@@ -261,6 +262,122 @@ PY
   else
     echo "  code_freshness: skipped (no active task)"
   fi
+}
+
+repo_path_for() {
+  local repo="${1:-}"
+  case "${repo}" in
+    livemask-docs|livemask-ci-cd|livemask-backend|livemask-admin|livemask-website|livemask-app|livemask-nodeagent|livemask-job-service)
+      echo "${LIVEMASK_ROOT}/${repo}"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+repo_validation_commands() {
+  local repo="${1:-}"
+  case "${repo}" in
+    livemask-docs)
+      echo "bash scripts/check-docs.sh"
+      echo "git diff --check"
+      ;;
+    livemask-ci-cd)
+      echo "bash scripts/validate-workflow-syntax.sh"
+      echo "git diff --check"
+      ;;
+    livemask-backend)
+      echo "go test ./internal/node/... -count=1 -short"
+      echo "go test ./... -count=1"
+      echo "go build ./..."
+      ;;
+    livemask-admin)
+      echo "npm test"
+      echo "npm run build"
+      ;;
+    livemask-website)
+      echo "npm run build"
+      ;;
+    livemask-nodeagent)
+      echo "go test ./... -count=1"
+      echo "go build ./cmd/nodeagent"
+      ;;
+    livemask-job-service)
+      echo "go test ./... -count=1"
+      echo "go build ./cmd/job-service"
+      ;;
+    livemask-app)
+      echo "flutter analyze"
+      echo "flutter test"
+      ;;
+  esac
+}
+
+verify_active_repo_context() {
+  header "Step 0.75: Repo Context Guard"
+
+  if [[ "${CURRENT_TASK:-null}" == "null" || -z "${TARGET_REPO:-}" ]]; then
+    echo "  active_task:   none"
+    echo "  cwd:           ${STARTUP_START_DIR}"
+    return 0
+  fi
+
+  local expected_repo
+  expected_repo="$(repo_path_for "${TARGET_REPO}")"
+  if [[ -z "${expected_repo}" ]]; then
+    warn "unknown target_repo=${TARGET_REPO}; cannot verify repo cwd"
+    return 0
+  fi
+
+  echo "  task_id:       ${CURRENT_TASK}"
+  echo "  target_repo:   ${TARGET_REPO}"
+  echo "  expected_cwd:  ${expected_repo}"
+  echo "  current_cwd:   ${STARTUP_START_DIR}"
+
+  if [[ "${STARTUP_START_DIR}" == "${expected_repo}" ]]; then
+    ok "current directory matches target repo"
+  else
+    warn "current directory does not match target repo"
+    echo "  REQUIRED:      run repo-native commands through an explicit subshell:"
+    while IFS= read -r cmd; do
+      [[ -z "${cmd}" ]] && continue
+      echo "    (cd ${expected_repo} && ${cmd})"
+    done < <(repo_validation_commands "${TARGET_REPO}")
+  fi
+}
+
+print_target_repo_execution_plan() {
+  local task_id="$1" repo="$2"
+  local expected_repo
+  expected_repo="$(repo_path_for "${repo}")"
+
+  echo ""
+  echo -e "${BOLD}Repo execution guard:${RESET}"
+  echo "  task_id:      ${task_id}"
+  echo "  target_repo:  ${repo}"
+  echo "  repo_path:    ${expected_repo:-unknown}"
+  echo "  startup_cwd:  ${STARTUP_START_DIR}"
+
+  if [[ -z "${expected_repo}" ]]; then
+    warn "unknown repo '${repo}' — do not run implementation commands until target repo is resolved"
+    return 0
+  fi
+
+  if [[ "${STARTUP_START_DIR}" != "${expected_repo}" ]]; then
+    warn "Claude is not in target repo; all repo-native commands below are wrapped with cd"
+  else
+    ok "Claude is already in target repo"
+  fi
+
+  echo "  validation commands:"
+  while IFS= read -r cmd; do
+    [[ -z "${cmd}" ]] && continue
+    echo "    (cd ${expected_repo} && ${cmd})"
+  done < <(repo_validation_commands "${repo}")
+  echo "  forbidden:"
+  echo "    go test ./...    # unless current directory is ${expected_repo}"
+  echo "    npm test         # unless current directory is ${expected_repo}"
 }
 
 # ── Step 0: Read agent state ──────────────────────────────────────────────────
@@ -626,6 +743,8 @@ for m in modules[:5]:
   echo "  repo:      ${repo}"
   echo "  status:    ${status}"
   echo "  priority:  ${priority}"
+
+  print_target_repo_execution_plan "${task_id}" "${repo}"
 
   # Build the context bundle
   echo ""
@@ -1128,6 +1247,7 @@ decision_summary() {
 case "${MODE}" in
   --recovery)
     read_agent_state
+    verify_active_repo_context
     coordination_preflight
     if [[ "${COORDINATION_DECISION}" != "proceed" ]] && [[ "${AGENT_PHASE}" == "idle" || "${AGENT_PHASE}" == "idle_monitor" ]]; then
       verify_runtime_and_environment || true
@@ -1142,6 +1262,7 @@ case "${MODE}" in
     ;;
   --quick)
     read_agent_state
+    verify_active_repo_context
     coordination_preflight
     if [[ "${AGENT_PHASE}" != "idle" && "${AGENT_PHASE}" != "idle_monitor" ]]; then
       run_recovery
@@ -1158,6 +1279,7 @@ case "${MODE}" in
     ;;
   *)
     read_agent_state
+    verify_active_repo_context
     coordination_preflight
 
     # If in a non-idle phase, go straight to recovery
