@@ -93,6 +93,8 @@ state_path.write_text(json.dumps(state,indent=2,ensure_ascii=False))
       executor_release_task_lease "${task_id}" 2>/dev/null || true
       ;;
     task_completed)
+      # Trigger TaskReview audit immediately on task completion
+      bash "${CI_CD_DIR}/scripts/claude-loop-role-engine.sh" task-review 2>/dev/null &
       skill_update_config 2>/dev/null || true  # Sync rules after task completion
       event_react_pm_cycle_close "${task_id}" 2>/dev/null || true
       (event_react_product_progress "${task_id}" 2>/dev/null || true) &
